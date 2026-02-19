@@ -121,6 +121,21 @@ function Invoke-External([string]$Label, [string]$FilePath, [string[]]$Args) {
   }
 }
 
+function Resolve-VenvPythonPath([string]$RootDir) {
+  $candidates = @(
+    (Join-Path $RootDir ".venv\Scripts\python.exe"),
+    (Join-Path $RootDir ".venv\python.exe"),
+    (Join-Path $RootDir ".venv\bin\python.exe"),
+    (Join-Path $RootDir ".venv\bin\python")
+  )
+  foreach ($c in $candidates) {
+    if (Test-Path $c) {
+      return $c
+    }
+  }
+  return ""
+}
+
 function Try-PreinstallWheel([string]$PythonExe, [string]$PackageSpec) {
   Write-Host "Try preinstall wheel: $PackageSpec"
   & $PythonExe -m pip install --only-binary=:all: $PackageSpec
@@ -133,7 +148,7 @@ function Try-PreinstallWheel([string]$PythonExe, [string]$PackageSpec) {
   }
 }
 
-$VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
+$VenvPython = Resolve-VenvPythonPath $Root
 if (!(Test-Path $VenvPython)) {
   Write-Host "[1/6] Creating virtualenv..."
   $PyExe = Get-Command python -ErrorAction SilentlyContinue
@@ -141,16 +156,28 @@ if (!(Test-Path $VenvPython)) {
     Remove-Item -Recurse -Force "$Root\.venv" -ErrorAction SilentlyContinue
   }
   if ($PyExe) {
-    Write-Host "Using Python from PATH: $($PyExe.Source)"
-    Invoke-External "Create virtualenv via python" "python" @("-m", "venv", ".venv")
+    $HostPython = $PyExe.Source
+    Write-Host "Using Python from PATH: $HostPython"
+    Invoke-External "Create virtualenv via python -m venv" $HostPython @("-m", "venv", ".venv")
+    $VenvPython = Resolve-VenvPythonPath $Root
+    if (!(Test-Path $VenvPython)) {
+      Write-Warning "python -m venv did not produce an executable venv, trying virtualenv fallback..."
+      Invoke-External "Install virtualenv" $HostPython @("-m", "pip", "install", "--upgrade", "virtualenv")
+      Invoke-External "Create virtualenv via virtualenv" $HostPython @("-m", "virtualenv", ".venv")
+      $VenvPython = Resolve-VenvPythonPath $Root
+    }
   } else {
     Write-Error "Cannot find python in PATH. Ensure actions/setup-python ran successfully."
     exit 2
   }
 }
 
-$VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
+$VenvPython = Resolve-VenvPythonPath $Root
 if (!(Test-Path $VenvPython)) {
+  if (Test-Path "$Root\.venv") {
+    Write-Host "Dumping .venv layout for diagnostics:"
+    Get-ChildItem -Path "$Root\.venv" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 300 | ForEach-Object { $_.FullName }
+  }
   Write-Error "Cannot find .venv Python: $VenvPython"
   exit 2
 }
