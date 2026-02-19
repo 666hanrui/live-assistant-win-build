@@ -268,7 +268,6 @@ Invoke-External "Run PyInstaller (spec)" $VenvPython @(
   "--noconfirm", "--clean",
   "--distpath", (Join-Path $Root "dist"),
   "--workpath", (Join-Path $Root "build"),
-  "--specpath", $Root,
   "--log-level", "INFO",
   (Join-Path $Root "windows_exe.spec")
 )
@@ -285,7 +284,6 @@ if ([string]::IsNullOrWhiteSpace($BundleDir) -or !(Test-Path $BundleDir -PathTyp
     "--name", "AI_Live_Assistant",
     "--distpath", (Join-Path $Root "dist"),
     "--workpath", (Join-Path $Root "build"),
-    "--specpath", $Root,
     "--collect-all", "streamlit",
     "--collect-all", "altair",
     "--collect-all", "pydeck",
