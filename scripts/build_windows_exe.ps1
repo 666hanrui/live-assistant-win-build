@@ -148,15 +148,26 @@ function Try-PreinstallWheel([string]$PythonExe, [string]$PackageSpec) {
   }
 }
 
-$VenvPython = Resolve-VenvPythonPath $Root
-if (!(Test-Path $VenvPython)) {
-  Write-Host "[1/6] Creating virtualenv..."
-  $PyExe = Get-Command python -ErrorAction SilentlyContinue
-  if (Test-Path "$Root\.venv") {
-    Remove-Item -Recurse -Force "$Root\.venv" -ErrorAction SilentlyContinue
-  }
-  if ($PyExe) {
-    $HostPython = $PyExe.Source
+$PyExe = Get-Command python -ErrorAction SilentlyContinue
+if (-not $PyExe) {
+  Write-Error "Cannot find python in PATH. Ensure actions/setup-python ran successfully."
+  exit 2
+}
+$HostPython = $PyExe.Source
+$UseHostPythonDirectly = [string]::Equals($env:GITHUB_ACTIONS, "true", [System.StringComparison]::OrdinalIgnoreCase)
+
+$VenvPython = ""
+if ($UseHostPythonDirectly) {
+  Write-Host "[1/6] Using host Python directly in GitHub Actions..."
+  Write-Host "Using Python from PATH: $HostPython"
+  $VenvPython = $HostPython
+} else {
+  $VenvPython = Resolve-VenvPythonPath $Root
+  if (!(Test-Path $VenvPython)) {
+    Write-Host "[1/6] Creating virtualenv..."
+    if (Test-Path "$Root\.venv") {
+      Remove-Item -Recurse -Force "$Root\.venv" -ErrorAction SilentlyContinue
+    }
     Write-Host "Using Python from PATH: $HostPython"
     Invoke-External "Create virtualenv via python -m venv" $HostPython @("-m", "venv", ".venv")
     $VenvPython = Resolve-VenvPythonPath $Root
@@ -166,20 +177,15 @@ if (!(Test-Path $VenvPython)) {
       Invoke-External "Create virtualenv via virtualenv" $HostPython @("-m", "virtualenv", ".venv")
       $VenvPython = Resolve-VenvPythonPath $Root
     }
-  } else {
-    Write-Error "Cannot find python in PATH. Ensure actions/setup-python ran successfully."
+  }
+  if (!(Test-Path $VenvPython)) {
+    if (Test-Path "$Root\.venv") {
+      Write-Host "Dumping .venv layout for diagnostics:"
+      Get-ChildItem -Path "$Root\.venv" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 300 | ForEach-Object { $_.FullName }
+    }
+    Write-Error "Cannot find .venv Python: $VenvPython"
     exit 2
   }
-}
-
-$VenvPython = Resolve-VenvPythonPath $Root
-if (!(Test-Path $VenvPython)) {
-  if (Test-Path "$Root\.venv") {
-    Write-Host "Dumping .venv layout for diagnostics:"
-    Get-ChildItem -Path "$Root\.venv" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 300 | ForEach-Object { $_.FullName }
-  }
-  Write-Error "Cannot find .venv Python: $VenvPython"
-  exit 2
 }
 
 Write-Host "[2/6] Installing runtime dependencies..."
@@ -232,9 +238,14 @@ if ((-not $HasDashboard) -and (Test-Path $DashboardSource)) {
   Write-Host "Injected missing dashboard.py into bundle."
 }
 
-$VenvSitePackages = Join-Path $Root ".venv\Lib\site-packages"
+$VenvSitePackages = ""
+try {
+  $VenvSitePackages = (& $VenvPython -c "import site; p=[x for x in site.getsitepackages() if 'site-packages' in x.lower()]; print(p[0] if p else '')").Trim()
+} catch {
+  $VenvSitePackages = ""
+}
 $BundleSitePackages = Join-Path $BundleDir "_internal\site-packages"
-if (Test-Path $VenvSitePackages) {
+if ($VenvSitePackages -and (Test-Path $VenvSitePackages)) {
   New-Item -ItemType Directory -Force -Path $BundleSitePackages | Out-Null
   $fallbackPatterns = @(
     "streamlit",
@@ -253,7 +264,7 @@ if (Test-Path $VenvSitePackages) {
 }
 
 $StreamlitInit = Join-Path $BundleSitePackages "streamlit\__init__.py"
-if (!(Test-Path $StreamlitInit)) {
+if (($VenvSitePackages -and (Test-Path $VenvSitePackages)) -and !(Test-Path $StreamlitInit)) {
   throw "Bundled streamlit missing after fallback copy: $StreamlitInit"
 }
 
