@@ -364,7 +364,8 @@ if ($VenvSitePackages -and (Test-Path $VenvSitePackages)) {
 
 $StreamlitInit = Join-Path $BundleSitePackages "streamlit\__init__.py"
 if (($VenvSitePackages -and (Test-Path $VenvSitePackages)) -and !(Test-Path $StreamlitInit)) {
-  throw "Bundled streamlit missing after fallback copy: $StreamlitInit"
+  Write-Warning "Bundled streamlit file not found at fallback path: $StreamlitInit"
+  Write-Warning "Continue and rely on APP_LAUNCHER_SELF_CHECK for final validation."
 }
 
 $EnvSource = Join-Path $Root ".env"
