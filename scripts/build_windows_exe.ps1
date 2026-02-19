@@ -224,6 +224,11 @@ if (Test-Path $VenvSitePackages) {
   }
 }
 
+$StreamlitInit = Join-Path $BundleSitePackages "streamlit\__init__.py"
+if (!(Test-Path $StreamlitInit)) {
+  throw "Bundled streamlit missing after fallback copy: $StreamlitInit"
+}
+
 $EnvSource = Join-Path $Root ".env"
 if (!(Test-Path $EnvSource)) {
   $EnvSource = Join-Path $Root ".env.example"
@@ -369,6 +374,19 @@ Write-Host "[7/7] Validating bundled EXE can import streamlit..."
 $env:APP_LAUNCHER_SELF_CHECK = "1"
 try {
   Invoke-External "APP_LAUNCHER_SELF_CHECK" $ExePath @()
+} catch {
+  Write-Warning "APP_LAUNCHER_SELF_CHECK failed; dumping runtime logs if present."
+  $runtimeLogs = @(
+    (Join-Path $BundleDir "logs\launcher_boot.log"),
+    (Join-Path $BundleDir "logs\streamlit.out")
+  )
+  foreach ($log in $runtimeLogs) {
+    if (Test-Path $log) {
+      Write-Host "----- $log -----"
+      Get-Content -Path $log -Tail 300 -Encoding UTF8
+    }
+  }
+  throw
 } finally {
   Remove-Item Env:APP_LAUNCHER_SELF_CHECK -ErrorAction SilentlyContinue
 }

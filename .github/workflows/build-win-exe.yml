@@ -22,9 +22,23 @@ jobs:
       - name: Build EXE
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 -IncludeLocalDeps
+          .\scripts\build_windows_exe.ps1 -IncludeLocalDeps *>&1 | Tee-Object -FilePath build_windows_exe.log
+          $code = $LASTEXITCODE
+          if ($null -eq $code) { $code = 0 }
+          if ($code -ne 0) { exit $code }
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build_logs_${{ github.sha }}
+          path: |
+            build_windows_exe.log
+            dist/AI_Live_Assistant/logs/**
+          if-no-files-found: warn
 
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: AI_Live_Assistant_win_${{ github.sha }}
