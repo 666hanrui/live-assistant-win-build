@@ -121,6 +121,18 @@ function Invoke-External([string]$Label, [string]$FilePath, [string[]]$Args) {
   }
 }
 
+function Try-PreinstallWheel([string]$PythonExe, [string]$PackageSpec) {
+  Write-Host "Try preinstall wheel: $PackageSpec"
+  & $PythonExe -m pip install --only-binary=:all: $PackageSpec
+  $code = $LASTEXITCODE
+  if ($null -eq $code) {
+    $code = 0
+  }
+  if ($code -ne 0) {
+    Write-Warning "Preinstall wheel failed for $PackageSpec, fallback to normal dependency install."
+  }
+}
+
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 if (!(Test-Path $VenvPython)) {
   Write-Host "[1/6] Creating virtualenv..."
@@ -144,6 +156,9 @@ if (!(Test-Path $VenvPython)) {
 
 Write-Host "[2/6] Installing runtime dependencies..."
 Invoke-External "Upgrade pip toolchain" $VenvPython @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
+Try-PreinstallWheel $VenvPython "PyAudio==0.2.14"
+Try-PreinstallWheel $VenvPython "pocketsphinx==5.0.4"
+Try-PreinstallWheel $VenvPython "opencv-python==4.10.0.84"
 Invoke-External "Install requirements.txt" $VenvPython @("-m", "pip", "install", "-r", "requirements.txt")
 if ($IncludeLocalDeps) {
   Invoke-External "Install requirements-local.txt" $VenvPython @("-m", "pip", "install", "-r", "requirements-local.txt")
