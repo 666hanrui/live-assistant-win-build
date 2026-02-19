@@ -168,6 +168,17 @@ function Resolve-BundleDir([string]$RootDir) {
     }
   }
 
+  $recursiveExe = Get-ChildItem -Path $RootDir -Recurse -Filter "AI_Live_Assistant.exe" -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($recursiveExe) {
+    $sourceDir = Split-Path -Parent $recursiveExe.FullName
+    if ($sourceDir -and (Test-Path $sourceDir -PathType Container)) {
+      New-Item -ItemType Directory -Force -Path $primaryDir | Out-Null
+      Copy-Item -Path (Join-Path $sourceDir "*") -Destination $primaryDir -Recurse -Force
+      return $primaryDir
+    }
+  }
+
   return ""
 }
 
@@ -237,6 +248,7 @@ Write-Host "[3/6] Installing build dependencies..."
 Invoke-External "Install PyInstaller" $VenvPython @("-m", "pip", "install", "pyinstaller>=6.0")
 Invoke-External "Preflight import streamlit" $VenvPython @("-c", "import streamlit, sys; print('streamlit:', streamlit.__version__, 'python:', sys.version)")
 Invoke-External "Preflight import pyinstaller" $VenvPython @("-c", "import PyInstaller; print('pyinstaller:', PyInstaller.__version__)")
+Invoke-External "Preflight pyinstaller --version" $VenvPython @("-m", "PyInstaller", "--version")
 
 if ($Clean) {
   Write-Host "[4/6] Cleaning previous build output..."
@@ -250,10 +262,13 @@ Invoke-External "Run PyInstaller (spec)" $VenvPython @(
   "--noconfirm", "--clean",
   "--distpath", (Join-Path $Root "dist"),
   "--workpath", (Join-Path $Root "build"),
+  "--specpath", $Root,
   "--log-level", "INFO",
   (Join-Path $Root "windows_exe.spec")
 )
 Write-Host "PyInstaller(spec) finished."
+Write-Host "Searching for AI_Live_Assistant.exe after spec build..."
+Get-ChildItem -Path $Root -Recurse -Filter "AI_Live_Assistant.exe" -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { $_.FullName }
 
 $BundleDir = Resolve-BundleDir $Root
 if ([string]::IsNullOrWhiteSpace($BundleDir) -or !(Test-Path $BundleDir -PathType Container)) {
@@ -264,6 +279,7 @@ if ([string]::IsNullOrWhiteSpace($BundleDir) -or !(Test-Path $BundleDir -PathTyp
     "--name", "AI_Live_Assistant",
     "--distpath", (Join-Path $Root "dist"),
     "--workpath", (Join-Path $Root "build"),
+    "--specpath", $Root,
     "--collect-all", "streamlit",
     "--collect-all", "altair",
     "--collect-all", "pydeck",
@@ -273,6 +289,8 @@ if ([string]::IsNullOrWhiteSpace($BundleDir) -or !(Test-Path $BundleDir -PathTyp
     (Join-Path $Root "app_launcher.py")
   )
   Write-Host "PyInstaller(fallback) finished."
+  Write-Host "Searching for AI_Live_Assistant.exe after fallback build..."
+  Get-ChildItem -Path $Root -Recurse -Filter "AI_Live_Assistant.exe" -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { $_.FullName }
   $BundleDir = Resolve-BundleDir $Root
   if ([string]::IsNullOrWhiteSpace($BundleDir) -or !(Test-Path $BundleDir -PathType Container)) {
     $ExpectedBundle = Join-Path $Root "dist\AI_Live_Assistant"
