@@ -157,6 +157,26 @@ if (!(Test-Path $BundleDir)) {
 }
 
 Write-Host "[6/6] Copying config and model files..."
+$DashboardSource = Join-Path $Root "dashboard.py"
+$DashboardInBundle = @(
+  (Join-Path $BundleDir "_internal\dashboard.py"),
+  (Join-Path $BundleDir "dashboard.py")
+)
+$HasDashboard = $false
+foreach ($dash in $DashboardInBundle) {
+  if (Test-Path $dash) {
+    $HasDashboard = $true
+    break
+  }
+}
+if ((-not $HasDashboard) -and (Test-Path $DashboardSource)) {
+  $InternalDir = Join-Path $BundleDir "_internal"
+  New-Item -ItemType Directory -Force -Path $InternalDir | Out-Null
+  Copy-Item $DashboardSource (Join-Path $InternalDir "dashboard.py") -Force
+  Copy-Item $DashboardSource (Join-Path $BundleDir "dashboard.py") -Force
+  Write-Host "Injected missing dashboard.py into bundle."
+}
+
 $EnvSource = Join-Path $Root ".env"
 if (!(Test-Path $EnvSource)) {
   $EnvSource = Join-Path $Root ".env.example"
@@ -250,10 +270,23 @@ $RunBatContent = @"
 cd /d "%~dp0"
 echo Starting AI Live Assistant...
 AI_Live_Assistant.exe
+pause
 "@
 Set-Content -Path $RunBat -Value $RunBatContent -Encoding ASCII
+
+$RunBatAscii = Join-Path $BundleDir "run_assistant.bat"
+$RunBatAsciiContent = @"
+@echo off
+cd /d "%~dp0"
+if "%DASHBOARD_PORT%"=="" set DASHBOARD_PORT=8511
+echo Starting AI Live Assistant on port %DASHBOARD_PORT% ...
+AI_Live_Assistant.exe
+pause
+"@
+Set-Content -Path $RunBatAscii -Value $RunBatAsciiContent -Encoding ASCII
 
 Write-Host ""
 Write-Host "Build done."
 Write-Host "EXE: $BundleDir\AI_Live_Assistant.exe"
 Write-Host "Run: $RunBat"
+Write-Host "Run (ASCII): $RunBatAscii"

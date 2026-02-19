@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import webbrowser
+import importlib.util
 from pathlib import Path
 
 
@@ -69,6 +70,48 @@ def _open_browser_later(url: str, port: int, delay: float = 1.0) -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
+def _resolve_dashboard_script(bundle_root: Path, runtime_root: Path) -> Path | None:
+    env_path = os.getenv("DASHBOARD_SCRIPT", "").strip()
+    candidates = []
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend(
+            [
+                bundle_root / "dashboard.py",
+                exe_dir / "dashboard.py",
+                bundle_root.parent / "dashboard.py",
+                bundle_root / "_internal" / "dashboard.py",
+                exe_dir / "_internal" / "dashboard.py",
+            ]
+        )
+    else:
+        candidates.append(bundle_root / "dashboard.py")
+
+    seen = set()
+    for candidate in candidates:
+        path = candidate.resolve()
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.exists() and path.is_file():
+            return path
+
+    spec = importlib.util.find_spec("dashboard")
+    if spec is None:
+        return None
+
+    bootstrap_script = runtime_root / "run" / "dashboard_bootstrap.py"
+    bootstrap_script.parent.mkdir(parents=True, exist_ok=True)
+    bootstrap_script.write_text(
+        "import runpy\nrunpy.run_module('dashboard', run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    return bootstrap_script
+
+
 def main() -> int:
     bundle_root = _bundle_root()
     runtime_root = _runtime_root()
@@ -80,9 +123,12 @@ def main() -> int:
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("USER_DATA_PATH", str(runtime_root / "user_data"))
 
-    dashboard_script = bundle_root / "dashboard.py"
-    if not dashboard_script.exists():
-        print(f"dashboard.py not found: {dashboard_script}")
+    dashboard_script = _resolve_dashboard_script(bundle_root=bundle_root, runtime_root=runtime_root)
+    if dashboard_script is None:
+        print(
+            "dashboard.py not found and dashboard module unavailable. "
+            f"bundle_root={bundle_root}, exe={Path(sys.executable).resolve()}"
+        )
         return 2
 
     host = os.getenv("DASHBOARD_HOST", "127.0.0.1")
