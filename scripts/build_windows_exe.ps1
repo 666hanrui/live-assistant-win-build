@@ -140,6 +140,7 @@ if ($IncludeLocalDeps) {
 
 Write-Host "[3/6] Installing build dependencies..."
 & $VenvPython -m pip install "pyinstaller>=6.0"
+& $VenvPython -c "import streamlit, sys; print('streamlit:', streamlit.__version__, 'python:', sys.version)"
 
 if ($Clean) {
   Write-Host "[4/6] Cleaning previous build output..."

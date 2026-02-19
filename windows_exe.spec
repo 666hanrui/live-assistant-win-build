@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 
 PROJECT_ROOT = Path(SPECPATH).resolve().parent
@@ -15,6 +15,7 @@ def add_path(rel_path: str, dst: str = "."):
 
 
 datas = []
+bins = []
 datas += add_path("dashboard.py")
 datas += add_path(".env")
 datas += add_path(".env.example")
@@ -34,7 +35,19 @@ hiddenimports = [
     "dashboard",
     "main",
     "config.settings",
+    "streamlit.web.cli",
+    "streamlit.runtime",
 ]
+
+for pkg in ("streamlit", "altair", "pydeck", "pygments", "tiktoken", "watchdog"):
+    try:
+        pkg_datas, pkg_bins, pkg_hidden = collect_all(pkg)
+        datas += pkg_datas
+        bins += pkg_bins
+        hiddenimports += pkg_hidden
+    except Exception:
+        hiddenimports.append(pkg)
+
 for pkg in (
     "agents",
     "utils",
@@ -58,7 +71,7 @@ hiddenimports = sorted(set(hiddenimports))
 a = Analysis(
     ["app_launcher.py"],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=bins,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
