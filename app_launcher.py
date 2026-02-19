@@ -5,6 +5,7 @@ import threading
 import time
 import webbrowser
 import importlib.util
+import importlib
 import traceback
 from pathlib import Path
 
@@ -92,6 +93,39 @@ def _append_boot_log(runtime_root: Path, message: str) -> None:
         pass
 
 
+def _is_truthy(value: str) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _inject_bundle_site_packages(bundle_root: Path) -> list[str]:
+    injected = []
+    if not getattr(sys, "frozen", False):
+        return injected
+    exe_dir = Path(sys.executable).resolve().parent
+    candidates = [
+        bundle_root / "site-packages",
+        exe_dir / "_internal" / "site-packages",
+        exe_dir / "site-packages",
+    ]
+    seen = set()
+    for candidate in candidates:
+        try:
+            path = candidate.resolve()
+        except Exception:
+            continue
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if not path.exists() or not path.is_dir():
+            continue
+        text = str(path)
+        if text not in sys.path:
+            sys.path.insert(0, text)
+            injected.append(text)
+    return injected
+
+
 def _resolve_dashboard_script(bundle_root: Path, runtime_root: Path) -> Path | None:
     env_path = os.getenv("DASHBOARD_SCRIPT", "").strip()
     candidates = []
@@ -141,11 +175,15 @@ def main() -> int:
     os.chdir(runtime_root)
     _append_boot_log(runtime_root, f"boot: bundle_root={bundle_root}")
     _append_boot_log(runtime_root, f"boot: runtime_root={runtime_root}")
+    injected_paths = _inject_bundle_site_packages(bundle_root)
+    if injected_paths:
+        _append_boot_log(runtime_root, f"injected_site_packages={injected_paths}")
 
     os.environ.setdefault("LIVE_ASSISTANT_ENV", str(runtime_root / ".env"))
     os.environ.setdefault("PYTHONUTF8", "1")
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("USER_DATA_PATH", str(runtime_root / "user_data"))
+    os.environ.setdefault("STREAMLIT_SUPPRESS_CONFIG_WARNINGS", "true")
 
     dashboard_script = _resolve_dashboard_script(bundle_root=bundle_root, runtime_root=runtime_root)
     if dashboard_script is None:
@@ -159,6 +197,7 @@ def main() -> int:
     _append_boot_log(runtime_root, f"dashboard_script={dashboard_script}")
 
     host = os.getenv("DASHBOARD_HOST", "127.0.0.1")
+    self_check = _is_truthy(os.getenv("APP_LAUNCHER_SELF_CHECK", ""))
     try:
         configured_port = int(os.getenv("DASHBOARD_PORT", "8501"))
     except Exception:
@@ -169,7 +208,7 @@ def main() -> int:
     os.environ["DASHBOARD_PORT"] = str(port)
     url = f"http://127.0.0.1:{port}"
     auto_open = os.getenv("DASHBOARD_AUTO_OPEN", "true").lower() in ("1", "true", "yes", "on")
-    if auto_open:
+    if auto_open and not self_check:
         _open_browser_later(url=url, port=port, delay=1.2)
 
     # 延迟导入，确保环境变量/工作目录已就位。
@@ -179,6 +218,17 @@ def main() -> int:
         _append_boot_log(runtime_root, f"import_streamlit_failed: {e}")
         _append_boot_log(runtime_root, traceback.format_exc())
         raise
+
+    if self_check:
+        try:
+            importlib.import_module("streamlit")
+            print("APP_LAUNCHER_SELF_CHECK_OK")
+            _append_boot_log(runtime_root, "APP_LAUNCHER_SELF_CHECK_OK")
+            return 0
+        except Exception as e:
+            _append_boot_log(runtime_root, f"self_check_failed: {e}")
+            _append_boot_log(runtime_root, traceback.format_exc())
+            raise
 
     sys.argv = [
         "streamlit",

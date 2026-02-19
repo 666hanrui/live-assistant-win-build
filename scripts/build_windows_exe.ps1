@@ -110,15 +110,26 @@ function Normalize-Name([string]$Name, [string]$Fallback) {
   return $clean
 }
 
+function Invoke-External([string]$Label, [string]$FilePath, [string[]]$Args) {
+  & $FilePath @Args
+  $code = $LASTEXITCODE
+  if ($null -eq $code) {
+    $code = 0
+  }
+  if ($code -ne 0) {
+    throw "$Label failed (exit code $code)"
+  }
+}
+
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 if (!(Test-Path $VenvPython)) {
   Write-Host "[1/6] Creating virtualenv..."
   $PyLauncher = Get-Command py -ErrorAction SilentlyContinue
   $PyExe = Get-Command python -ErrorAction SilentlyContinue
   if ($PyLauncher) {
-    & py -3 -m venv .venv
+    Invoke-External "Create virtualenv via py -3" "py" @("-3", "-m", "venv", ".venv")
   } elseif ($PyExe) {
-    & python -m venv .venv
+    Invoke-External "Create virtualenv via python" "python" @("-m", "venv", ".venv")
   } else {
     Write-Error "Cannot find Python runtime. Install Python 3.9+ and ensure py/python is in PATH."
     exit 2
@@ -132,15 +143,15 @@ if (!(Test-Path $VenvPython)) {
 }
 
 Write-Host "[2/6] Installing runtime dependencies..."
-& $VenvPython -m pip install --upgrade pip setuptools wheel
-& $VenvPython -m pip install -r requirements.txt
+Invoke-External "Upgrade pip toolchain" $VenvPython @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
+Invoke-External "Install requirements.txt" $VenvPython @("-m", "pip", "install", "-r", "requirements.txt")
 if ($IncludeLocalDeps) {
-  & $VenvPython -m pip install -r requirements-local.txt
+  Invoke-External "Install requirements-local.txt" $VenvPython @("-m", "pip", "install", "-r", "requirements-local.txt")
 }
 
 Write-Host "[3/6] Installing build dependencies..."
-& $VenvPython -m pip install "pyinstaller>=6.0"
-& $VenvPython -c "import streamlit, sys; print('streamlit:', streamlit.__version__, 'python:', sys.version)"
+Invoke-External "Install PyInstaller" $VenvPython @("-m", "pip", "install", "pyinstaller>=6.0")
+Invoke-External "Preflight import streamlit" $VenvPython @("-c", "import streamlit, sys; print('streamlit:', streamlit.__version__, 'python:', sys.version)")
 
 if ($Clean) {
   Write-Host "[4/6] Cleaning previous build output..."
@@ -149,7 +160,7 @@ if ($Clean) {
 }
 
 Write-Host "[5/6] Building EXE..."
-& $VenvPython -m PyInstaller windows_exe.spec --noconfirm --clean
+Invoke-External "Run PyInstaller" $VenvPython @("-m", "PyInstaller", "windows_exe.spec", "--noconfirm", "--clean")
 
 $BundleDir = Join-Path $Root "dist\AI_Live_Assistant"
 if (!(Test-Path $BundleDir)) {
@@ -176,6 +187,26 @@ if ((-not $HasDashboard) -and (Test-Path $DashboardSource)) {
   Copy-Item $DashboardSource (Join-Path $InternalDir "dashboard.py") -Force
   Copy-Item $DashboardSource (Join-Path $BundleDir "dashboard.py") -Force
   Write-Host "Injected missing dashboard.py into bundle."
+}
+
+$VenvSitePackages = Join-Path $Root ".venv\Lib\site-packages"
+$BundleSitePackages = Join-Path $BundleDir "_internal\site-packages"
+if (Test-Path $VenvSitePackages) {
+  New-Item -ItemType Directory -Force -Path $BundleSitePackages | Out-Null
+  $fallbackPatterns = @(
+    "streamlit",
+    "streamlit-*.dist-info"
+  )
+  foreach ($pattern in $fallbackPatterns) {
+    $items = Get-ChildItem -Path (Join-Path $VenvSitePackages $pattern) -ErrorAction SilentlyContinue
+    foreach ($item in $items) {
+      $dst = Join-Path $BundleSitePackages $item.Name
+      if (Test-Path $dst) {
+        Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
+      }
+      Copy-Item -Path $item.FullName -Destination $dst -Recurse -Force
+    }
+  }
 }
 
 $EnvSource = Join-Path $Root ".env"
@@ -305,9 +336,32 @@ pause
 "@
 Set-Content -Path $RunBatDebug -Value $RunBatDebugContent -Encoding ASCII
 
+$BuildInfoFile = Join-Path $BundleDir "build_info.txt"
+$BuildCommit = ""
+try {
+  $BuildCommit = (& git rev-parse --short HEAD).Trim()
+} catch {
+  $BuildCommit = ""
+}
+$BuildInfo = @(
+  "build_time_utc=$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')",
+  "build_commit=$BuildCommit"
+)
+Set-Content -Path $BuildInfoFile -Value $BuildInfo -Encoding ASCII
+
+$ExePath = Join-Path $BundleDir "AI_Live_Assistant.exe"
+Write-Host "[7/7] Validating bundled EXE can import streamlit..."
+$env:APP_LAUNCHER_SELF_CHECK = "1"
+try {
+  Invoke-External "APP_LAUNCHER_SELF_CHECK" $ExePath @()
+} finally {
+  Remove-Item Env:APP_LAUNCHER_SELF_CHECK -ErrorAction SilentlyContinue
+}
+
 Write-Host ""
 Write-Host "Build done."
 Write-Host "EXE: $BundleDir\AI_Live_Assistant.exe"
 Write-Host "Run: $RunBat"
 Write-Host "Run (ASCII): $RunBatAscii"
 Write-Host "Run (Debug): $RunBatDebug"
+Write-Host "Build info: $BuildInfoFile"
