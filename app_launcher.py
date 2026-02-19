@@ -184,6 +184,8 @@ def main() -> int:
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("USER_DATA_PATH", str(runtime_root / "user_data"))
     os.environ.setdefault("STREAMLIT_SUPPRESS_CONFIG_WARNINGS", "true")
+    # Packaged app must run in non-dev mode, otherwise Streamlit rejects --server.port.
+    os.environ["STREAMLIT_GLOBAL_DEVELOPMENT_MODE"] = "false"
 
     dashboard_script = _resolve_dashboard_script(bundle_root=bundle_root, runtime_root=runtime_root)
     if dashboard_script is None:
@@ -234,6 +236,8 @@ def main() -> int:
         "streamlit",
         "run",
         str(dashboard_script),
+        "--global.developmentMode",
+        "false",
         "--server.address",
         host,
         "--server.port",
