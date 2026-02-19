@@ -110,8 +110,14 @@ function Normalize-Name([string]$Name, [string]$Fallback) {
   return $clean
 }
 
-function Invoke-External([string]$Label, [string]$FilePath, [string[]]$Args) {
-  & $FilePath @Args
+function Invoke-External([string]$Label, [string]$FilePath, [string[]]$CommandArgs) {
+  if ($CommandArgs -and $CommandArgs.Count -gt 0) {
+    Write-Host ">> $FilePath $($CommandArgs -join ' ')"
+    & $FilePath @CommandArgs
+  } else {
+    Write-Host ">> $FilePath"
+    & $FilePath
+  }
   $code = $LASTEXITCODE
   if ($null -eq $code) {
     $code = 0
