@@ -285,8 +285,28 @@ pause
 "@
 Set-Content -Path $RunBatAscii -Value $RunBatAsciiContent -Encoding ASCII
 
+$RunBatDebug = Join-Path $BundleDir "run_assistant_debug.bat"
+$RunBatDebugContent = @"
+@echo off
+cd /d "%~dp0"
+if "%DASHBOARD_PORT%"=="" set DASHBOARD_PORT=8511
+echo Starting AI Live Assistant (debug) on port %DASHBOARD_PORT% ...
+AI_Live_Assistant.exe 1> exe_boot.log 2>&1
+echo ExitCode: %ERRORLEVEL%
+echo.
+echo ==== exe_boot.log ====
+type exe_boot.log
+echo.
+echo ==== launcher_boot.log (runtime) ====
+if exist ".\logs\launcher_boot.log" type ".\logs\launcher_boot.log"
+if exist "%USERPROFILE%\AI_Live_Assistant\logs\launcher_boot.log" type "%USERPROFILE%\AI_Live_Assistant\logs\launcher_boot.log"
+pause
+"@
+Set-Content -Path $RunBatDebug -Value $RunBatDebugContent -Encoding ASCII
+
 Write-Host ""
 Write-Host "Build done."
 Write-Host "EXE: $BundleDir\AI_Live_Assistant.exe"
 Write-Host "Run: $RunBat"
 Write-Host "Run (ASCII): $RunBatAscii"
+Write-Host "Run (Debug): $RunBatDebug"

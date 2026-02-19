@@ -5,6 +5,7 @@ import threading
 import time
 import webbrowser
 import importlib.util
+import traceback
 from pathlib import Path
 
 
@@ -54,6 +55,17 @@ def _port_open(port: int, host: str = "127.0.0.1") -> bool:
         s.close()
 
 
+def _pick_available_port(preferred: int, host: str = "127.0.0.1") -> int:
+    if preferred <= 0:
+        preferred = 8501
+    if not _port_open(preferred, host=host):
+        return preferred
+    for p in range(preferred + 1, preferred + 21):
+        if not _port_open(p, host=host):
+            return p
+    return preferred
+
+
 def _open_browser_later(url: str, port: int, delay: float = 1.0) -> None:
     def _worker():
         time.sleep(max(0.1, delay))
@@ -68,6 +80,16 @@ def _open_browser_later(url: str, port: int, delay: float = 1.0) -> None:
             pass
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+def _append_boot_log(runtime_root: Path, message: str) -> None:
+    try:
+        log_dir = runtime_root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with (log_dir / "launcher_boot.log").open("a", encoding="utf-8") as f:
+            f.write(message.rstrip() + "\n")
+    except Exception:
+        pass
 
 
 def _resolve_dashboard_script(bundle_root: Path, runtime_root: Path) -> Path | None:
@@ -117,6 +139,8 @@ def main() -> int:
     runtime_root = _runtime_root()
     _ensure_runtime_dirs(runtime_root)
     os.chdir(runtime_root)
+    _append_boot_log(runtime_root, f"boot: bundle_root={bundle_root}")
+    _append_boot_log(runtime_root, f"boot: runtime_root={runtime_root}")
 
     os.environ.setdefault("LIVE_ASSISTANT_ENV", str(runtime_root / ".env"))
     os.environ.setdefault("PYTHONUTF8", "1")
@@ -125,21 +149,36 @@ def main() -> int:
 
     dashboard_script = _resolve_dashboard_script(bundle_root=bundle_root, runtime_root=runtime_root)
     if dashboard_script is None:
-        print(
+        err = (
             "dashboard.py not found and dashboard module unavailable. "
             f"bundle_root={bundle_root}, exe={Path(sys.executable).resolve()}"
         )
+        print(err)
+        _append_boot_log(runtime_root, err)
         return 2
+    _append_boot_log(runtime_root, f"dashboard_script={dashboard_script}")
 
     host = os.getenv("DASHBOARD_HOST", "127.0.0.1")
-    port = int(os.getenv("DASHBOARD_PORT", "8501"))
+    try:
+        configured_port = int(os.getenv("DASHBOARD_PORT", "8501"))
+    except Exception:
+        configured_port = 8501
+    port = _pick_available_port(configured_port, host="127.0.0.1")
+    if port != configured_port:
+        _append_boot_log(runtime_root, f"port_busy_fallback: {configured_port} -> {port}")
+    os.environ["DASHBOARD_PORT"] = str(port)
     url = f"http://127.0.0.1:{port}"
     auto_open = os.getenv("DASHBOARD_AUTO_OPEN", "true").lower() in ("1", "true", "yes", "on")
     if auto_open:
         _open_browser_later(url=url, port=port, delay=1.2)
 
     # 延迟导入，确保环境变量/工作目录已就位。
-    from streamlit.web import cli as stcli  # pylint: disable=import-outside-toplevel
+    try:
+        from streamlit.web import cli as stcli  # pylint: disable=import-outside-toplevel
+    except Exception as e:
+        _append_boot_log(runtime_root, f"import_streamlit_failed: {e}")
+        _append_boot_log(runtime_root, traceback.format_exc())
+        raise
 
     sys.argv = [
         "streamlit",
@@ -156,8 +195,22 @@ def main() -> int:
         "--browser.gatherUsageStats",
         "false",
     ]
-    return int(stcli.main())
+    _append_boot_log(runtime_root, f"launch_streamlit: {' '.join(sys.argv)}")
+    try:
+        return int(stcli.main())
+    except Exception as e:
+        _append_boot_log(runtime_root, f"streamlit_main_failed: {e}")
+        _append_boot_log(runtime_root, traceback.format_exc())
+        raise
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as e:
+        runtime_root = _runtime_root()
+        _append_boot_log(runtime_root, f"fatal_exception: {e}")
+        _append_boot_log(runtime_root, traceback.format_exc())
+        raise
