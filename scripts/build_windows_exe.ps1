@@ -136,6 +136,41 @@ function Resolve-VenvPythonPath([string]$RootDir) {
   return ""
 }
 
+function Resolve-BundleDir([string]$RootDir) {
+  $distDir = Join-Path $RootDir "dist"
+  $primaryDir = Join-Path $distDir "AI_Live_Assistant"
+  if (Test-Path $primaryDir -PathType Container) {
+    return $primaryDir
+  }
+
+  $altExeCandidates = @(
+    (Join-Path $distDir "AI_Live_Assistant.exe"),
+    (Join-Path $distDir "windows_exe.exe"),
+    (Join-Path $distDir "app_launcher.exe")
+  )
+  foreach ($exe in $altExeCandidates) {
+    if (Test-Path $exe -PathType Leaf) {
+      New-Item -ItemType Directory -Force -Path $primaryDir | Out-Null
+      Copy-Item -Path $exe -Destination (Join-Path $primaryDir "AI_Live_Assistant.exe") -Force
+      return $primaryDir
+    }
+  }
+
+  $altDirCandidates = @(
+    (Join-Path $distDir "windows_exe"),
+    (Join-Path $distDir "app_launcher")
+  )
+  foreach ($alt in $altDirCandidates) {
+    if (Test-Path $alt -PathType Container) {
+      New-Item -ItemType Directory -Force -Path $primaryDir | Out-Null
+      Copy-Item -Path (Join-Path $alt "*") -Destination $primaryDir -Recurse -Force
+      return $primaryDir
+    }
+  }
+
+  return ""
+}
+
 function Try-PreinstallWheel([string]$PythonExe, [string]$PackageSpec) {
   Write-Host "Try preinstall wheel: $PackageSpec"
   & $PythonExe -m pip install --only-binary=:all: $PackageSpec
@@ -209,11 +244,31 @@ if ($Clean) {
 }
 
 Write-Host "[5/6] Building EXE..."
-Invoke-External "Run PyInstaller" $VenvPython @("-m", "PyInstaller", "windows_exe.spec", "--noconfirm", "--clean")
+Invoke-External "Run PyInstaller" $VenvPython @(
+  "-m", "PyInstaller", "windows_exe.spec",
+  "--noconfirm", "--clean",
+  "--distpath", (Join-Path $Root "dist"),
+  "--workpath", (Join-Path $Root "build"),
+  "--log-level", "INFO"
+)
 
-$BundleDir = Join-Path $Root "dist\AI_Live_Assistant"
-if (!(Test-Path $BundleDir)) {
-  Write-Error "Build output not found: $BundleDir"
+$BundleDir = Resolve-BundleDir $Root
+if ([string]::IsNullOrWhiteSpace($BundleDir) -or !(Test-Path $BundleDir -PathType Container)) {
+  $ExpectedBundle = Join-Path $Root "dist\AI_Live_Assistant"
+  Write-Warning "Build output not found at expected path: $ExpectedBundle"
+  if (Test-Path (Join-Path $Root "dist")) {
+    Write-Host "----- dist tree (top 400) -----"
+    Get-ChildItem -Path (Join-Path $Root "dist") -Recurse -ErrorAction SilentlyContinue | Select-Object -First 400 | ForEach-Object { $_.FullName }
+  } else {
+    Write-Host "dist directory not created."
+  }
+  if (Test-Path (Join-Path $Root "build")) {
+    Write-Host "----- build tree (top 200) -----"
+    Get-ChildItem -Path (Join-Path $Root "build") -Recurse -ErrorAction SilentlyContinue | Select-Object -First 200 | ForEach-Object { $_.FullName }
+  } else {
+    Write-Host "build directory not created."
+  }
+  Write-Error "Build output not found after PyInstaller run."
   exit 2
 }
 
