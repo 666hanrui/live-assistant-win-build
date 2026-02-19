@@ -236,6 +236,7 @@ if ($IncludeLocalDeps) {
 Write-Host "[3/6] Installing build dependencies..."
 Invoke-External "Install PyInstaller" $VenvPython @("-m", "pip", "install", "pyinstaller>=6.0")
 Invoke-External "Preflight import streamlit" $VenvPython @("-c", "import streamlit, sys; print('streamlit:', streamlit.__version__, 'python:', sys.version)")
+Invoke-External "Preflight import pyinstaller" $VenvPython @("-c", "import PyInstaller; print('pyinstaller:', PyInstaller.__version__)")
 
 if ($Clean) {
   Write-Host "[4/6] Cleaning previous build output..."
@@ -244,32 +245,53 @@ if ($Clean) {
 }
 
 Write-Host "[5/6] Building EXE..."
-Invoke-External "Run PyInstaller" $VenvPython @(
-  "-m", "PyInstaller", "windows_exe.spec",
+Invoke-External "Run PyInstaller (spec)" $VenvPython @(
+  "-m", "PyInstaller",
   "--noconfirm", "--clean",
   "--distpath", (Join-Path $Root "dist"),
   "--workpath", (Join-Path $Root "build"),
-  "--log-level", "INFO"
+  "--log-level", "INFO",
+  (Join-Path $Root "windows_exe.spec")
 )
+Write-Host "PyInstaller(spec) finished."
 
 $BundleDir = Resolve-BundleDir $Root
 if ([string]::IsNullOrWhiteSpace($BundleDir) -or !(Test-Path $BundleDir -PathType Container)) {
-  $ExpectedBundle = Join-Path $Root "dist\AI_Live_Assistant"
-  Write-Warning "Build output not found at expected path: $ExpectedBundle"
-  if (Test-Path (Join-Path $Root "dist")) {
-    Write-Host "----- dist tree (top 400) -----"
-    Get-ChildItem -Path (Join-Path $Root "dist") -Recurse -ErrorAction SilentlyContinue | Select-Object -First 400 | ForEach-Object { $_.FullName }
-  } else {
-    Write-Host "dist directory not created."
+  Write-Warning "Spec build did not produce output, running fallback one-dir build..."
+  Invoke-External "Run PyInstaller (fallback onedir)" $VenvPython @(
+    "-m", "PyInstaller",
+    "--noconfirm", "--clean", "--onedir",
+    "--name", "AI_Live_Assistant",
+    "--distpath", (Join-Path $Root "dist"),
+    "--workpath", (Join-Path $Root "build"),
+    "--collect-all", "streamlit",
+    "--collect-all", "altair",
+    "--collect-all", "pydeck",
+    "--collect-all", "pygments",
+    "--collect-all", "tiktoken",
+    "--hidden-import", "streamlit.web.cli",
+    (Join-Path $Root "app_launcher.py")
+  )
+  Write-Host "PyInstaller(fallback) finished."
+  $BundleDir = Resolve-BundleDir $Root
+  if ([string]::IsNullOrWhiteSpace($BundleDir) -or !(Test-Path $BundleDir -PathType Container)) {
+    $ExpectedBundle = Join-Path $Root "dist\AI_Live_Assistant"
+    Write-Warning "Build output not found at expected path: $ExpectedBundle"
+    if (Test-Path (Join-Path $Root "dist")) {
+      Write-Host "----- dist tree (top 400) -----"
+      Get-ChildItem -Path (Join-Path $Root "dist") -Recurse -ErrorAction SilentlyContinue | Select-Object -First 400 | ForEach-Object { $_.FullName }
+    } else {
+      Write-Host "dist directory not created."
+    }
+    if (Test-Path (Join-Path $Root "build")) {
+      Write-Host "----- build tree (top 200) -----"
+      Get-ChildItem -Path (Join-Path $Root "build") -Recurse -ErrorAction SilentlyContinue | Select-Object -First 200 | ForEach-Object { $_.FullName }
+    } else {
+      Write-Host "build directory not created."
+    }
+    Write-Error "Build output not found after both PyInstaller attempts."
+    exit 2
   }
-  if (Test-Path (Join-Path $Root "build")) {
-    Write-Host "----- build tree (top 200) -----"
-    Get-ChildItem -Path (Join-Path $Root "build") -Recurse -ErrorAction SilentlyContinue | Select-Object -First 200 | ForEach-Object { $_.FullName }
-  } else {
-    Write-Host "build directory not created."
-  }
-  Write-Error "Build output not found after PyInstaller run."
-  exit 2
 }
 
 Write-Host "[6/6] Copying config and model files..."
