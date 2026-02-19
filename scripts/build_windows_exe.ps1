@@ -136,14 +136,15 @@ function Try-PreinstallWheel([string]$PythonExe, [string]$PackageSpec) {
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 if (!(Test-Path $VenvPython)) {
   Write-Host "[1/6] Creating virtualenv..."
-  $PyLauncher = Get-Command py -ErrorAction SilentlyContinue
   $PyExe = Get-Command python -ErrorAction SilentlyContinue
-  if ($PyLauncher) {
-    Invoke-External "Create virtualenv via py -3" "py" @("-3", "-m", "venv", ".venv")
-  } elseif ($PyExe) {
+  if (Test-Path "$Root\.venv") {
+    Remove-Item -Recurse -Force "$Root\.venv" -ErrorAction SilentlyContinue
+  }
+  if ($PyExe) {
+    Write-Host "Using Python from PATH: $($PyExe.Source)"
     Invoke-External "Create virtualenv via python" "python" @("-m", "venv", ".venv")
   } else {
-    Write-Error "Cannot find Python runtime. Install Python 3.9+ and ensure py/python is in PATH."
+    Write-Error "Cannot find python in PATH. Ensure actions/setup-python ran successfully."
     exit 2
   }
 }

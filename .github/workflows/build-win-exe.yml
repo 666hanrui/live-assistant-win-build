@@ -22,10 +22,15 @@ jobs:
       - name: Build EXE
         shell: pwsh
         run: |
-          .\scripts\build_windows_exe.ps1 -IncludeLocalDeps *>&1 | Tee-Object -FilePath build_windows_exe.log
-          $code = $LASTEXITCODE
-          if ($null -eq $code) { $code = 0 }
-          if ($code -ne 0) { exit $code }
+          try {
+            .\scripts\build_windows_exe.ps1 -IncludeLocalDeps *>&1 | Tee-Object -FilePath build_windows_exe.log
+            $code = $LASTEXITCODE
+            if ($null -eq $code) { $code = 0 }
+            if ($code -ne 0) { throw "build_windows_exe.ps1 failed with exit code $code" }
+          } catch {
+            $_ | Out-String | Tee-Object -FilePath build_windows_exe.log -Append
+            throw
+          }
 
       - name: Upload build logs
         if: always()
