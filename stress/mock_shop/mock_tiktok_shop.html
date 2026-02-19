@@ -1,0 +1,1662 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TikTok Shop Streamer Mock</title>
+  <style>
+    :root {
+      --bg: #f3f4f6;
+      --panel: #ffffff;
+      --line: #e6e8ec;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --brand: #14c9b3;
+      --brand-deep: #0fa292;
+      --danger: #ef4444;
+      --pink: #ff4f73;
+      --dark: #10151d;
+      --dark-panel: #171d27;
+      --dark-line: #2a3446;
+      --dark-muted: #9aa4b2;
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      margin: 0;
+      min-width: 1500px;
+      min-height: 100%;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .hidden { display: none !important; }
+
+    ::-webkit-scrollbar { width: 9px; height: 9px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(148, 163, 184, .45);
+      border-radius: 999px;
+      border: 2px solid transparent;
+      background-clip: content-box;
+    }
+
+    .topbar {
+      height: 52px;
+      background: #0a0c10;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid #121826;
+      padding: 0 18px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 19px;
+      letter-spacing: .2px;
+    }
+
+    .brand small {
+      font-weight: 500;
+      font-size: 17px;
+      opacity: .9;
+    }
+
+    .userline {
+      font-size: 13px;
+      color: #d1d5db;
+      display: flex;
+      align-items: center;
+      gap: 13px;
+    }
+
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      display: inline-block;
+      margin-right: 4px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 196px 1fr;
+      min-height: calc(100vh - 52px);
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--line);
+      background: #f2f3f5;
+      padding: 12px 8px;
+      overflow: auto;
+    }
+
+    .start-btn {
+      width: 100%;
+      border: 0;
+      border-radius: 6px;
+      background: var(--pink);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 9px;
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+
+    .start-btn:disabled {
+      opacity: .65;
+      cursor: not-allowed;
+    }
+
+    .nav {
+      border: 0;
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border-radius: 6px;
+      font-size: 14px;
+      color: #374151;
+      padding: 9px 10px;
+      cursor: pointer;
+      margin-bottom: 2px;
+    }
+
+    .nav.active {
+      background: #dce1e7;
+      color: #111827;
+      font-weight: 700;
+    }
+
+    .main {
+      padding: 10px;
+      overflow: auto;
+    }
+
+    .title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .title {
+      font-size: 30px;
+      font-weight: 700;
+      color: #111827;
+      letter-spacing: .3px;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+
+    .title small {
+      font-size: 14px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    .view-switch {
+      display: flex;
+      gap: 7px;
+    }
+
+    .vbtn {
+      border: 1px solid #d1d5db;
+      background: #fff;
+      color: #4b5563;
+      border-radius: 999px;
+      padding: 6px 11px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .vbtn.active {
+      border-color: #111827;
+      color: #111827;
+      font-weight: 700;
+    }
+
+    .dash-grid {
+      display: grid;
+      grid-template-columns: 568px 522px minmax(320px, 1fr);
+      gap: 10px;
+      align-items: start;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .card-head {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .head-muted {
+      color: #6b7280;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      padding: 8px 12px 0;
+    }
+
+    .tab {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f8fafc;
+      font-size: 12px;
+      color: #4b5563;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+
+    .tab.active {
+      background: #111827;
+      border-color: #111827;
+      color: #fff;
+      font-weight: 700;
+    }
+
+    .prod-wrap {
+      padding: 10px 12px 12px;
+      display: grid;
+      grid-template-rows: auto auto auto 1fr auto;
+      gap: 8px;
+      min-height: 676px;
+    }
+
+    .search {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+
+    .search input {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 13px;
+      color: #111827;
+    }
+
+    .filter-row {
+      display: grid;
+      grid-template-columns: auto 1fr 1fr 1fr;
+      gap: 6px;
+      align-items: center;
+      font-size: 12px;
+      color: #4b5563;
+    }
+
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+      background: #fff;
+    }
+
+    .btn {
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-size: 12px;
+      background: #fff;
+      color: #111827;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all .15s ease;
+    }
+
+    .btn:hover { border-color: #9ca3af; }
+
+    .btn:disabled {
+      opacity: .66;
+      cursor: not-allowed;
+    }
+
+    .btn.primary {
+      background: var(--brand);
+      border-color: var(--brand);
+      color: #fff;
+      font-weight: 700;
+    }
+
+    .btn.pin {
+      background: #ecfeff;
+      border-color: #99f6e4;
+      color: #0f766e;
+      font-weight: 700;
+    }
+
+    .btn.unpin {
+      background: #fff1f2;
+      border-color: #fecdd3;
+      color: #9f1239;
+      font-weight: 700;
+    }
+
+    .btn.loading {
+      opacity: .8;
+      pointer-events: none;
+    }
+
+    .thumb-row {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding-bottom: 8px;
+      border-bottom: 1px dashed var(--line);
+    }
+
+    .mini-thumb {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: linear-gradient(130deg, #0f172a, #334155 58%, #64748b);
+    }
+
+    .pinned-spot {
+      border: 1px solid #c7f9f2;
+      border-radius: 8px;
+      background: #f5fffd;
+      min-height: 68px;
+      padding: 8px;
+      display: grid;
+      grid-template-columns: 58px 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .pinned-spot.empty {
+      border-style: dashed;
+      border-color: var(--line);
+      background: #fafafa;
+      color: #6b7280;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+    }
+
+    .pinned-spot .thumb {
+      width: 58px;
+      height: 58px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: linear-gradient(130deg, #111827, #334155 58%, #64748b);
+    }
+
+    .pinned-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #111827;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .pinned-meta {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 3px;
+    }
+
+    .product-scroll {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fcfcfd;
+      min-height: 0;
+      height: 382px;
+      overflow: auto;
+      scroll-behavior: smooth;
+      position: relative;
+      overscroll-behavior: contain;
+    }
+
+    .list-header {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: #f8fafc;
+      border-bottom: 1px solid var(--line);
+      padding: 6px 8px;
+      font-size: 12px;
+      color: #4b5563;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .list-body { padding: 8px; }
+
+    .prod-row {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 8px;
+      display: grid;
+      grid-template-columns: 32px 60px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+      transition: border-color .12s ease, box-shadow .12s ease, background .12s ease;
+      cursor: default;
+    }
+
+    .prod-row.selected {
+      border-color: #86efac;
+      box-shadow: inset 0 0 0 1px #dcfce7;
+    }
+
+    .prod-row:hover {
+      border-color: #cbd5e1;
+      box-shadow: 0 1px 0 rgba(15, 23, 42, .04);
+    }
+
+    .prod-row.pinned {
+      border-color: #99f6e4;
+      box-shadow: inset 0 0 0 1px #ccfbf1;
+      background: #f8fffe;
+    }
+
+    .index-badge {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      display: grid;
+      place-items: center;
+      color: #4b5563;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .thumb {
+      width: 60px;
+      height: 60px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: linear-gradient(130deg, #111827, #334155 58%, #64748b);
+    }
+
+    .ptitle {
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 300px;
+      color: #111827;
+      margin-bottom: 2px;
+    }
+
+    .pprice {
+      font-size: 32px;
+      font-weight: 700;
+      color: #111827;
+      line-height: 1.08;
+      margin-bottom: 2px;
+      letter-spacing: -.6px;
+    }
+
+    .pmeta {
+      font-size: 11px;
+      color: #6b7280;
+    }
+
+    .pstats {
+      margin-top: 5px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: #fafafa;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      text-align: center;
+      font-size: 10px;
+      color: #6b7280;
+    }
+
+    .pstats div {
+      padding: 3px 4px;
+      border-right: 1px solid #e5e7eb;
+    }
+
+    .pstats div:last-child { border-right: 0; }
+
+    .tag {
+      display: inline-block;
+      border: 1px solid #99f6e4;
+      border-radius: 999px;
+      background: #ecfeff;
+      color: #0f766e;
+      font-size: 10px;
+      padding: 1px 6px;
+      margin-left: 5px;
+      vertical-align: middle;
+    }
+
+    .prod-actions {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
+    }
+
+    .icon-list {
+      color: #9ca3af;
+      font-size: 14px;
+      letter-spacing: 2px;
+      user-select: none;
+    }
+
+    .prod-ops {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 1px;
+      position: sticky;
+      bottom: 0;
+      z-index: 7;
+      padding: 8px 0 2px;
+      background: linear-gradient(to top, #ffffff 74%, rgba(255, 255, 255, 0));
+      border-top: 1px solid #edf2f7;
+    }
+
+    .ops-hint {
+      display: block;
+      width: 100%;
+      margin-top: 2px;
+      color: #64748b;
+      font-size: 11px;
+      letter-spacing: .1px;
+    }
+
+    .ops-status {
+      margin-top: 5px;
+      border: 1px dashed #d1d5db;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12px;
+      color: #475569;
+      background: #f8fafc;
+      min-height: 34px;
+      display: flex;
+      align-items: center;
+    }
+
+    .ops-status.ok {
+      border-color: #a7f3d0;
+      background: #f0fdf4;
+      color: #166534;
+    }
+
+    .ops-status.warn {
+      border-color: #fde68a;
+      background: #fffbeb;
+      color: #92400e;
+    }
+
+    .preview-shell {
+      background: #0d1117;
+      color: #e5e7eb;
+      min-height: 676px;
+      padding: 10px;
+    }
+
+    .preview-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: #d1d5db;
+    }
+
+    .video-zone {
+      border: 1px solid #1f2937;
+      border-radius: 8px;
+      height: 236px;
+      background: linear-gradient(90deg, #04070c, #141a27 48%, #04070c);
+      display: grid;
+      place-items: center;
+      color: #9ca3af;
+      margin-bottom: 8px;
+      font-size: 13px;
+    }
+
+    .live-product {
+      border: 1px solid #374151;
+      border-radius: 8px;
+      background: #101722;
+      padding: 8px;
+      display: grid;
+      grid-template-columns: 50px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .live-product .thumb {
+      width: 50px;
+      height: 50px;
+    }
+
+    .live-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #f3f4f6;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 320px;
+    }
+
+    .live-meta {
+      font-size: 11px;
+      color: #9ca3af;
+      margin-top: 3px;
+    }
+
+    .chat-block {
+      border-top: 1px solid #2b3445;
+      padding-top: 8px;
+      display: grid;
+      grid-template-rows: 1fr auto;
+      height: 390px;
+      gap: 8px;
+    }
+
+    .chat-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+
+    .chat-tabs b {
+      color: #fff;
+      font-weight: 700;
+    }
+
+    .chat-list {
+      border: 1px solid #2a3446;
+      border-radius: 8px;
+      background: #0f1623;
+      padding: 8px;
+      overflow: auto;
+      font-size: 13px;
+      min-height: 0;
+      scroll-behavior: smooth;
+      overscroll-behavior: contain;
+    }
+
+    .chat-item {
+      border-bottom: 1px dashed #334155;
+      padding: 6px 0;
+      color: #cbd5e1;
+      line-height: 1.45;
+    }
+
+    .chat-item:last-child { border-bottom: 0; }
+
+    .owner {
+      color: #f8fafc;
+      font-weight: 700;
+      margin-right: 5px;
+    }
+
+    .chat-input {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: end;
+    }
+
+    .chat-input textarea {
+      border: 1px solid #334155;
+      border-radius: 7px;
+      background: #0f172a;
+      color: #f8fafc;
+      font-size: 13px;
+      padding: 8px;
+      min-height: 40px;
+      max-height: 96px;
+      resize: vertical;
+      font-family: inherit;
+    }
+
+    .composer-foot {
+      grid-column: 1 / -1;
+      text-align: right;
+      font-size: 11px;
+      color: #9ca3af;
+      margin-top: -4px;
+    }
+
+    .right-col { display: grid; grid-template-rows: auto 1fr; gap: 10px; }
+
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      padding: 10px;
+    }
+
+    .kpi {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      min-height: 74px;
+      padding: 8px;
+    }
+
+    .kpi .k {
+      color: #6b7280;
+      font-size: 11px;
+    }
+
+    .kpi .v {
+      font-size: 28px;
+      font-weight: 700;
+      margin-top: 5px;
+      line-height: 1.1;
+      color: #111827;
+    }
+
+    .activity {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 10px;
+      min-height: 594px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .activity-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .activity-list {
+      overflow: auto;
+      border-top: 1px dashed var(--line);
+      padding-top: 5px;
+      scroll-behavior: smooth;
+      overscroll-behavior: contain;
+    }
+
+    .act-row {
+      border-bottom: 1px dashed var(--line);
+      padding: 7px 0;
+      font-size: 13px;
+      color: #374151;
+      line-height: 1.4;
+    }
+
+    .overview-wrap {
+      background: var(--dark);
+      border: 1px solid #1f2937;
+      border-radius: 10px;
+      padding: 10px;
+      color: #e2e8f0;
+    }
+
+    .overview-grid {
+      display: grid;
+      grid-template-columns: 330px 1fr 300px;
+      gap: 10px;
+    }
+
+    .dcard {
+      background: var(--dark-panel);
+      border: 1px solid var(--dark-line);
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .dcard h3 {
+      margin: 0 0 8px;
+      font-size: 16px;
+      color: #e2e8f0;
+    }
+
+    .hero {
+      background: linear-gradient(130deg, #812546, #203247);
+      border: 1px solid #434f61;
+      border-radius: 10px;
+      padding: 14px;
+    }
+
+    .hero-title {
+      font-size: 17px;
+      color: #f3f4f6;
+    }
+
+    .hero-big {
+      font-size: 84px;
+      font-weight: 700;
+      line-height: 1;
+      margin: 5px 0 10px;
+      color: #fff;
+    }
+
+    .hero-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+
+    .hero-cell {
+      font-size: 11px;
+      color: #cbd5e1;
+    }
+
+    .hero-cell b {
+      display: block;
+      margin-top: 4px;
+      font-size: 22px;
+      color: #fff;
+      line-height: 1.05;
+    }
+
+    .dtable {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .dtable th,
+    .dtable td {
+      border-bottom: 1px solid var(--dark-line);
+      padding: 7px;
+      text-align: left;
+      color: #d1d5db;
+      vertical-align: top;
+    }
+
+    .dtable th {
+      color: #9ca3af;
+      font-weight: 600;
+    }
+
+    .toast-wrap {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 9999;
+    }
+
+    .toast {
+      border: 1px solid #334155;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, .96);
+      color: #fff;
+      font-size: 13px;
+      padding: 10px 12px;
+      min-width: 240px;
+      margin-top: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">TikTok Shop <small>| 直播管理平台</small></div>
+    <div class="userline">
+      <span><span class="live-dot"></span>msgemhair1</span>
+      <span id="clock">--:--:--</span>
+      <span id="modeBadge">Mock</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <button id="btnStartLive" class="start-btn">立即开始直播</button>
+      <button class="nav">首页</button>
+      <button class="nav">直播工具</button>
+      <button class="nav active">直播控制台</button>
+      <button class="nav">直播商品组合</button>
+      <button class="nav">直播送好礼</button>
+      <button class="nav">数据分析</button>
+      <button class="nav">账号健康</button>
+    </aside>
+
+    <main class="main">
+      <div class="title-row">
+        <div class="title">直播控制台 <small id="startInfo">开始时间: --</small></div>
+        <div class="view-switch">
+          <button id="swIdle" class="vbtn">控制台(未开播)</button>
+          <button id="swLive" class="vbtn">控制台(开播)</button>
+          <button id="swOverview" class="vbtn">直播大屏</button>
+        </div>
+      </div>
+
+      <section id="viewDashboard">
+        <div class="dash-grid">
+          <div class="card">
+            <div class="card-head">
+              <span>商品（20/150）</span>
+              <span class="head-muted" id="liveStateText">状态：未开播</span>
+            </div>
+            <div class="tabs">
+              <button class="tab active">商品</button>
+              <button class="tab">送好礼活动</button>
+              <button class="tab">看板</button>
+              <button class="tab">拍卖</button>
+            </div>
+            <div class="prod-wrap">
+              <div class="search">
+                <input placeholder="搜索商品 ID 或商品名称" />
+                <button class="btn">+ 添加</button>
+              </div>
+
+              <div class="filter-row">
+                <span>☐ 全部</span>
+                <span class="chip">所有类目</span>
+                <span class="chip">所有库存</span>
+                <span class="chip">全部价格</span>
+              </div>
+
+              <div class="thumb-row" id="thumbRow"></div>
+
+              <div id="pinnedSpot" class="pinned-spot empty">未置顶商品。请从下方列表点击置顶。</div>
+
+              <div id="productScroll" class="product-scroll">
+                <div class="list-header">
+                  <span>此直播中的商品列表</span>
+                  <span id="listHint">可滚动 · 点击行可选中</span>
+                </div>
+                <div id="productList" class="list-body"></div>
+              </div>
+
+              <div id="opsPanel" class="prod-ops" data-e2e="ops-panel">
+                <button id="btnFlash" class="btn primary" data-e2e="flash-sale-btn" data-op="flash_toggle">秒杀活动上架</button>
+                <button id="btnGlobalPin" class="btn pin" data-e2e="pin-selected-btn" data-op="pin_selected">置顶选中链接</button>
+                <button id="btnGlobalUnpin" class="btn unpin" data-e2e="unpin-selected-btn" data-op="unpin_selected">取消置顶</button>
+                <span id="flashBadge" class="tag hidden">秒杀进行中</span>
+              </div>
+              <span class="ops-hint">运营操作区（置顶 / 秒杀活动）</span>
+              <div id="opsStatus" class="ops-status" data-e2e="ops-status">运营状态：待命</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="preview-shell">
+              <div class="preview-head">
+                <div>
+                  <span class="live-dot"></span>视频 | 脚本 | 时长 <span id="liveDuration">00:00:00</span>
+                </div>
+                <button class="btn">开始直播</button>
+              </div>
+
+              <div id="videoHint" class="video-zone">暂无视频推荐</div>
+
+              <div class="live-product" id="liveCard">
+                <div class="thumb"></div>
+                <div>
+                  <div id="liveCardTitle" class="live-title">等待商品置顶...</div>
+                  <div id="liveCardMeta" class="live-meta">请先置顶商品</div>
+                </div>
+                <button class="btn pin">置顶</button>
+              </div>
+
+              <div class="chat-block">
+                <div>
+                  <div class="chat-tabs"><b>全部</b><span>商品相关</span></div>
+                  <div id="chatList" class="chat-list" data-e2e="live-chat-container">
+                    <div class="chat-item" data-e2e="chat-message"><span class="owner" data-e2e="message-owner-name">msgemhair1</span>VIP fast shipping for u dear</div>
+                    <div class="chat-item" data-e2e="chat-message"><span class="owner" data-e2e="message-owner-name">msgemhair1</span>What’s good, beautiful ladies! Welcome to Msgem!</div>
+                    <div class="chat-item" data-e2e="chat-message"><span class="owner" data-e2e="message-owner-name">lisa</span>Can you pin number 3 please?</div>
+                  </div>
+                </div>
+                <div class="chat-input">
+                  <textarea id="chatInput" data-e2e="chat-input" maxlength="100" placeholder="请输入内容......"></textarea>
+                  <button id="chatSend" class="btn" data-e2e="chat-send-button">发送</button>
+                  <div class="composer-foot"><span id="chatCount">0</span>/100</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="right-col">
+            <div class="card">
+              <div class="card-head">直播分析</div>
+              <div class="kpi-grid">
+                <div class="kpi"><div class="k">GMV</div><div id="kpiGmv" class="v">--</div></div>
+                <div class="kpi"><div class="k">实时在线人数</div><div id="kpiViewer" class="v">--</div></div>
+                <div class="kpi"><div class="k">直播曝光次数</div><div id="kpiExpo" class="v">--</div></div>
+                <div class="kpi"><div class="k">点击率</div><div id="kpiCtr" class="v">--</div></div>
+                <div class="kpi"><div class="k">人均观看时长</div><div class="v">11秒</div></div>
+                <div class="kpi"><div class="k">商品点击量</div><div id="kpiClick" class="v">52</div></div>
+              </div>
+            </div>
+            <div class="activity">
+              <div class="activity-head">
+                <span>活动</span>
+                <span class="head-muted">所有活动</span>
+              </div>
+              <div id="activityList" class="activity-list"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="viewOverview" class="hidden">
+        <div class="overview-wrap">
+          <div class="overview-grid">
+            <div>
+              <div class="dcard" style="height:314px;">
+                <h3>表现趋势</h3>
+                <div style="height:246px;border:1px solid var(--dark-line);border-radius:8px;display:grid;place-items:center;color:var(--dark-muted);">
+                  GMV / 观看人数趋势图（模拟）
+                </div>
+              </div>
+              <div class="dcard" style="margin-top:10px;">
+                <h3>流量来源</h3>
+                <table class="dtable">
+                  <thead><tr><th>渠道</th><th>GMV</th><th>曝光</th></tr></thead>
+                  <tbody>
+                    <tr><td>推荐流</td><td>100%</td><td>50.04%</td></tr>
+                    <tr><td>直播预览</td><td>0%</td><td>36.66%</td></tr>
+                    <tr><td>视频主页点击量</td><td>0%</td><td>7.68%</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div>
+              <div class="hero">
+                <div class="hero-title">GMV ($)</div>
+                <div id="heroGmv" class="hero-big">74</div>
+                <div class="hero-row">
+                  <div class="hero-cell">成交件数<b id="heroOrders">2</b></div>
+                  <div class="hero-cell">当前观看人数<b id="heroViewers">4</b></div>
+                  <div class="hero-cell">曝光次数<b id="heroExpo">7.93K</b></div>
+                  <div class="hero-cell">点击率<b id="heroCtr">8.16%</b></div>
+                </div>
+              </div>
+
+              <div class="dcard" style="margin-top:10px;">
+                <h3>商品列表</h3>
+                <table class="dtable">
+                  <thead><tr><th>序号</th><th>商品</th><th>曝光</th><th>点击率</th><th>状态</th></tr></thead>
+                  <tbody id="overviewRows"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div>
+              <div class="dcard">
+                <h3>建议</h3>
+                <div style="border:1px solid var(--dark-line);border-radius:8px;padding:10px;line-height:1.55;color:#d1d5db;">
+                  置顶高点击商品可提升转化。<br />
+                  <button id="btnOverviewPin" class="btn pin" style="margin-top:8px;">置顶</button>
+                </div>
+              </div>
+              <div class="dcard" style="margin-top:10px;">
+                <h3>用户画像</h3>
+                <div style="height:250px;border:1px solid var(--dark-line);border-radius:8px;display:grid;place-items:center;color:var(--dark-muted);">
+                  客户画像（模拟）
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toastWrap" class="toast-wrap"></div>
+
+  <script>
+    const baseTitles = [
+      "Msgem Hair 15A Burmese Curly Bundles Raw Human Hair",
+      "<Live Only> Msgem Hair 15A Raw Hair Bundles Burmese",
+      "<Live Only> Msgem Hair 15A Kinky Straight 100% Human",
+      "<Live Only> Msgem Hair 15A Grade Brazilian Raw Hair",
+      "Msgem Hair 15A Grade Brazilian Raw Hair Material",
+      "<Live Only> Msgem Water Wave Hair Bundles",
+      "Msgem Kinky Curly Human Hair Wig",
+      "Lace Front Human Hair Wig 30inch"
+    ];
+
+    const products = Array.from({ length: 20 }).map((_, i) => {
+      const idx = i + 1;
+      const base = baseTitles[i % baseTitles.length];
+      const price = (38 + (i % 7) * 7.6 + (i % 3) * 1.1).toFixed(2);
+      const stock = i < 3 ? "49.9K" : `${Math.max(117 - i * 3, 18)}`;
+      return {
+        id: idx,
+        title: base,
+        price: Number(price),
+        stock,
+        clicked: Math.floor(Math.random() * 5),
+        cart: Math.floor(Math.random() * 3),
+        done: Math.floor(Math.random() * 2)
+      };
+    });
+
+    const state = {
+      live: false,
+      currentView: "dashboard_idle",
+      startedAt: null,
+      pinnedId: null,
+      selectedId: 3,
+      flashLive: false,
+      gmv: 0,
+      viewers: 0,
+      expo: 0,
+      ctr: 0,
+      orders: 0,
+      clicks: 52,
+      activities: [],
+      actionPending: null
+    };
+
+    const el = {
+      clock: document.getElementById("clock"),
+      modeBadge: document.getElementById("modeBadge"),
+      btnStartLive: document.getElementById("btnStartLive"),
+      swIdle: document.getElementById("swIdle"),
+      swLive: document.getElementById("swLive"),
+      swOverview: document.getElementById("swOverview"),
+      startInfo: document.getElementById("startInfo"),
+      liveStateText: document.getElementById("liveStateText"),
+      thumbRow: document.getElementById("thumbRow"),
+      pinnedSpot: document.getElementById("pinnedSpot"),
+      productScroll: document.getElementById("productScroll"),
+      productList: document.getElementById("productList"),
+      listHint: document.getElementById("listHint"),
+      btnFlash: document.getElementById("btnFlash"),
+      btnGlobalPin: document.getElementById("btnGlobalPin"),
+      btnGlobalUnpin: document.getElementById("btnGlobalUnpin"),
+      flashBadge: document.getElementById("flashBadge"),
+      opsStatus: document.getElementById("opsStatus"),
+      videoHint: document.getElementById("videoHint"),
+      liveDuration: document.getElementById("liveDuration"),
+      liveCardTitle: document.getElementById("liveCardTitle"),
+      liveCardMeta: document.getElementById("liveCardMeta"),
+      chatList: document.getElementById("chatList"),
+      chatInput: document.getElementById("chatInput"),
+      chatSend: document.getElementById("chatSend"),
+      chatCount: document.getElementById("chatCount"),
+      kpiGmv: document.getElementById("kpiGmv"),
+      kpiViewer: document.getElementById("kpiViewer"),
+      kpiExpo: document.getElementById("kpiExpo"),
+      kpiCtr: document.getElementById("kpiCtr"),
+      kpiClick: document.getElementById("kpiClick"),
+      activityList: document.getElementById("activityList"),
+      viewDashboard: document.getElementById("viewDashboard"),
+      viewOverview: document.getElementById("viewOverview"),
+      heroGmv: document.getElementById("heroGmv"),
+      heroOrders: document.getElementById("heroOrders"),
+      heroViewers: document.getElementById("heroViewers"),
+      heroExpo: document.getElementById("heroExpo"),
+      heroCtr: document.getElementById("heroCtr"),
+      overviewRows: document.getElementById("overviewRows"),
+      btnOverviewPin: document.getElementById("btnOverviewPin")
+    };
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function fmtMoney(v) { return `$${v.toFixed(1)}`; }
+    function fmtK(v) { return v >= 1000 ? `${(v / 1000).toFixed(2)}K` : String(v); }
+    function fmtPct(v) { return `${v.toFixed(2)}%`; }
+
+    function toast(msg) {
+      const wrap = document.getElementById("toastWrap");
+      const t = document.createElement("div");
+      t.className = "toast";
+      t.textContent = msg;
+      wrap.appendChild(t);
+      setTimeout(() => t.remove(), 2200);
+    }
+
+    function addActivity(msg) {
+      state.activities.unshift({ ts: new Date(), msg });
+      state.activities = state.activities.slice(0, 120);
+      renderActivity();
+    }
+
+    function setOpsStatus(msg, level = "normal") {
+      if (!el.opsStatus) return;
+      el.opsStatus.classList.remove("ok", "warn");
+      if (level === "ok" || level === "warn") {
+        el.opsStatus.classList.add(level);
+      }
+      el.opsStatus.textContent = `运营状态：${msg}`;
+    }
+
+    function renderActivity() {
+      if (!state.activities.length) {
+        el.activityList.innerHTML = '<div class="act-row">直播期间，观众活动会在此处显示。</div>';
+        return;
+      }
+      el.activityList.innerHTML = state.activities.map(a => {
+        const hh = String(a.ts.getHours()).padStart(2, "0");
+        const mm = String(a.ts.getMinutes()).padStart(2, "0");
+        const ss = String(a.ts.getSeconds()).padStart(2, "0");
+        return `<div class="act-row">[${hh}:${mm}:${ss}] ${a.msg}</div>`;
+      }).join("");
+    }
+
+    function renderThumbs() {
+      el.thumbRow.innerHTML = products.slice(0, 5).map(() => '<div class="mini-thumb"></div>').join("") + '<span style="font-size:12px;color:#6b7280;">+15</span>';
+    }
+
+    function withPending(actionKey) {
+      return state.actionPending === actionKey;
+    }
+
+    function renderPinnedSpot() {
+      if (!state.pinnedId) {
+        el.pinnedSpot.className = "pinned-spot empty";
+        el.pinnedSpot.textContent = "未置顶商品。请从下方列表点击置顶。";
+        return;
+      }
+      const p = products.find(x => x.id === state.pinnedId);
+      el.pinnedSpot.className = "pinned-spot";
+      el.pinnedSpot.innerHTML = `
+        <div class="thumb"></div>
+        <div>
+          <div class="pinned-title">序号${p.id}（${p.id}号链接）${p.title}</div>
+          <div class="pinned-meta">起始价 $${p.price.toFixed(2)} ｜ 库存 ${p.stock} ｜ 当前置顶中</div>
+        </div>
+        <button class="btn unpin ${withPending('pin') ? 'loading' : ''}" data-e2e="pin-product-button" data-product-index="${p.id}">${withPending('pin') ? '处理中...' : '取消置顶'}</button>
+      `;
+    }
+
+    function renderProducts() {
+      el.productList.innerHTML = products.map(p => {
+        const pinned = state.pinnedId === p.id;
+        const selected = state.selectedId === p.id;
+        const btnText = pinned ? (withPending("pin") ? "处理中..." : "取消置顶") : (withPending("pin") ? "处理中..." : "置顶");
+        return `
+          <div class="prod-row item-row ${pinned ? "pinned" : ""} ${selected ? "selected" : ""}" data-e2e="product-row" data-index="${p.id}">
+            <div class="index-badge">${p.id}</div>
+            <div class="thumb"></div>
+            <div>
+              <div class="ptitle">序号${p.id}（${p.id}号链接）${p.title} ${pinned ? '<span class="tag">已置顶</span>' : ''}</div>
+              <div class="pprice">$${p.price.toFixed(2)}</div>
+              <div class="pmeta">库存量: ${p.stock} ｜ 申请展示: 0</div>
+              <div class="pstats">
+                <div>点击次数 ${p.clicked}</div>
+                <div>加购次数 ${p.cart}</div>
+                <div>成交件数 ${p.done}</div>
+              </div>
+            </div>
+            <div class="prod-actions">
+              <div class="icon-list">✎ 🗑 ↑</div>
+              <button class="btn ${pinned ? "unpin" : "pin"} ${withPending("pin") ? "loading" : ""}" data-e2e="pin-product-button" data-product-index="${p.id}">${btnText}</button>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderLiveCard() {
+      if (!state.pinnedId) {
+        el.liveCardTitle.textContent = "等待商品置顶...";
+        el.liveCardMeta.textContent = "请先置顶商品";
+        return;
+      }
+      const p = products.find(x => x.id === state.pinnedId);
+      el.liveCardTitle.textContent = `<Live Only> ${p.title}`;
+      el.liveCardMeta.textContent = `序号${p.id} 已置顶 ｜ $${p.price.toFixed(2)} ｜ 库存 ${p.stock}`;
+    }
+
+    function renderFlash() {
+      if (state.flashLive) {
+        el.btnFlash.textContent = withPending("flash") ? "处理中..." : "结束秒杀活动";
+        el.btnFlash.classList.remove("primary");
+        el.btnFlash.classList.add("unpin");
+        el.flashBadge.classList.remove("hidden");
+      } else {
+        el.btnFlash.textContent = withPending("flash") ? "处理中..." : "秒杀活动上架";
+        el.btnFlash.classList.remove("unpin");
+        el.btnFlash.classList.add("primary");
+        el.flashBadge.classList.add("hidden");
+      }
+      el.btnFlash.classList.toggle("loading", withPending("flash"));
+      el.btnFlash.disabled = withPending("flash") || withPending("pin");
+      if (el.btnGlobalUnpin) {
+        el.btnGlobalUnpin.disabled = withPending("flash") || withPending("pin");
+      }
+    }
+
+    function renderKpi() {
+      el.kpiGmv.textContent = state.live ? fmtMoney(state.gmv) : "--";
+      el.kpiViewer.textContent = state.live ? String(state.viewers) : "--";
+      el.kpiExpo.textContent = state.live ? fmtK(state.expo) : "--";
+      el.kpiCtr.textContent = state.live ? fmtPct(state.ctr) : "--";
+      el.kpiClick.textContent = state.live ? String(state.clicks) : "--";
+
+      el.heroGmv.textContent = Math.round(state.gmv).toString();
+      el.heroOrders.textContent = String(state.orders);
+      el.heroViewers.textContent = String(state.viewers || 0);
+      el.heroExpo.textContent = fmtK(state.expo || 0);
+      el.heroCtr.textContent = fmtPct(state.ctr || 0);
+    }
+
+    function renderOverviewRows() {
+      el.overviewRows.innerHTML = products.slice(0, 10).map(p => {
+        const pinned = state.pinnedId === p.id;
+        const expo = Math.floor(70 + Math.random() * 260);
+        const ctr = (1.2 + Math.random() * 8).toFixed(2);
+        return `<tr data-e2e="product-row"><td>${p.id}</td><td>${p.title} ${pinned ? '<span class="tag">已置顶</span>' : ''}</td><td>${expo}</td><td>${ctr}%</td><td>${pinned ? '已置顶' : '未置顶'}</td></tr>`;
+      }).join("");
+    }
+
+    function renderLiveState() {
+      el.liveStateText.textContent = `状态：${state.live ? "开播中" : "未开播"}`;
+      el.videoHint.textContent = state.live ? "直播画面模拟区域" : "暂无视频推荐";
+      el.btnStartLive.disabled = state.live;
+      el.btnStartLive.textContent = state.live ? "直播已开始" : "立即开始直播";
+      el.startInfo.textContent = state.startedAt ? `开始时间: ${state.startedAt.toLocaleString()}` : "开始时间: --";
+      el.listHint.textContent = state.live ? "可滚动 · 点击行可选中" : "未开播：可预览列表";
+      if (!state.live) {
+        setOpsStatus("未开播（可预览，不能置顶/上架）", "warn");
+      } else if (state.flashLive) {
+        setOpsStatus(`秒杀进行中（${state.pinnedId || "-"}号链接）`, "ok");
+      } else if (state.pinnedId) {
+        setOpsStatus(`已置顶 ${state.pinnedId} 号链接，待上架秒杀`, "ok");
+      } else {
+        setOpsStatus("开播中，等待置顶商品");
+      }
+    }
+
+    function renderView() {
+      const isOverview = state.currentView === "overview";
+      el.viewDashboard.classList.toggle("hidden", isOverview);
+      el.viewOverview.classList.toggle("hidden", !isOverview);
+
+      el.swIdle.classList.toggle("active", state.currentView === "dashboard_idle");
+      el.swLive.classList.toggle("active", state.currentView === "dashboard_live");
+      el.swOverview.classList.toggle("active", isOverview);
+
+      el.modeBadge.textContent = isOverview ? "Mock · 直播大屏" : (state.live ? "Mock · 控制台(开播)" : "Mock · 控制台(未开播)");
+
+      renderThumbs();
+      renderPinnedSpot();
+      renderProducts();
+      renderLiveCard();
+      renderFlash();
+      renderLiveState();
+      renderKpi();
+      renderOverviewRows();
+      renderActivity();
+    }
+
+    function setRoute(view) {
+      state.currentView = view;
+      const path = view === "overview"
+        ? "/workbench/live/overview?mock_tiktok_shop=1"
+        : `/streamer/live/product/dashboard?is_login_callback=1&mock_tiktok_shop=1&view=${encodeURIComponent(view)}`;
+      history.replaceState({}, "", path);
+      renderView();
+    }
+
+    function ensureLiveInitialized() {
+      if (!state.live) {
+        state.live = true;
+        state.startedAt = new Date();
+        state.gmv = 74.2;
+        state.viewers = 4;
+        state.expo = 7874;
+        state.ctr = 8.15;
+        state.orders = 2;
+        state.clicks = 52;
+      }
+    }
+
+    async function pinProduct(idx) {
+      if (state.actionPending) {
+        toast("操作进行中，请稍候");
+        setOpsStatus("操作进行中，请稍候", "warn");
+        return;
+      }
+      if (!state.live) {
+        toast("未开播，无法置顶商品");
+        setOpsStatus("未开播，无法置顶商品", "warn");
+        return;
+      }
+      const target = products.find(p => p.id === idx);
+      if (!target) {
+        toast("未找到对应链接");
+        setOpsStatus("未找到对应链接", "warn");
+        return;
+      }
+
+      state.selectedId = idx;
+      state.actionPending = "pin";
+      renderView();
+      await sleep(320 + Math.floor(Math.random() * 420));
+
+      if (state.pinnedId === idx) {
+        state.pinnedId = null;
+        toast(`已取消置顶：${idx}号链接`);
+        addActivity(`取消置顶了 ${idx}号链接`);
+        setOpsStatus(`已取消置顶：${idx}号链接`);
+      } else {
+        state.pinnedId = idx;
+        toast(`置顶成功：${idx}号链接`);
+        addActivity(`置顶了 ${idx}号链接`);
+        setOpsStatus(`置顶成功：${idx}号链接`, "ok");
+      }
+
+      state.actionPending = null;
+      renderView();
+    }
+
+    async function toggleFlash() {
+      if (state.actionPending) {
+        toast("操作进行中，请稍候");
+        setOpsStatus("操作进行中，请稍候", "warn");
+        return;
+      }
+      if (!state.live) {
+        toast("未开播，不能上架秒杀活动");
+        setOpsStatus("未开播，不能上架秒杀活动", "warn");
+        return;
+      }
+      if (!state.pinnedId) {
+        toast("请先置顶商品，再开启秒杀");
+        setOpsStatus("请先置顶商品，再开启秒杀", "warn");
+        return;
+      }
+
+      state.actionPending = "flash";
+      renderFlash();
+      await sleep(420 + Math.floor(Math.random() * 520));
+
+      state.flashLive = !state.flashLive;
+      if (state.flashLive) {
+        toast("秒杀上架成功");
+        addActivity(`秒杀活动上架成功（${state.pinnedId}号链接）`);
+        setOpsStatus(`秒杀上架成功（${state.pinnedId}号链接）`, "ok");
+      } else {
+        toast("秒杀活动已结束");
+        addActivity("秒杀活动已结束");
+        setOpsStatus("秒杀活动已结束");
+      }
+
+      state.actionPending = null;
+      renderFlash();
+    }
+
+    function sendChat() {
+      const txt = el.chatInput.value.trim();
+      if (!txt) return;
+      const item = document.createElement("div");
+      item.className = "chat-item";
+      item.setAttribute("data-e2e", "chat-message");
+      item.innerHTML = `<span class="owner" data-e2e="message-owner-name">msgemhair1</span>${txt}`;
+      el.chatList.appendChild(item);
+      el.chatList.scrollTop = el.chatList.scrollHeight;
+      el.chatInput.value = "";
+      el.chatCount.textContent = "0";
+      addActivity(`主播发送消息：${txt.slice(0, 36)}`);
+    }
+
+    function enhanceNativeScroll(node) {
+      if (!node) return;
+      node.style.overflowY = "auto";
+      node.style.overflowX = "hidden";
+      // 保留原生滚动手感，避免自定义 wheel 拦截导致“滑不动”。
+      node.addEventListener("wheel", () => {}, { passive: true });
+    }
+
+    function tick() {
+      const now = new Date();
+      el.clock.textContent = now.toTimeString().slice(0, 8);
+
+      if (state.live && state.startedAt) {
+        const sec = Math.floor((Date.now() - state.startedAt.getTime()) / 1000);
+        const hh = String(Math.floor(sec / 3600)).padStart(2, "0");
+        const mm = String(Math.floor((sec % 3600) / 60)).padStart(2, "0");
+        const ss = String(sec % 60).padStart(2, "0");
+        el.liveDuration.textContent = `${hh}:${mm}:${ss}`;
+
+        state.viewers = Math.max(1, 4 + Math.floor(Math.random() * 5));
+        state.expo += Math.floor(Math.random() * 22 + 7);
+        state.ctr = 7.8 + Math.random() * 0.9;
+
+        if (Math.random() < 0.16) {
+          const order = 38 + Math.random() * 108;
+          state.orders += 1;
+          state.gmv += order;
+          const p = products[Math.floor(Math.random() * products.length)];
+          p.done += 1;
+          p.clicked += Math.random() < 0.6 ? 1 : 0;
+          addActivity(`观众下单：序号${p.id} ｜ +$${order.toFixed(2)}`);
+        }
+
+        if (Math.random() < 0.08) {
+          const samples = [
+            "just joined the LIVE",
+            "刚刚进入直播间",
+            "can you pin #3?",
+            "求上架秒杀链接",
+            "VIP fast shipping?"
+          ];
+          addActivity(`观众互动：${samples[Math.floor(Math.random() * samples.length)]}`);
+        }
+
+        renderKpi();
+      }
+    }
+
+    document.addEventListener("click", async (e) => {
+      const pinBtn = e.target.closest('[data-e2e="pin-product-button"]');
+      if (pinBtn) {
+        const idx = Number(pinBtn.getAttribute("data-product-index"));
+        await pinProduct(idx);
+        return;
+      }
+
+      const row = e.target.closest('.prod-row[data-e2e="product-row"]');
+      if (row) {
+        state.selectedId = Number(row.getAttribute("data-index"));
+        renderProducts();
+        try {
+          row.scrollIntoView({ block: "nearest", inline: "nearest" });
+        } catch (_) {}
+        return;
+      }
+
+      if (e.target.id === "btnGlobalPin") {
+        const idx = state.selectedId || state.pinnedId || 1;
+        await pinProduct(idx);
+        return;
+      }
+
+      if (e.target.id === "btnGlobalUnpin") {
+        const idx = state.pinnedId || state.selectedId || 1;
+        if (state.pinnedId !== idx && state.pinnedId) {
+          state.selectedId = state.pinnedId;
+        }
+        await pinProduct(state.pinnedId || idx);
+        return;
+      }
+
+      if (e.target.id === "btnFlash") {
+        await toggleFlash();
+        return;
+      }
+
+      if (e.target.id === "chatSend") {
+        sendChat();
+        return;
+      }
+
+      if (e.target.id === "btnOverviewPin") {
+        ensureLiveInitialized();
+        setRoute("dashboard_live");
+        await pinProduct(3);
+        return;
+      }
+
+      if (e.target.id === "btnStartLive") {
+        ensureLiveInitialized();
+        addActivity("直播开始，数据看板已激活");
+        toast("直播已开始");
+        if (state.currentView === "dashboard_idle") {
+          setRoute("dashboard_live");
+        } else {
+          renderView();
+        }
+      }
+    });
+
+    el.chatInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendChat();
+      }
+    });
+
+    el.chatInput.addEventListener("input", () => {
+      el.chatCount.textContent = String(el.chatInput.value.length);
+    });
+
+    el.swIdle.addEventListener("click", () => {
+      state.live = false;
+      state.startedAt = null;
+      state.flashLive = false;
+      state.pinnedId = null;
+      setRoute("dashboard_idle");
+    });
+
+    el.swLive.addEventListener("click", () => {
+      ensureLiveInitialized();
+      setRoute("dashboard_live");
+    });
+
+    el.swOverview.addEventListener("click", () => {
+      ensureLiveInitialized();
+      setRoute("overview");
+    });
+
+    (function boot() {
+      const path = location.pathname.toLowerCase();
+      const params = new URLSearchParams(location.search);
+      const qView = params.get("view");
+
+      if (path.includes("/workbench/live/overview")) {
+        state.currentView = "overview";
+        ensureLiveInitialized();
+        state.startedAt = new Date(Date.now() - 78 * 60 * 1000);
+        state.pinnedId = 3;
+        state.selectedId = 3;
+      } else if (qView === "dashboard_idle") {
+        state.currentView = "dashboard_idle";
+      } else {
+        state.currentView = "dashboard_live";
+        ensureLiveInitialized();
+        state.startedAt = new Date(Date.now() - 78 * 60 * 1000);
+        state.pinnedId = 3;
+        state.selectedId = 3;
+      }
+
+      addActivity("Mock 页面已加载，可测试置顶/秒杀链路");
+      renderView();
+
+      enhanceNativeScroll(el.productScroll);
+      enhanceNativeScroll(el.chatList);
+      enhanceNativeScroll(el.activityList);
+
+      setInterval(tick, 1000);
+    })();
+  </script>
+</body>
+</html>

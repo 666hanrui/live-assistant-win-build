@@ -1,0 +1,536 @@
+{
+  "meta": {
+    "name": "voice_stress_pack_v1",
+    "description": "语音口令压测样本（中英文，含正负样本、干扰样本）"
+  },
+  "cases": [
+    {
+      "id": "P001",
+      "text": "助播 把3号链接置顶一下",
+      "lang": "zh-CN",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 3 },
+        "loose": { "action": "pin_product", "link_index": 3 }
+      }
+    },
+    {
+      "id": "P002",
+      "text": "主播助手 将十号链接置顶",
+      "lang": "zh-CN",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 10 },
+        "loose": { "action": "pin_product", "link_index": 10 }
+      }
+    },
+    {
+      "id": "P003",
+      "text": "助播 把十一号链接置顶",
+      "lang": "zh-CN",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 11 },
+        "loose": { "action": "pin_product", "link_index": 11 }
+      }
+    },
+    {
+      "id": "P004",
+      "text": "助播 置顶二十号链接",
+      "lang": "zh-CN",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 20 },
+        "loose": { "action": "pin_product", "link_index": 20 }
+      }
+    },
+    {
+      "id": "P005",
+      "text": "assistant pin link three please",
+      "lang": "en-US",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 3 },
+        "loose": { "action": "pin_product", "link_index": 3 }
+      }
+    },
+    {
+      "id": "P006",
+      "text": "cohost top item fifth",
+      "lang": "en-US",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 5 },
+        "loose": { "action": "pin_product", "link_index": 5 }
+      }
+    },
+    {
+      "id": "P007",
+      "text": "assistant pin number twenty",
+      "lang": "en-US",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 20 },
+        "loose": { "action": "pin_product", "link_index": 20 }
+      }
+    },
+    {
+      "id": "P008",
+      "text": "assistant make link number eleven at top",
+      "lang": "en-US",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 11 },
+        "loose": { "action": "pin_product", "link_index": 11 }
+      }
+    },
+    {
+      "id": "P009",
+      "text": "assistant bring product number two on top",
+      "lang": "en-US",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 2 },
+        "loose": { "action": "pin_product", "link_index": 2 }
+      }
+    },
+    {
+      "id": "P010",
+      "text": "assistant top number 4",
+      "lang": "en-US",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 4 },
+        "loose": { "action": "pin_product", "link_index": 4 }
+      }
+    },
+    {
+      "id": "P011",
+      "text": "assistant pin no 6",
+      "lang": "en-US",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 6 },
+        "loose": { "action": "pin_product", "link_index": 6 }
+      }
+    },
+    {
+      "id": "P012",
+      "text": "assistant pin item 12",
+      "lang": "en-US",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 12 },
+        "loose": { "action": "pin_product", "link_index": 12 }
+      }
+    },
+    {
+      "id": "P013",
+      "text": "助播 将秒杀活动上架一下",
+      "lang": "zh-CN",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P014",
+      "text": "助播 开一下秒杀活动",
+      "lang": "zh-CN",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P015",
+      "text": "assistant start flash sale now",
+      "lang": "en-US",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P016",
+      "text": "cohost launch flash promotion",
+      "lang": "en-US",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P017",
+      "text": "assistant enable limited offer",
+      "lang": "en-US",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P018",
+      "text": "assistant put flash sale live",
+      "lang": "en-US",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P019",
+      "text": "assistant lounge the flash sale",
+      "lang": "en-US",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P020",
+      "text": "assistant launch the flash sail",
+      "lang": "en-US",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P021",
+      "text": "cohost lunch flash sale now",
+      "lang": "en-US",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P022",
+      "text": "assistant long to the flash sale",
+      "lang": "en-US",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P023",
+      "text": "assistant launch the flash cell",
+      "lang": "en-US",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "P024",
+      "text": "co hoster pin number three to the top",
+      "lang": "en-US",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 3 },
+        "loose": { "action": "pin_product", "link_index": 3 }
+      }
+    },
+    {
+      "id": "P025",
+      "text": "assistant pick link for to the top",
+      "lang": "en-US",
+      "category": "pin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 4 },
+        "loose": { "action": "pin_product", "link_index": 4 }
+      }
+    },
+    {
+      "id": "P026",
+      "text": "assistant un pin link three",
+      "lang": "en-US",
+      "category": "unpin_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "unpin_product", "link_index": 3 },
+        "loose": { "action": "unpin_product", "link_index": 3 }
+      }
+    },
+    {
+      "id": "L001",
+      "text": "把3号链接置顶一下",
+      "lang": "zh-CN",
+      "category": "pin_no_wake",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "pin_product", "link_index": 3 }
+      }
+    },
+    {
+      "id": "L002",
+      "text": "置顶二号链接",
+      "lang": "zh-CN",
+      "category": "pin_no_wake",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "pin_product", "link_index": 2 }
+      }
+    },
+    {
+      "id": "L003",
+      "text": "pin link three",
+      "lang": "en-US",
+      "category": "pin_no_wake",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "pin_product", "link_index": 3 }
+      }
+    },
+    {
+      "id": "L004",
+      "text": "top product 7",
+      "lang": "en-US",
+      "category": "pin_no_wake",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "pin_product", "link_index": 7 }
+      }
+    },
+    {
+      "id": "L005",
+      "text": "将秒杀活动上架",
+      "lang": "zh-CN",
+      "category": "flash_no_wake",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "L006",
+      "text": "start flash promotion now",
+      "lang": "en-US",
+      "category": "flash_no_wake",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "N001",
+      "text": "助播 今天直播间氛围真好",
+      "lang": "zh-CN",
+      "category": "negative",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "none", "link_index": null }
+      }
+    },
+    {
+      "id": "N002",
+      "text": "assistant how are you today",
+      "lang": "en-US",
+      "category": "negative",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "none", "link_index": null }
+      }
+    },
+    {
+      "id": "N003",
+      "text": "shipping time please",
+      "lang": "en-US",
+      "category": "negative",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "none", "link_index": null }
+      }
+    },
+    {
+      "id": "N004",
+      "text": "助播 秒杀太快了我没抢到",
+      "lang": "zh-CN",
+      "category": "negative",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "none", "link_index": null }
+      }
+    },
+    {
+      "id": "N005",
+      "text": "assistant top quality fabric",
+      "lang": "en-US",
+      "category": "negative",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "none", "link_index": null }
+      }
+    },
+    {
+      "id": "N006",
+      "text": "助播 把链接置顶一下",
+      "lang": "zh-CN",
+      "category": "negative",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "none", "link_index": null }
+      }
+    },
+    {
+      "id": "N007",
+      "text": "assistant pin this one please",
+      "lang": "en-US",
+      "category": "negative",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "none", "link_index": null }
+      }
+    },
+    {
+      "id": "N008",
+      "text": "助播 置顶零号链接",
+      "lang": "zh-CN",
+      "category": "negative",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "none", "link_index": null }
+      }
+    },
+    {
+      "id": "R001",
+      "text": "assistant topic 3 is fashion",
+      "lang": "en-US",
+      "category": "known_risk_false_positive",
+      "critical": false,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "none", "link_index": null }
+      }
+    },
+    {
+      "id": "R002",
+      "text": "助播 top1 这款不错",
+      "lang": "mixed",
+      "category": "known_risk_false_positive",
+      "critical": false,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "none", "link_index": null }
+      }
+    },
+    {
+      "id": "M001",
+      "text": "assistant pin link seventeen",
+      "lang": "en-US",
+      "category": "mixed_number",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 17 },
+        "loose": { "action": "pin_product", "link_index": 17 }
+      }
+    },
+    {
+      "id": "M002",
+      "text": "助播 把三号商品置顶",
+      "lang": "zh-CN",
+      "category": "mixed_number",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 3 },
+        "loose": { "action": "pin_product", "link_index": 3 }
+      }
+    },
+    {
+      "id": "M003",
+      "text": "cohost feature number nine",
+      "lang": "en-US",
+      "category": "mixed_number",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "pin_product", "link_index": 9 },
+        "loose": { "action": "pin_product", "link_index": 9 }
+      }
+    },
+    {
+      "id": "M004",
+      "text": "assistant flash deal on",
+      "lang": "en-US",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "M005",
+      "text": "助播 开始秒杀",
+      "lang": "zh-CN",
+      "category": "flash_positive",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "start_flash_sale", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    },
+    {
+      "id": "M006",
+      "text": "start flash sale",
+      "lang": "en-US",
+      "category": "flash_no_wake",
+      "critical": true,
+      "expect": {
+        "strict": { "action": "none", "link_index": null },
+        "loose": { "action": "start_flash_sale", "link_index": null }
+      }
+    }
+  ]
+}

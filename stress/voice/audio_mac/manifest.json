@@ -1,0 +1,86 @@
+[
+  {
+    "id": "P001",
+    "text": "助播 把3号链接置顶一下",
+    "lang": "zh-CN",
+    "voice": "Ting-Ting",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/P001.aiff"
+  },
+  {
+    "id": "P005",
+    "text": "assistant pin link three please",
+    "lang": "en-US",
+    "voice": "Samantha",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/P005.aiff"
+  },
+  {
+    "id": "P013",
+    "text": "助播 将秒杀活动上架一下",
+    "lang": "zh-CN",
+    "voice": "Ting-Ting",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/P013.aiff"
+  },
+  {
+    "id": "P015",
+    "text": "assistant start flash sale now",
+    "lang": "en-US",
+    "voice": "Samantha",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/P015.aiff"
+  },
+  {
+    "id": "L001",
+    "text": "把3号链接置顶一下",
+    "lang": "zh-CN",
+    "voice": "Ting-Ting",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/L001.aiff"
+  },
+  {
+    "id": "L003",
+    "text": "pin link three",
+    "lang": "en-US",
+    "voice": "Samantha",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/L003.aiff"
+  },
+  {
+    "id": "L005",
+    "text": "将秒杀活动上架",
+    "lang": "zh-CN",
+    "voice": "Ting-Ting",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/L005.aiff"
+  },
+  {
+    "id": "L006",
+    "text": "start flash promotion now",
+    "lang": "en-US",
+    "voice": "Samantha",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/L006.aiff"
+  },
+  {
+    "id": "N001",
+    "text": "助播 今天直播间氛围真好",
+    "lang": "zh-CN",
+    "voice": "Ting-Ting",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/N001.aiff"
+  },
+  {
+    "id": "N003",
+    "text": "shipping time please",
+    "lang": "en-US",
+    "voice": "Samantha",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/N003.aiff"
+  },
+  {
+    "id": "N006",
+    "text": "助播 把链接置顶一下",
+    "lang": "zh-CN",
+    "voice": "Ting-Ting",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/N006.aiff"
+  },
+  {
+    "id": "M002",
+    "text": "助播 把三号商品置顶",
+    "lang": "zh-CN",
+    "voice": "Ting-Ting",
+    "file": "/Users/han/Desktop/直播项目/stress/voice/audio_mac/M002.aiff"
+  }
+]

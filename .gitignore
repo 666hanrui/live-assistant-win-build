@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Secrets / local env
+.env
+.env.local
+
+# Build outputs
+dist/
+build/
+*.spec.bak
+
+# Runtime data
+logs/
+run/
+user_data/
+
+# Large/generated data
+data/chroma_db/
+data/whisper_cache/
+data/reports/
+data/analytics/
+
+# Temporary artifacts
+*.zip
+*.log

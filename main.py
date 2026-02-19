@@ -1,0 +1,2356 @@
+import time
+import threading
+import random
+import json
+import re
+import os
+import subprocess
+import signal
+import urllib.request
+import urllib.error
+from difflib import SequenceMatcher
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+from DrissionPage import ChromiumPage, ChromiumOptions
+from agents.vision_agent import VisionAgent
+from agents.atmosphere_agent import AtmosphereAgent
+from agents.operations_agent import OperationsAgent
+from agents.knowledge_agent import KnowledgeAgent
+from agents.voice_command_agent import VoiceCommandAgent
+from agents.analytics_agent import AnalyticsAgent
+from utils.logger import logger
+from utils.platform_utils import build_chrome_debug_commands, build_chrome_debug_launch_args
+import config.settings as settings
+
+class LiveAssistant:
+    def __init__(self):
+        self.is_running = False
+        self.vision = VisionAgent()
+        self.atmosphere = AtmosphereAgent()
+        self.knowledge = KnowledgeAgent()
+        self.operations = OperationsAgent(self.vision)
+        if hasattr(self.operations, "set_reaction_judge"):
+            self.operations.set_reaction_judge(self.knowledge)
+        if hasattr(self.operations, "set_action_planner"):
+            self.operations.set_action_planner(self.knowledge)
+        self.operation_execution_mode = "dom"
+        if hasattr(self.operations, "set_execution_mode"):
+            self.operation_execution_mode = self.operations.set_execution_mode(
+                getattr(settings, "OPERATION_EXECUTION_MODE", "dom")
+            )
+        self.web_info_source_mode = "ocr_hybrid"
+        if hasattr(self.vision, "set_info_source_mode"):
+            self.web_info_source_mode = self.vision.set_info_source_mode(
+                getattr(settings, "WEB_INFO_SOURCE_MODE", "ocr_hybrid")
+            )
+        self.voice = VoiceCommandAgent(self.vision)
+        self.analytics = AnalyticsAgent()
+        self._thread = None
+        self._stop_event = threading.Event()
+        # 存储最近 100 条弹幕用于前端显示
+        self.danmu_log = deque(maxlen=100)
+        self.voice_input_log = deque(maxlen=200)
+        self.last_danmu_time = time.time()
+        self.last_proactive_time = 0.0
+        self.reply_language = settings.DEFAULT_REPLY_LANGUAGE
+        self.tone_template = ""
+        self.reply_enabled = True
+        self.proactive_enabled = settings.PROACTIVE_ENABLED
+        self.voice_command_enabled = settings.VOICE_COMMAND_ENABLED
+        self._runtime_state_file = Path("data/runtime_state.json")
+        self.next_proactive_interval = random.uniform(
+            settings.PROACTIVE_MIN_INTERVAL,
+            settings.PROACTIVE_MAX_INTERVAL
+        )
+        self.message_cache = {}
+        self.user_reply_cache = {}
+        self.global_reply_cache = {}
+        self.voice_command_cache = {}
+        self.voice_action_cache = {}
+        self.sent_message_cache = {}
+        self.last_voice_poll_at = 0.0
+        self.last_voice_health_log_at = 0.0
+        self.last_voice_forced_restart_at = 0.0
+        self._google_voice_error_streak = 0
+        self._google_voice_error_last_at = 0.0
+        self.last_llm_query_at = 0.0
+        self.last_report_check_at = 0.0
+        self._start_lock = threading.Lock()
+        self.is_starting = False
+        self.last_start_error = ""
+        self.last_start_detail = ""
+        self.last_start_at = 0.0
+        self._last_browser_rebind_attempt_at = 0.0
+        self._load_runtime_state()
+
+    def _get_active_language(self):
+        valid_languages = set(settings.REPLY_LANGUAGES.values())
+        if self.reply_language in valid_languages:
+            return self.reply_language
+        return settings.DEFAULT_REPLY_LANGUAGE
+
+    def _get_voice_fallback_languages(self, active_language):
+        """
+        为语音口令选择回退语言（严格同语族）：
+        - 统一语言为英文时，仅允许英文语族；
+        - 统一语言为中文时，仅允许中文语族。
+        """
+        active = str(active_language or "").strip()
+        base = active.split("-")[0].lower() if active else ""
+        raw = list(getattr(settings, "VOICE_COMMAND_FALLBACK_LANGUAGES", []) or [])
+        if not raw:
+            return []
+
+        max_langs = max(1, int(getattr(settings, "VOICE_COMMAND_MAX_LANGS", 2) or 2))
+
+        def _dedupe(seq):
+            out = []
+            seen = set()
+            for item in seq:
+                item = str(item or "").strip()
+                if not item or item in seen:
+                    continue
+                seen.add(item)
+                out.append(item)
+            return out
+
+        raw = _dedupe(raw)
+        same_family = [lang for lang in raw if str(lang).split("-")[0].lower() == base] if base else list(raw)
+        candidates = same_family
+
+        # fallback 不包含 active 本身；总语言数上限由 max_langs 控制（包含 active）。
+        candidates = [lang for lang in candidates if lang != active]
+        if max_langs <= 1:
+            return []
+        return candidates[: max_langs - 1]
+
+    def _language_family(self, lang_code):
+        code = str(lang_code or "").strip().lower()
+        if code.startswith("zh"):
+            return "zh"
+        if code.startswith("en"):
+            return "en"
+        return ""
+
+    def _is_voice_language_match(self, text, detected_lang, active_language):
+        expected = self._language_family(active_language)
+        if not expected:
+            return True
+        detected = self._language_family(detected_lang)
+        raw = str(text or "")
+        has_cjk = bool(re.search(r"[\u4e00-\u9fff]", raw))
+        has_latin = bool(re.search(r"[A-Za-z]", raw))
+
+        if expected == "en":
+            if detected and detected != "en":
+                return False
+            if has_cjk:
+                return False
+            return True
+
+        if expected == "zh":
+            if detected and detected != "zh":
+                return False
+            if has_latin:
+                return False
+            return True
+
+        return True
+
+    def get_unified_language(self):
+        """统一语言：回复/暖场/知识库问答共用。"""
+        return self._get_active_language()
+
+    def get_startup_state(self):
+        return {
+            "is_running": bool(self.is_running),
+            "is_starting": bool(self.is_starting),
+            "last_start_error": self.last_start_error or "",
+            "last_start_detail": self.last_start_detail or "",
+            "last_start_at": self.last_start_at or 0.0,
+        }
+
+    def get_browser_connected(self):
+        """
+        连接状态自愈判断：
+        - 优先复用当前 page
+        - page 丢失时，若 DevTools 端口仍在线，则尝试轻量重挂接
+        """
+        if self.get_web_info_source_mode() == "screen_ocr":
+            try:
+                return bool(self.vision.ensure_connection())
+            except Exception:
+                return False
+
+        try:
+            page = getattr(self.vision, "page", None)
+            if page and self.vision._page_alive():
+                return True
+        except Exception:
+            pass
+
+        try:
+            if self._is_devtools_endpoint_ready(settings.BROWSER_PORT):
+                now = time.time()
+                # 限流重挂接，避免 dashboard 高频 rerun 触发反复扫描标签页。
+                if now - self._last_browser_rebind_attempt_at < 5.0:
+                    return False
+                self._last_browser_rebind_attempt_at = now
+                return bool(self.connect_browser())
+        except Exception:
+            pass
+        return False
+
+    def _load_runtime_state(self):
+        """加载上次运行的回复设置。"""
+        try:
+            if not self._runtime_state_file.exists():
+                return
+
+            data = json.loads(self._runtime_state_file.read_text(encoding="utf-8"))
+            language = data.get("unified_language") or data.get("reply_language")
+            tone_template = data.get("tone_template")
+            reply_enabled = data.get("reply_enabled")
+            proactive_enabled = data.get("proactive_enabled")
+            voice_enabled = data.get("voice_command_enabled")
+            voice_mic_index = data.get("voice_mic_device_index")
+            voice_mic_name_hint = data.get("voice_mic_name_hint")
+            voice_asr_provider = str(data.get("voice_asr_provider") or "").strip().lower()
+            operation_execution_mode = str(data.get("operation_execution_mode") or "").strip().lower()
+            web_info_source_mode = str(data.get("web_info_source_mode") or "").strip().lower()
+            human_like_settings = data.get("human_like_settings") or data.get("human_like") or {}
+
+            if language in set(settings.REPLY_LANGUAGES.values()):
+                self.reply_language = language
+            if isinstance(tone_template, str):
+                self.tone_template = tone_template.strip()
+            if isinstance(reply_enabled, bool):
+                self.reply_enabled = reply_enabled
+            if isinstance(proactive_enabled, bool):
+                self.proactive_enabled = proactive_enabled
+            if isinstance(voice_enabled, bool):
+                self.voice_command_enabled = voice_enabled
+            if hasattr(self.voice, "set_preferred_microphone"):
+                if voice_mic_index is not None or voice_mic_name_hint is not None:
+                    self.voice.set_preferred_microphone(
+                        device_index=voice_mic_index,
+                        name_hint=voice_mic_name_hint,
+                        restart_if_running=False,
+                    )
+            if voice_asr_provider == "google" and self.reply_language.startswith("zh"):
+                voice_asr_provider = "auto"
+            if voice_asr_provider in {"google", "auto", "sphinx", "whisper_local"}:
+                settings.VOICE_PYTHON_ASR_PROVIDER = voice_asr_provider
+            if operation_execution_mode:
+                self.set_operation_execution_mode(operation_execution_mode, persist=False)
+            if web_info_source_mode:
+                self.set_web_info_source_mode(web_info_source_mode, persist=False)
+            if isinstance(human_like_settings, dict) and human_like_settings:
+                self.set_human_like_settings(human_like_settings, persist=False)
+
+            logger.info(
+                "已加载上次设置: "
+                f"language={self.reply_language}, "
+                f"tone_template={'on' if self.tone_template else 'off'}, "
+                f"reply={'on' if self.reply_enabled else 'off'}, "
+                f"proactive={'on' if self.proactive_enabled else 'off'}, "
+                f"voice_command={'on' if self.voice_command_enabled else 'off'}, "
+                f"operation_mode={self.get_operation_execution_mode()}, "
+                f"web_info_mode={self.get_web_info_source_mode()}"
+            )
+        except Exception as e:
+            logger.warning(f"加载本地设置失败，使用默认设置: {e}")
+
+    def _save_runtime_state(self):
+        """持久化当前回复设置到本地文件。"""
+        payload = {
+            "unified_language": self._get_active_language(),
+            "reply_language": self._get_active_language(),
+            "tone_template": self.tone_template,
+            "reply_enabled": bool(self.reply_enabled),
+            "proactive_enabled": bool(self.proactive_enabled),
+            "voice_command_enabled": bool(self.voice_command_enabled),
+            "operation_execution_mode": self.get_operation_execution_mode(),
+            "web_info_source_mode": self.get_web_info_source_mode(),
+            "human_like_settings": self.get_human_like_settings(),
+        }
+        if hasattr(self.voice, "get_preferred_microphone"):
+            try:
+                mic_cfg = self.voice.get_preferred_microphone() or {}
+                payload["voice_mic_device_index"] = mic_cfg.get("deviceIndex")
+                payload["voice_mic_name_hint"] = mic_cfg.get("nameHint") or ""
+            except Exception:
+                pass
+        payload["voice_asr_provider"] = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local")
+        try:
+            self._runtime_state_file.parent.mkdir(parents=True, exist_ok=True)
+            self._runtime_state_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning(f"保存本地设置失败: {e}")
+
+    def update_reply_settings(self, language=None, tone_template=None):
+        """运行时更新回复语言与语气模板。"""
+        if language in set(settings.REPLY_LANGUAGES.values()):
+            self.reply_language = language
+        if tone_template is not None:
+            self.tone_template = tone_template.strip()
+        # 暖场与回复统一使用同一语言配置，并持久化到本地。
+        self.reply_language = self._get_active_language()
+        self._save_runtime_state()
+        logger.info(
+            f"回复设置已更新并保存: language={self.reply_language}, tone_template={'on' if self.tone_template else 'off'}"
+        )
+
+    def set_voice_command_enabled(self, enabled: bool):
+        self.voice_command_enabled = bool(enabled)
+        self._save_runtime_state()
+        logger.info(f"语音口令监听设置已更新: {'on' if self.voice_command_enabled else 'off'}")
+        if not self.voice_command_enabled:
+            try:
+                self.voice.stop()
+            except Exception:
+                pass
+
+    def set_reply_enabled(self, enabled: bool):
+        self.reply_enabled = bool(enabled)
+        self._save_runtime_state()
+        logger.info(f"自动回复设置已更新: {'on' if self.reply_enabled else 'off'}")
+
+    def set_proactive_enabled(self, enabled: bool):
+        self.proactive_enabled = bool(enabled)
+        self._save_runtime_state()
+        logger.info(f"自动暖场设置已更新: {'on' if self.proactive_enabled else 'off'}")
+
+    def get_operation_execution_mode(self):
+        if hasattr(self.operations, "get_execution_mode"):
+            try:
+                mode = self.operations.get_execution_mode()
+                if mode:
+                    self.operation_execution_mode = str(mode)
+            except Exception:
+                pass
+        return str(self.operation_execution_mode or "dom")
+
+    def set_operation_execution_mode(self, mode, persist=True):
+        target = str(mode or "").strip().lower()
+        if hasattr(self.operations, "set_execution_mode"):
+            try:
+                target = self.operations.set_execution_mode(target)
+            except Exception:
+                target = "dom"
+        if target not in {"dom", "ocr_vision"}:
+            target = "dom"
+        self.operation_execution_mode = target
+        if persist:
+            self._save_runtime_state()
+        logger.info(f"运营执行模式已更新: {target}")
+        return target
+
+    def get_operation_mode_status(self):
+        try:
+            if hasattr(self.operations, "get_mode_status"):
+                status = self.operations.get_mode_status() or {}
+                if isinstance(status, dict):
+                    return status
+        except Exception:
+            pass
+        return {"mode": self.get_operation_execution_mode()}
+
+    def get_human_like_settings(self):
+        try:
+            if hasattr(self.operations, "get_human_like_settings"):
+                cfg = self.operations.get_human_like_settings() or {}
+                if isinstance(cfg, dict):
+                    return cfg
+        except Exception:
+            pass
+        return {}
+
+    def set_human_like_settings(self, config, persist=True):
+        cfg = dict(config or {})
+        try:
+            if hasattr(self.operations, "set_human_like_settings"):
+                self.operations.set_human_like_settings(**cfg)
+        except Exception as e:
+            logger.warning(f"应用拟人化执行参数失败: {e}")
+        if persist:
+            self._save_runtime_state()
+        return self.get_human_like_settings()
+
+    def get_human_like_stats(self):
+        try:
+            if hasattr(self.operations, "get_human_like_stats"):
+                data = self.operations.get_human_like_stats() or {}
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return {}
+
+    def get_web_info_source_mode(self):
+        if hasattr(self.vision, "get_info_source_mode"):
+            try:
+                mode = self.vision.get_info_source_mode()
+                if mode:
+                    self.web_info_source_mode = str(mode)
+            except Exception:
+                pass
+        return str(self.web_info_source_mode or "ocr_hybrid")
+
+    def set_web_info_source_mode(self, mode, persist=True):
+        target = str(mode or "").strip().lower()
+        if target not in {"dom", "ocr_hybrid", "ocr_only", "screen_ocr"}:
+            target = "ocr_hybrid"
+        if hasattr(self.vision, "set_info_source_mode"):
+            try:
+                target = self.vision.set_info_source_mode(target)
+            except Exception:
+                target = "ocr_hybrid"
+        self.web_info_source_mode = target
+        if persist:
+            self._save_runtime_state()
+        logger.info(f"网页信息源模式已更新: {target}")
+        return target
+
+    def get_web_info_source_status(self):
+        try:
+            if hasattr(self.vision, "get_info_source_status"):
+                status = self.vision.get_info_source_status() or {}
+                if isinstance(status, dict):
+                    return status
+        except Exception:
+            pass
+        return {"mode": self.get_web_info_source_mode()}
+
+    def set_voice_mic_device(self, device_index=None, name_hint=None):
+        if hasattr(self.voice, "set_preferred_microphone"):
+            self.voice.set_preferred_microphone(
+                device_index=device_index,
+                name_hint=name_hint,
+                restart_if_running=True,
+            )
+        self._save_runtime_state()
+
+    def get_voice_mic_device(self):
+        if hasattr(self.voice, "get_preferred_microphone"):
+            try:
+                return self.voice.get_preferred_microphone() or {}
+            except Exception:
+                return {}
+        return {}
+
+    def probe_voice_microphone(self, duration_seconds=2.5):
+        if hasattr(self.voice, "probe_local_microphone"):
+            try:
+                active_language = self._get_active_language()
+                return self.voice.probe_local_microphone(
+                    language=active_language,
+                    fallback_languages=self._get_voice_fallback_languages(active_language),
+                    duration_seconds=duration_seconds,
+                )
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "probe_not_supported"}
+
+    def execute_manual_voice_text(self, text, source="manual_voice_test"):
+        text = str(text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty_text"}
+        has_wake = self._pass_voice_wake_word(text)
+        command = self._parse_operation_command_text(text)
+        if not command:
+            return {"ok": False, "error": "no_command_detected", "has_wake": has_wake}
+        ok = self._execute_operation_command(command, trigger_source=source)
+        return {
+            "ok": bool(ok),
+            "has_wake": has_wake,
+            "command": command,
+        }
+
+    def set_voice_asr_provider(self, provider):
+        provider = str(provider or "").strip().lower()
+        if provider not in {"google", "auto", "sphinx", "whisper_local"}:
+            return False
+        settings.VOICE_PYTHON_ASR_PROVIDER = provider
+        if bool(getattr(self.voice, "_local_running", False)):
+            try:
+                self.voice.stop()
+                langs = list(getattr(self.voice, "last_langs", []) or [self._get_active_language()])
+                self.voice.start(language=langs[0], fallback_languages=langs[1:])
+            except Exception:
+                pass
+        self._save_runtime_state()
+        return True
+
+    def _normalize_text(self, text):
+        text = (text or "").strip().lower()
+        return "".join(ch for ch in text if ch.isalnum() or ('\u4e00' <= ch <= '\u9fff'))
+
+    def _normalize_voice_command_text(self, text):
+        """
+        语音口令归一化：
+        - 吸收 ASR 常见同音/繁简体偏差，提升口令命中率
+        """
+        s = (text or "").strip().lower()
+        if not s:
+            return ""
+
+        phrase_map = {
+            "致頂": "置顶",
+            "致顶": "置顶",
+            "治顶": "置顶",
+            "製頂": "置顶",
+            "制顶": "置顶",
+            "置頂": "置顶",
+            "頂置": "顶置",
+            "鏈接": "链接",
+            "鏈結": "链接",
+            "連接": "连接",
+            "連結": "链接",
+            "秒殺": "秒杀",
+            "上線": "上线",
+            "開啟": "开启",
+            "開始": "开始",
+            "開一下": "开一下",
+            "祝播": "助播",
+            "祝bo": "助播",
+            "助bo": "助播",
+            "致定": "置顶",
+            "致钉": "置顶",
+            "置定": "置顶",
+            "制定": "置顶",
+            "制顶": "置顶",
+            "至顶": "置顶",
+            "置丁": "置顶",
+            "制丁": "置顶",
+            "制足": "置顶",
+            "置足": "置顶",
+            "至底": "置顶",
+            "置底": "置顶",
+            "鏈街": "链接",
+            "鏈路": "链接",
+            "绿接": "链接",
+            "令接": "链接",
+            "练接": "链接",
+            "联接": "链接",
+            "鏈潔": "链接",
+            "链洁": "链接",
+            "連接": "链接",
+            "flash sell": "flash sale",
+            "flashcell": "flash sale",
+            "slash sale": "flash sale",
+            "co host": "cohost",
+            "co-host": "cohost",
+            "co hoster": "cohost",
+            "co-hoster": "cohost",
+            "co hostess": "cohost",
+            "live assistant": "liveassistant",
+            "stream assistant": "streamassistant",
+            "assistance": "assistant",
+            "assistants": "assistant",
+            "a system": "assistant",
+            "hey assistant": "assistant",
+            "un pin": "unpin",
+            "pin link": "pinlink",
+            "unpin link": "unpinlink",
+            "number too": "number two",
+            "number to": "number two",
+            "number for": "number four",
+            "number fore": "number four",
+            "number tree": "number three",
+            "number free": "number three",
+            "link too": "link two",
+            "link to": "link two",
+            "link for": "link four",
+            "link fore": "link four",
+            "link tree": "link three",
+            "link free": "link three",
+            # 英文口令常见口语/误识别：to the top 被识别成 two the top
+            "one two the top": "one to the top",
+            "one too the top": "one to the top",
+            "pick one two the top": "pin one to the top",
+            "pick one too the top": "pin one to the top",
+            # flash sale 口令常见误识别
+            "lounge the flash sale": "launch flash sale",
+            "lounge flash sale": "launch flash sale",
+            "lanch flash sale": "launch flash sale",
+            "launche flash sale": "launch flash sale",
+            "launch the flash sail": "launch flash sale",
+            "launch flash sail": "launch flash sale",
+            "launch the flash cell": "launch flash sale",
+            "launch flash cell": "launch flash sale",
+            "launch the flash seal": "launch flash sale",
+            "launch flash seal": "launch flash sale",
+            "lounge the flash sail": "launch flash sale",
+            "lounge flash sail": "launch flash sale",
+            "lounge the flash cell": "launch flash sale",
+            "lounge flash cell": "launch flash sale",
+            "lanch the flash sale": "launch flash sale",
+            "lunch the flash sale": "launch flash sale",
+            "lunch flash sale": "launch flash sale",
+            "lunge the flash sale": "launch flash sale",
+            "launge the flash sale": "launch flash sale",
+            "long the flash sale": "launch flash sale",
+            "long to the flash sale": "launch flash sale",
+            "long the flash sail": "launch flash sale",
+            "long to the flash sail": "launch flash sale",
+        }
+        for src, dst in phrase_map.items():
+            s = s.replace(src.lower(), dst.lower())
+
+        # 更宽松的中文口令纠错：覆盖“置顶/链接”附近的常见同音误识别。
+        s = re.sub(r"(?:制|置|至|致|治)(?:顶|定|丁|底|足)", "置顶", s)
+        s = re.sub(r"(?:链|連|联|令|绿|练)(?:接|结|潔|節)", "链接", s)
+        # 英文口令纠错：
+        # 1) ASR 常把 pin 识别为 pick/peak/peek/pic/pig/pink（仅在命令语境替换，避免过度改写）。
+        s = re.sub(
+            r"\b(?:pick|peak|peek|pic|pig|pink)\b(?=\s+(?:the\s+)?(?:link|item|product|number|no|[0-9]+|one|two|three|four|five|six|seven|eight|nine|ten)\b)",
+            "pin",
+            s,
+        )
+        # 2) ASR 常把 "to the top" 识别为 "two/too the top"，统一到 "top" 语义。
+        s = re.sub(r"\b(?:to|two|too)\s+the\s+top\b", " top", s)
+        s = re.sub(r"\b(?:to|two|too)\s+top\b", " top", s)
+        # 2.1) 唤醒词近音归一化（assistant/cohost）。
+        s = re.sub(r"\bco[\s\-]*(?:host|hoster|hostess)\b", "cohost", s)
+        s = re.sub(r"\b(?:assist(?:ant|ants|ance)?|a\s+system)\b", "assistant", s)
+        # 3) ASR 常把 launch/flash/sale 读成近音词，统一为 "launch flash sale"。
+        s = re.sub(
+            r"\b(?:lounge|lanch|launche|lunch|lunge|launge|launching|launched|long)\b(?=\s+(?:the\s+)?(?:flash|slash|flesh|flush|flask)\b)",
+            "launch",
+            s,
+        )
+        s = re.sub(
+            r"\b(?:flash|slash|flesh|flush|flask)\s+(?:a\s+)?(?:sale|sail|cell|seal)\b",
+            "flash sale",
+            s,
+        )
+        s = re.sub(
+            r"\blaunch\s+(?:the\s+)?flash\s+sale\b",
+            "launch flash sale",
+            s,
+        )
+        # 4) pin/unpin/link 常见英语误识别归一化（只在命令语境近邻替换，降低误判）。
+        s = re.sub(
+            r"\b(?:pick|peak|peek|pig|pink|bin)\b(?=\s+(?:the\s+)?(?:link|item|product|number|no|[0-9]+|one|two|three|four|five|six|seven|eight|nine|ten)\b)",
+            "pin",
+            s,
+        )
+        s = re.sub(
+            r"\b(?:on\s*pin|and\s*pin|open)\b(?=\s+(?:the\s+)?(?:link|item|product|number|no|[0-9]+)\b)",
+            "unpin",
+            s,
+        )
+        s = re.sub(r"\b(?:ling|linq|linc)\b", "link", s)
+
+        char_map = str.maketrans({
+            "號": "号",
+            "頂": "顶",
+            "鏈": "链",
+            "結": "结",
+            "連": "连",
+            "殺": "杀",
+            "開": "开",
+            "線": "线",
+            "啟": "启",
+            "臺": "台",
+        })
+        s = s.translate(char_map)
+        return re.sub(r"\s+", " ", s).strip()
+
+    def _prune_expired(self, cache, ttl_seconds):
+        now = time.time()
+        expired_keys = [k for k, ts in cache.items() if now - ts > ttl_seconds]
+        for k in expired_keys:
+            cache.pop(k, None)
+
+    def _is_duplicate_message(self, user, text):
+        norm = self._normalize_text(text)
+        if not norm:
+            return False
+        key = f"{(user or '').lower()}::{norm}"
+        now = time.time()
+        last = self.message_cache.get(key)
+        self.message_cache[key] = now
+        self._prune_expired(self.message_cache, settings.SAME_MESSAGE_COOLDOWN_SECONDS * 2)
+        return bool(last and now - last < settings.SAME_MESSAGE_COOLDOWN_SECONDS)
+
+    def _is_duplicate_reply(self, user, reply):
+        norm = self._normalize_text(reply)
+        if not norm:
+            return False
+
+        now = time.time()
+        user_key = f"{(user or '').lower()}::{norm}"
+        last_user = self.user_reply_cache.get(user_key)
+        if last_user and now - last_user < settings.SAME_USER_REPLY_COOLDOWN_SECONDS:
+            return True
+
+        last_global = self.global_reply_cache.get(norm)
+        if last_global and now - last_global < settings.GLOBAL_REPLY_COOLDOWN_SECONDS:
+            return True
+
+        self.user_reply_cache[user_key] = now
+        self.global_reply_cache[norm] = now
+        self._prune_expired(self.user_reply_cache, settings.SAME_USER_REPLY_COOLDOWN_SECONDS * 2)
+        self._prune_expired(self.global_reply_cache, settings.GLOBAL_REPLY_COOLDOWN_SECONDS * 3)
+        return False
+
+    def _remember_sent_message(self, text):
+        norm = self._normalize_text(text)
+        if not norm:
+            return
+
+        now = time.time()
+        self.sent_message_cache[norm] = now
+
+        # 发送形如 "@user xxx" 时，同时记录正文，便于过滤回显
+        text = (text or "").strip()
+        if text.startswith("@") and " " in text:
+            body = text.split(" ", 1)[1].strip()
+            body_norm = self._normalize_text(body)
+            if body_norm:
+                self.sent_message_cache[body_norm] = now
+
+        self._prune_expired(self.sent_message_cache, settings.SELF_ECHO_TTL_SECONDS * 2)
+
+    def _is_self_echo_message(self, user, text):
+        if not settings.SELF_ECHO_IGNORE_ENABLED:
+            return False
+
+        user_lower = (user or "").strip().lower()
+        if user_lower and user_lower in settings.SELF_USERNAMES:
+            return True
+
+        incoming = self._normalize_text(text)
+        if len(incoming) < settings.SELF_ECHO_MIN_CHARS:
+            return False
+
+        now = time.time()
+        self._prune_expired(self.sent_message_cache, settings.SELF_ECHO_TTL_SECONDS * 2)
+        for sent_norm, ts in self.sent_message_cache.items():
+            if now - ts > settings.SELF_ECHO_TTL_SECONDS:
+                continue
+            if len(sent_norm) < settings.SELF_ECHO_MIN_CHARS:
+                continue
+            if incoming == sent_norm:
+                return True
+            if sent_norm in incoming and len(sent_norm) >= settings.SELF_ECHO_MIN_CHARS:
+                return True
+            if incoming in sent_norm and len(incoming) >= settings.SELF_ECHO_MIN_CHARS:
+                return True
+        return False
+
+    def _is_llm_candidate(self, text):
+        """判断该弹幕是否应触发 LLM 回复。"""
+        if not text:
+            return False
+
+        normalized = text.strip()
+        lowered = normalized.lower()
+
+        if "?" in normalized or "？" in normalized:
+            return True
+
+        if any(token in lowered for token in settings.REPLY_IGNORE_KEYWORDS):
+            return False
+
+        return any(token in lowered for token in settings.REPLY_TRIGGER_KEYWORDS)
+
+    def _enforce_unified_output_language(self, text, language=None, force_tone=False):
+        """
+        统一输出语言入口：
+        - 所有回复/暖场最终都按统一语言输出
+        - 语气模板可任意语言，作为风格参考
+        """
+        raw = str(text or "").strip()
+        if not raw:
+            return raw
+        lang_code = language or self._get_active_language()
+        try:
+            if hasattr(self.knowledge, "ensure_output_language"):
+                return self.knowledge.ensure_output_language(
+                    raw,
+                    lang_code,
+                    tone_template=self.tone_template,
+                    force_tone=bool(force_tone),
+                )
+        except Exception as e:
+            logger.debug(f"统一语言校正失败，回退原文: {e}")
+        return raw
+
+    def _is_command_user(self, user):
+        """
+        仅允许指定账号触发运营动作。
+        若未配置 COMMAND_ALLOWED_USERS，则默认不限制（兼容历史行为）。
+        """
+        allowed = settings.COMMAND_ALLOWED_USERS
+        if not allowed:
+            return True
+        return (user or "").strip().lower() in allowed
+
+    def _parse_operation_command(self, user, text):
+        """
+        解析主播运营口令：
+        1) 将3号链接置顶一下
+        2) 将秒杀活动上架一下
+        """
+        if not text or not self._is_command_user(user):
+            return None
+        return self._parse_operation_command_text(text)
+
+    def _parse_operation_command_text(self, text):
+        if not text:
+            return None
+
+        normalized_input = self._normalize_voice_command_text(text)
+        raw_lower = normalized_input if normalized_input else str(text).lower()
+        normalized = re.sub(r"\s+", "", raw_lower)
+        normalized = re.sub(r"[，。,.!！?？:：;；、~～]", "", normalized)
+        ascii_text = re.sub(r"[^a-z0-9]+", " ", raw_lower).strip()
+        ascii_tokens = [tok for tok in ascii_text.split() if tok]
+        en_top_position_hint = bool(re.search(r"(?:totop|twotop|tootop|tothetop|twothetop|toothetop)", normalized))
+        cn_digit_map = {
+            "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+            "六": 6, "七": 7, "八": 8, "九": 9
+        }
+        en_num_map = {
+            "zero": 0,
+            "one": 1, "first": 1,
+            "two": 2, "second": 2,
+            "three": 3, "third": 3,
+            "four": 4, "fourth": 4,
+            "five": 5, "fifth": 5,
+            "six": 6, "sixth": 6,
+            "seven": 7, "seventh": 7,
+            "eight": 8, "eighth": 8,
+            "nine": 9, "ninth": 9,
+            "ten": 10, "tenth": 10,
+            "eleven": 11, "eleventh": 11,
+            "twelve": 12, "twelfth": 12,
+            "thirteen": 13, "thirteenth": 13,
+            "fourteen": 14, "fourteenth": 14,
+            "fifteen": 15, "fifteenth": 15,
+            "sixteen": 16, "sixteenth": 16,
+            "seventeen": 17, "seventeenth": 17,
+            "eighteen": 18, "eighteenth": 18,
+            "nineteen": 19, "nineteenth": 19,
+            "twenty": 20, "twentieth": 20,
+            # 英文 ASR 常见同音误识别（仅在“口令索引位”被正则捕获时生效）
+            "to": 2, "too": 2,
+            "for": 4, "fore": 4,
+            "tree": 3, "free": 3,
+            "won": 1,
+        }
+        # 英文数字词按“长词优先”排列，避免 seventeen 被 seven 抢先匹配。
+        en_num_token = (
+            r"seventeenth|seventeen|seventh|seven|"
+            r"thirteenth|thirteen|third|three|"
+            r"fourteenth|fourteen|fourth|four|"
+            r"fifteenth|fifteen|fifth|five|"
+            r"sixteenth|sixteen|sixth|six|"
+            r"eighteenth|eighteen|eighth|eight|"
+            r"nineteenth|nineteen|ninth|nine|"
+            r"twentieth|twenty|second|two|"
+            r"eleventh|eleven|first|one|"
+            r"twelfth|twelve|tenth|ten|"
+            r"too|to|fore|for|tree|free|won|zero"
+        )
+
+        def _parse_cn_number(token):
+            token = (token or "").strip()
+            if not token:
+                return None
+            if token in cn_digit_map:
+                return cn_digit_map[token]
+            if token == "十":
+                return 10
+            if "十" in token:
+                parts = token.split("十", 1)
+                left = parts[0]
+                right = parts[1]
+                tens = cn_digit_map.get(left, 1) if left else 1
+                ones = cn_digit_map.get(right, 0) if right else 0
+                val = tens * 10 + ones
+                return val if val > 0 else None
+            return None
+
+        def _parse_index(raw):
+            if not raw:
+                return None
+            if raw.isdigit():
+                idx_val = int(raw)
+                return idx_val if idx_val > 0 else None
+            idx_val = _parse_cn_number(raw)
+            if idx_val and idx_val > 0:
+                return idx_val
+            idx_val = en_num_map.get(str(raw).lower())
+            if idx_val and idx_val > 0:
+                return idx_val
+            return None
+
+        def _token_like(token, candidate):
+            token = str(token or "").strip().lower()
+            candidate = str(candidate or "").strip().lower()
+            if (not token) or (not candidate):
+                return False
+            if token == candidate:
+                return True
+            # 数字词只允许精准或常见同音，避免把普通词误判成序号。
+            if candidate in en_num_map:
+                return token in {candidate, "to", "too", "for", "fore", "tree", "free", "won"}
+            # 短命令词（pin/top）要求更严格，避免把 stop/topic 等误判成 top。
+            if len(candidate) <= 3:
+                return False
+            if token.isdigit() or candidate.isdigit():
+                return False
+            if abs(len(token) - len(candidate)) > 2:
+                return False
+            return SequenceMatcher(None, token, candidate).ratio() >= 0.76
+
+        def _has_token_like(candidates):
+            return any(_token_like(tok, cand) for tok in ascii_tokens for cand in candidates)
+
+        def _first_ascii_index_token():
+            for tok in ascii_tokens:
+                idx = _parse_index(tok)
+                if idx:
+                    return tok
+            return None
+
+        # 秒杀命令优先级最高，避免 ASR 混入“置顶/取消置顶”词时误触发商品操作。
+        flash_markers = [
+            "秒杀", "flashsale", "flashdeal", "flashpromo", "flashpromotion",
+            "limiteddeal", "limitedoffer", "promotion", "promo", "deal", "saleevent"
+        ]
+        flash_stop_actions = [
+            "结束", "停止", "下架", "关闭", "撤下", "停一下", "收一下",
+            "end", "stop", "close", "disable", "off", "finish", "over", "remove",
+        ]
+        flash_actions = [
+            "上架", "开启", "开始", "开一下", "挂一下", "launch", "start",
+            "enable", "open", "golive", "live", "on", "run", "push", "publish",
+            # ASR 英文动词误识别兜底
+            "lounge", "lanch", "launche", "lunch", "lunge", "launge", "long"
+        ]
+
+        flash_stop_cmd = (
+            ("秒杀" in normalized and any(k in normalized for k in ["结束", "停止", "下架", "关闭", "撤下", "停一下"]))
+            or ("结束秒杀" in normalized)
+            or ("停止秒杀" in normalized)
+            or ("下架秒杀" in normalized)
+            or ("活动" in normalized and "结束" in normalized and "秒杀" in normalized)
+            or (
+                any(marker in normalized for marker in flash_markers)
+                and any(action in normalized for action in flash_stop_actions)
+            )
+            or ("flash" in normalized and "sale" in normalized and any(k in normalized for k in ["stop", "end", "close", "disable", "off", "finish", "over", "remove"]))
+            or ("endflashsale" in normalized)
+            or ("stopflashsale" in normalized)
+            or ("turnoffflashsale" in normalized)
+            or ("closeflashsale" in normalized)
+            or (
+                _has_token_like(["flash", "slash", "flesh", "flush", "flask"])
+                and _has_token_like(["sale", "sail", "cell", "seal", "deal", "promo", "promotion"])
+                and _has_token_like(["stop", "end", "close", "disable", "off", "finish", "over", "remove"])
+            )
+        )
+        if flash_stop_cmd:
+            return {"action": "stop_flash_sale"}
+
+        flash_sale_cmd = (
+            ("秒杀" in normalized and any(k in normalized for k in ["上架", "开启", "开始", "开一下", "挂一下"]))
+            or ("秒杀活动" in normalized and any(k in normalized for k in ["上架", "上线", "开一下", "开始"]))
+            or ("活动" in normalized and "上架" in normalized and "秒杀" in normalized)
+            or ("上架" in normalized and "秒杀" in normalized)
+            or (
+                any(marker in normalized for marker in flash_markers)
+                and any(action in normalized for action in flash_actions)
+            )
+            or ("flash" in normalized and "sale" in normalized and any(k in normalized for k in ["start", "launch", "lounge", "lanch", "launche", "lunch", "lunge", "launge", "long", "on", "enable", "open"]))
+            or ("put" in normalized and "flashsale" in normalized and "live" in normalized)
+            or ("put" in normalized and "flashdeal" in normalized and any(k in normalized for k in ["live", "on", "up"]))
+            or ("start" in normalized and any(k in normalized for k in ["flashsale", "flashpromo", "promo", "promotion"]))
+            or ("golive" in normalized and "flash" in normalized)
+            or (
+                any(k in normalized for k in ["flashsale", "flashdeal", "flashpromo", "flashpromotion"])
+                and any(k in normalized for k in ["start", "launch", "enable", "open", "on", "up", "live", "golive"])
+            )
+            or ("makeflashsale" in normalized and "live" in normalized)
+            or ("turnonflashsale" in normalized)
+            or ("putflashsaleon" in normalized)
+            or (
+                _has_token_like(["flash", "slash", "flesh", "flush", "flask"])
+                and _has_token_like(["sale", "sail", "cell", "seal", "deal", "promo", "promotion"])
+                and _has_token_like(["launch", "lounge", "lanch", "launche", "lunch", "lunge", "launge", "long", "start", "enable", "open", "live", "golive", "publish", "push", "run"])
+            )
+        )
+        if flash_sale_cmd:
+            return {"action": "start_flash_sale"}
+
+        # 取消置顶：将3号链接取消置顶 / 取消3号链接置顶 / unpin link 3
+        unpin_patterns = [
+            r"(?:将|把)?([0-9]+|[零一二两三四五六七八九十]{1,3})[号#]?(?:链接|连接|商品|橱窗)?(?:取消置顶|取消顶置|撤销置顶|去掉置顶|下掉置顶|取消pin)",
+            r"(?:取消|撤销|去掉|下掉)(?:第)?([0-9]+|[零一二两三四五六七八九十]{1,3})[号#]?(?:链接|连接|商品|橱窗)?(?:置顶|顶置|pin)?",
+            r"(?:取消置顶|取消顶置|撤销置顶|去掉置顶|下掉置顶)(?:第)?([0-9]+|[零一二两三四五六七八九十]{1,3})(?:(?:号|#)(?:链接|连接|商品|橱窗)?|(?:链接|连接|商品|橱窗))",
+            rf"(?:unpin|unset|unstick|unfeature)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token})",
+            rf"(?:remove|cancel)(?:the)?pin(?:from)?(?:link|item|product)?(?:number|no)?({en_num_token})",
+            rf"(?:link|item|product)(?:number|no)?({en_num_token})(?:unpin|unset|remove(?:the)?pin)",
+            # 纯数字口令需要带索引语义，避免误判。
+            rf"(?:unpin|unset|unstick|unfeature)(?:the)?(?:link|item|product)(?:number|no)?([0-9]+)",
+            rf"(?:remove|cancel)(?:the)?pin(?:from)?(?:link|item|product)(?:number|no)?([0-9]+)",
+        ]
+        for pattern in unpin_patterns:
+            m = re.search(pattern, normalized)
+            if m:
+                idx = _parse_index(m.group(1))
+                if idx:
+                    return {"action": "unpin_product", "link_index": idx}
+
+        has_unpin_intent = any(
+            k in normalized
+            for k in [
+                "取消置顶",
+                "取消顶置",
+                "撤销置顶",
+                "去掉置顶",
+                "下掉置顶",
+                "移除置顶",
+                "unpin",
+                "removepin",
+                "cancelpin",
+                "unsetpin",
+                "unstick",
+                "unfeature",
+            ]
+        )
+        # 兼容“取消链接置顶/撤销链接置顶”等中间夹有目标词的口令。
+        if not has_unpin_intent:
+            has_unpin_intent = bool(
+                re.search(
+                    r"(?:取消|撤销|去掉|下掉|移除)(?:第?[0-9零一二两三四五六七八九十]{1,3}[号#]?)?(?:链接|连接|商品|橱窗)?(?:置顶|顶置)",
+                    normalized,
+                )
+            )
+        if not has_unpin_intent:
+            has_unpin_intent = bool(
+                re.search(
+                    r"(?:remove|cancel)(?:the)?pin(?:from)?(?:link|item|product)?",
+                    normalized,
+                )
+            )
+        if has_unpin_intent:
+            fallback_num = re.search(
+                rf"([0-9]+|[零一二两三四五六七八九十]{{1,3}}|{en_num_token})",
+                normalized
+            )
+            if fallback_num:
+                raw_idx = fallback_num.group(1)
+                # “取消置顶一下”中的“一下”不应当被识别成 1 号链接。
+                if raw_idx == "一":
+                    has_index_hint = any(
+                        h in normalized for h in ["一号", "第一", "1号", "#1", "link1", "item1", "product1", "number1", "no1"]
+                    )
+                    if (not has_index_hint) and ("一下" in normalized):
+                        raw_idx = None
+                idx = _parse_index(raw_idx)
+                if idx:
+                    return {"action": "unpin_product", "link_index": idx}
+            # 未提供序号时，默认取消当前置顶
+            return {"action": "unpin_product"}
+
+        # 置顶指定链接：将3号链接置顶 / 置顶3号链接 / 将三号链接置顶
+        pin_patterns = [
+            r"(?:将|把)?([0-9]+|[零一二两三四五六七八九十]{1,3})[号#]?(?:链接|连接|商品|橱窗)?(?:置顶|顶一下|顶上去|顶上|置上去|pin|top)",
+            r"(?:置顶|pin|top)(?:第)?([0-9]+|[零一二两三四五六七八九十]{1,3})(?:(?:号|#)(?:链接|连接|商品|橱窗)?|(?:链接|连接|商品|橱窗))",
+            r"(?:把|将)?(?:第)?([0-9]+|[零一二两三四五六七八九十]{1,3})[号#]?(?:链接|连接|商品|橱窗)(?:给我)?(?:置顶|顶上去|顶一下)",
+            rf"(?:pin|top|feature|stick)(?:the)?(?:number|no)?({en_num_token})(?:link|item|product)?",
+            rf"(?:pin|pick|top|feature|stick|choose|select)(?:the)?({en_num_token})(?:to|two|too)?(?:the)?top",
+            r"(?:link|item|product)([0-9]+)(?:pin|top)",
+            rf"(?:link|item|product)(?:number|no)?({en_num_token})(?:please)?(?:pin|top|feature|stick)",
+            rf"(?:pin|top|feature|stick)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token})",
+            rf"(?:put|set|move|bring)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token})(?:on)?top",
+            rf"(?:make)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token})(?:at)?top",
+            # 数字口令必须带索引语义，避免把 "top1 / topic3" 误判为置顶命令。
+            rf"(?:pin|top|feature|stick)(?:the)?(?:link|item|product)(?:number|no)?([0-9]+)",
+            rf"(?:pin|top|feature|stick)(?:number|no)([0-9]+)",
+            rf"(?:bring|move)(?:link|item|product)?([0-9]+)(?:totop|on?top)",
+        ]
+        for pattern in pin_patterns:
+            m = re.search(pattern, normalized)
+            if m:
+                idx = _parse_index(m.group(1))
+                if idx:
+                    return {"action": "pin_product", "link_index": idx}
+
+        # 语音识别常见漏词兜底：只要出现“置顶/pin/top”并带数字，就执行置顶
+        en_command_word = (
+            bool(re.search(r"(^|[^a-z])(pin|top|feature|stick)([^a-z]|$)", raw_lower))
+            or _has_token_like(["pin", "top", "feature", "stick"])
+        )
+        en_target_hint = _has_token_like(["link", "item", "product", "number", "no"])
+        en_top_hint = _has_token_like(["top"])
+        has_pin_intent = ("置顶" in normalized) or ("顶上" in normalized) or (en_command_word and (en_target_hint or en_top_hint or en_top_position_hint))
+        if has_pin_intent:
+            raw_idx = None
+            fallback_num = re.search(
+                rf"([0-9]+|[零一二两三四五六七八九十]{{1,3}}|{en_num_token})",
+                normalized
+            )
+            if fallback_num:
+                raw_idx = fallback_num.group(1)
+            if not raw_idx:
+                raw_idx = _first_ascii_index_token()
+            if raw_idx:
+                # 规避“置顶一下”等口头语误触发：单独“一”只有在带索引语义时才作为 1 号链接
+                if raw_idx == "一":
+                    has_index_hint = any(
+                        h in normalized for h in ["一号", "第一", "1号", "#1", "link1", "item1", "product1", "number1", "no1"]
+                    )
+                    if (not has_index_hint) and ("一下" in normalized):
+                        raw_idx = None
+                # 规避英语口头语“this one”等：英文数字词需要索引语义提示（link/item/number/no）。
+                if raw_idx and re.fullmatch(r"[a-z]+", raw_idx):
+                    has_index_hint = any(
+                        h in normalized for h in ["link", "item", "product", "number", "no", "#", "号", "链接", "商品"]
+                    )
+                    if not has_index_hint and en_top_position_hint:
+                        has_index_hint = True
+                    if not has_index_hint:
+                        raw_idx = None
+                # 纯数字也要求出现索引语义，避免 "top1 这款不错" 误触发。
+                if raw_idx and str(raw_idx).isdigit():
+                    has_index_hint = any(
+                        h in normalized for h in ["号", "第", "#", "链接", "商品", "link", "item", "product", "number", "no"]
+                    )
+                    # 允许 "pin 3" 这类极简命令，但要求有独立英文命令词（避免 topic3）。
+                    if not has_index_hint and not bool(re.search(r"(^|[^a-z])(pin|feature|stick)([^a-z]|$)", raw_lower)):
+                        raw_idx = None
+                # 英文场景需要避免把 "top1" 当作指令；只有显式索引语义才放行。
+                if raw_idx and re.fullmatch(r"[0-9]+", str(raw_idx)):
+                    if "top" in ascii_text and "top " not in ascii_text and " top " not in f" {ascii_text} ":
+                        has_index_hint = any(h in normalized for h in ["link", "item", "product", "number", "no"])
+                        if not has_index_hint:
+                            raw_idx = None
+
+                idx = _parse_index(raw_idx)
+                if idx:
+                    return {"action": "pin_product", "link_index": idx}
+
+        return None
+
+    def _execute_operation_command(self, command, trigger_source="", log_entry=None):
+        if not command:
+            return False
+
+        action = command.get("action")
+        receipt = {}
+        reconnect_reason = ""
+        screen_ocr_mode = self.get_web_info_source_mode() == "screen_ocr"
+
+        if not self.vision.ensure_connection():
+            reconnect_reason = "precheck_connection_lost"
+            # 先尝试强制重连当前会话，再尝试全量 connect_browser。
+            if not self.vision.ensure_connection(force=True):
+                if not screen_ocr_mode:
+                    self.connect_browser()
+
+        if (not screen_ocr_mode) and (not self.vision.page):
+            source = trigger_source or "unknown"
+            logger.warning(f"运营动作取消执行: source={source}, reason=browser_not_connected")
+            if log_entry is not None:
+                log_entry["action"] = str(action or "unknown")
+                log_entry["status"] = "action_failed"
+                log_entry["action_receipt"] = "browser_not_connected"
+            return False
+        if screen_ocr_mode and (not self.vision.ensure_connection()):
+            source = trigger_source or "unknown"
+            logger.warning(f"运营动作取消执行: source={source}, reason=screen_capture_unavailable")
+            if log_entry is not None:
+                log_entry["action"] = str(action or "unknown")
+                log_entry["status"] = "action_failed"
+                log_entry["action_receipt"] = "screen_capture_unavailable"
+            return False
+
+        def _action_name_from_command():
+            idx = command.get("link_index")
+            if action == "pin_product":
+                return f"pin_product_{idx}"
+            if action == "unpin_product":
+                return f"unpin_product_{idx}" if idx else "unpin_product"
+            if action == "start_flash_sale":
+                return "start_flash_sale"
+            if action == "stop_flash_sale":
+                return "stop_flash_sale"
+            return str(action or "unknown")
+
+        def _run_operation_once():
+            planner_enabled = bool(getattr(settings, "OPS_LLM_PLAN_ENABLED", False))
+            if planner_enabled and hasattr(self.operations, "execute_action_with_plan"):
+                try:
+                    plan_ok = self.operations.execute_action_with_plan(command, trigger_source=trigger_source or "unknown")
+                    if plan_ok is not None:
+                        return bool(plan_ok), _action_name_from_command(), True
+                except Exception as e:
+                    logger.warning(f"受限计划执行失败，回退旧链路: {e}")
+
+            if action == "pin_product":
+                idx = command.get("link_index")
+                return bool(self.operations.pin_product(link_index=idx)), _action_name_from_command(), False
+            if action == "unpin_product":
+                idx = command.get("link_index")
+                return bool(self.operations.unpin_product(link_index=idx)), _action_name_from_command(), False
+            if action == "start_flash_sale":
+                return bool(self.operations.start_flash_sale()), _action_name_from_command(), False
+            if action == "stop_flash_sale":
+                return bool(self.operations.stop_flash_sale()), _action_name_from_command(), False
+            return False, _action_name_from_command(), False
+
+        ok, action_name, _planned = _run_operation_once()
+
+        if hasattr(self.operations, "get_last_action_receipt"):
+            try:
+                receipt = self.operations.get_last_action_receipt() or {}
+            except Exception:
+                receipt = {}
+
+        # 页面断连/不可操作导致失败时，重连后再重试一次，降低“说了没反应”的概率。
+        retryable_reason = str((receipt or {}).get("reason") or "")
+        need_retry = (
+            (not ok)
+            and (
+                reconnect_reason
+                or ("screen_capture_unavailable" in retryable_reason)
+                or ("browser_not_connected" in retryable_reason)
+                or ("non_operable_page" in retryable_reason)
+            )
+        )
+        if need_retry:
+            retried = bool(self.vision.ensure_connection(force=True))
+            if (not retried) and (not screen_ocr_mode):
+                retried = bool(self.connect_browser())
+            if retried:
+                ok, action_name, _planned_retry = _run_operation_once()
+                if hasattr(self.operations, "get_last_action_receipt"):
+                    try:
+                        receipt = self.operations.get_last_action_receipt() or {}
+                    except Exception:
+                        receipt = {}
+
+        source = trigger_source or "unknown"
+        logger.info(
+            f"运营动作触发: source={source}, action={action_name}, ok={ok}, "
+            f"receipt_reason={receipt.get('reason') if isinstance(receipt, dict) else ''}"
+        )
+        if isinstance(receipt, dict):
+            try:
+                trace = ((receipt.get("detail") or {}).get("human_trace") or {})
+                if trace:
+                    logger.info(
+                        "运营动作拟人统计: "
+                        f"action={trace.get('action')} ok={trace.get('ok')} "
+                        f"elapsed={trace.get('elapsed_ms')}ms "
+                        f"delay={trace.get('delay_ms')}ms/{trace.get('delay_count')}次 "
+                        f"last_delay={trace.get('last_delay_reason')}:{trace.get('last_delay_ms')}ms"
+                    )
+            except Exception:
+                pass
+
+        if log_entry is not None:
+            log_entry["action"] = action_name
+            log_entry["status"] = "action_done" if ok else "action_failed"
+            if receipt:
+                log_entry["action_receipt"] = receipt.get("reason") or receipt.get("stage") or ""
+        return ok
+
+    def _is_duplicate_voice_command(self, text):
+        norm = self._normalize_text(text)
+        if not norm:
+            return False
+        now = time.time()
+        last = self.voice_command_cache.get(norm)
+        self.voice_command_cache[norm] = now
+        self._prune_expired(self.voice_command_cache, settings.VOICE_COMMAND_COOLDOWN_SECONDS * 2)
+        return bool(last and now - last < settings.VOICE_COMMAND_COOLDOWN_SECONDS)
+
+    def _voice_action_key(self, command):
+        if not isinstance(command, dict):
+            return ""
+        action = (command.get("action") or "").strip().lower()
+        if action == "pin_product":
+            idx = command.get("link_index")
+            if idx:
+                return f"pin_product:{idx}"
+            return "pin_product"
+        if action == "unpin_product":
+            idx = command.get("link_index")
+            if idx:
+                return f"unpin_product:{idx}"
+            return "unpin_product"
+        if action == "start_flash_sale":
+            return "start_flash_sale"
+        if action == "stop_flash_sale":
+            return "stop_flash_sale"
+        return action
+
+    def _is_duplicate_voice_action(self, command):
+        key = self._voice_action_key(command)
+        if not key:
+            return False
+        now = time.time()
+        last = self.voice_action_cache.get(key)
+        self.voice_action_cache[key] = now
+        self._prune_expired(self.voice_action_cache, settings.VOICE_COMMAND_COOLDOWN_SECONDS * 2)
+        return bool(last and now - last < settings.VOICE_COMMAND_COOLDOWN_SECONDS)
+
+    def _append_voice_input_log(self, source, text, lang=None, status="captured", note="", command=None):
+        action_key = ""
+        if isinstance(command, dict):
+            action_key = self._voice_action_key(command)
+            if not action_key:
+                action_key = command.get("action") or ""
+        self.voice_input_log.appendleft(
+            {
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "source": source or "voice",
+                "text": str(text or ""),
+                "lang": lang or "",
+                "status": status,
+                "note": note or "",
+                "command": action_key,
+            }
+        )
+
+    def get_recent_voice_inputs(self, limit=80):
+        try:
+            n = max(1, int(limit))
+        except Exception:
+            n = 80
+        return list(self.voice_input_log)[:n]
+
+    def _pass_voice_wake_word(self, text):
+        wake_words = settings.VOICE_COMMAND_WAKE_WORDS
+        if not wake_words:
+            return True
+        lowered = self._normalize_voice_command_text(text)
+        normalized = self._normalize_text(lowered)
+        text_tokens = [t for t in re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", lowered).split() if t]
+
+        def _token_similar(a, b):
+            a = str(a or "").strip().lower()
+            b = str(b or "").strip().lower()
+            if (not a) or (not b):
+                return False
+            if a == b:
+                return True
+            if abs(len(a) - len(b)) > 2:
+                return False
+            return SequenceMatcher(None, a, b).ratio() >= 0.8
+
+        for w in wake_words:
+            w = (w or "").strip().lower()
+            if not w:
+                continue
+            if w in lowered:
+                return True
+            w_norm = self._normalize_text(self._normalize_voice_command_text(w))
+            if w_norm and w_norm in normalized:
+                return True
+            wake_tokens = [t for t in re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", w).split() if t]
+            if wake_tokens and text_tokens:
+                hit = True
+                for wt in wake_tokens:
+                    if not any(_token_similar(tt, wt) for tt in text_tokens):
+                        hit = False
+                        break
+                if hit:
+                    return True
+        return False
+
+    def _poll_voice_commands(self):
+        """轮询语音识别结果并触发运营动作。"""
+        if not self.voice_command_enabled:
+            return
+        if self.voice.requires_browser_page() and not self.vision.page:
+            return
+
+        now = time.time()
+        if now - self.last_voice_poll_at < settings.VOICE_COMMAND_POLL_INTERVAL_SECONDS:
+            return
+        self.last_voice_poll_at = now
+
+        active_language = self._get_active_language()
+        fallback_languages = self._get_voice_fallback_languages(active_language)
+        started = self.voice.ensure_started(
+            language=active_language,
+            fallback_languages=fallback_languages,
+            silence_restart_seconds=settings.VOICE_COMMAND_SILENCE_RESTART_SECONDS,
+        )
+        if not started:
+            if now - self.last_voice_health_log_at >= settings.VOICE_COMMAND_HEALTH_LOG_INTERVAL_SECONDS:
+                state = self.voice.get_state()
+                err = state.get("error") if isinstance(state, dict) else None
+                logger.warning(f"语音通道不可用，已等待重试。请检查麦克风权限。error={err}")
+                self.last_voice_health_log_at = now
+            return
+
+        state = self.voice.get_state()
+        last_result_at = state.get("lastResultAt") if isinstance(state, dict) else None
+        running = bool(state.get("running")) if isinstance(state, dict) else False
+        voice_err = state.get("error") if isinstance(state, dict) else None
+        last_audio_rms = state.get("lastAudioRms") if isinstance(state, dict) else None
+        no_text_count = state.get("noTextCount") if isinstance(state, dict) else None
+        device_name = state.get("deviceName") if isinstance(state, dict) else None
+        if voice_err and now - self.last_voice_health_log_at >= settings.VOICE_COMMAND_HEALTH_LOG_INTERVAL_SECONDS:
+            logger.warning(f"语音识别异常: err={voice_err}, rms={last_audio_rms}, no_text_count={no_text_count}, device={device_name}, state={state}")
+            self.last_voice_health_log_at = now
+        elif (
+            running
+            and (not last_result_at)
+            and isinstance(no_text_count, int)
+            and no_text_count >= 5
+            and now - self.last_voice_health_log_at >= settings.VOICE_COMMAND_HEALTH_LOG_INTERVAL_SECONDS
+        ):
+            logger.warning(
+                "语音持续无文本: "
+                f"no_text_count={no_text_count}, rms={last_audio_rms}, device={device_name}, "
+                f"provider={state.get('provider') if isinstance(state, dict) else None}"
+            )
+            self.last_voice_health_log_at = now
+        if isinstance(voice_err, str) and "google_network_error" in voice_err.lower():
+            if now - self._google_voice_error_last_at > 120:
+                self._google_voice_error_streak = 0
+            self._google_voice_error_streak += 1
+            self._google_voice_error_last_at = now
+            current_provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").lower()
+            if current_provider == "google" and self._google_voice_error_streak >= 2:
+                switched = self.set_voice_asr_provider("whisper_local")
+                if switched:
+                    logger.warning("检测到 Google ASR 持续超时，已自动切换到 whisper_local。")
+                    self._append_voice_input_log(
+                        source="system",
+                        text="",
+                        lang=active_language,
+                        status="provider_switch",
+                        note="google_timeout->whisper_local",
+                        command=None,
+                    )
+                    self._google_voice_error_streak = 0
+        else:
+            self._google_voice_error_streak = 0
+        silence_too_long = False
+        if last_result_at:
+            try:
+                silence_too_long = (
+                    now - (float(last_result_at) / 1000.0)
+                    > settings.VOICE_COMMAND_SILENCE_RESTART_SECONDS * 2
+                )
+            except (TypeError, ValueError):
+                silence_too_long = False
+
+        # 仅在“未运行 + 长静默 + 超过重启冷却”时强制重启，避免频繁重启拖慢主循环。
+        if (
+            (not running)
+            and silence_too_long
+            and now - self.last_voice_forced_restart_at >= settings.VOICE_COMMAND_FORCE_RESTART_MIN_SECONDS
+        ):
+            restarted = self.voice.start(
+                language=active_language,
+                fallback_languages=fallback_languages,
+                silence_restart_seconds=settings.VOICE_COMMAND_SILENCE_RESTART_SECONDS,
+            )
+            self.last_voice_forced_restart_at = now
+            if restarted:
+                logger.info("语音通道长静默后已执行一次强制重启")
+
+        # 用户要求：不使用字幕兜底，避免无效文本干扰指令识别。
+        transcripts = self.voice.collect_command_candidates(include_subtitle=False)
+        for item in transcripts:
+            text = item.get("text", "")
+            if not text:
+                continue
+            source = item.get("source") or "voice"
+            lang = item.get("lang") or ""
+            if not self._is_voice_language_match(text, lang, active_language):
+                logger.debug(
+                    f"语音文本语言不匹配已丢弃: expected={active_language}, got_lang={lang}, text={text}"
+                )
+                self._append_voice_input_log(
+                    source=source,
+                    text=text,
+                    lang=lang,
+                    status="ignored",
+                    note="lang_blocked",
+                    command=None,
+                )
+                continue
+            has_wake_word = self._pass_voice_wake_word(text)
+            command = self._parse_operation_command_text(text)
+            self._append_voice_input_log(
+                source=source,
+                text=text,
+                lang=lang,
+                status="captured",
+                note=("wake" if has_wake_word else "no_wake"),
+                command=command,
+            )
+            if settings.VOICE_STRICT_WAKE_WORD and not has_wake_word:
+                logger.debug(f"语音文本未通过唤醒词(严格模式): {text}")
+                self._append_voice_input_log(
+                    source=source,
+                    text=text,
+                    lang=lang,
+                    status="ignored",
+                    note="strict_no_wake",
+                    command=command,
+                )
+                continue
+            if (not has_wake_word) and (not command):
+                logger.debug(f"语音文本未命中口令: {text}")
+                self._append_voice_input_log(
+                    source=source,
+                    text=text,
+                    lang=lang,
+                    status="ignored",
+                    note="no_command",
+                    command=command,
+                )
+                continue
+            if self._is_duplicate_voice_command(text):
+                logger.debug(f"语音文本被去重忽略: {text}")
+                self._append_voice_input_log(
+                    source=source,
+                    text=text,
+                    lang=lang,
+                    status="ignored",
+                    note="duplicate_text",
+                    command=command,
+                )
+                continue
+            if command and self._is_duplicate_voice_action(command):
+                logger.debug(f"语音动作被冷却忽略: {command}")
+                self._append_voice_input_log(
+                    source=source,
+                    text=text,
+                    lang=lang,
+                    status="ignored",
+                    note="duplicate_action",
+                    command=command,
+                )
+                continue
+
+            logger.info(f"收到口令候选[{source}]: {text}")
+
+            log_entry = {
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "user": f"主播语音({source})",
+                "text": text,
+                "status": "voice_ignored",
+                "reply": "",
+            }
+            self.danmu_log.appendleft(log_entry)
+
+            if command:
+                ok = self._execute_operation_command(
+                    command,
+                    trigger_source=f"voice_{source}",
+                    log_entry=log_entry
+                )
+                receipt_note = str(log_entry.get("action_receipt") or "").strip()
+                base_note = "wake" if has_wake_word else "no_wake"
+                note = base_note if not receipt_note else f"{base_note}|{receipt_note}"
+                self._append_voice_input_log(
+                    source=source,
+                    text=text,
+                    lang=lang,
+                    status="action_done" if ok else "action_failed",
+                    note=note,
+                    command=command,
+                )
+
+    def _maybe_send_proactive_message(self):
+        """在直播间空窗期主动暖场。"""
+        if not self.proactive_enabled or not self.is_running:
+            return
+        if not self.vision.page:
+            return
+
+        now = time.time()
+        if now - self.last_danmu_time < settings.PROACTIVE_SILENCE_SECONDS:
+            return
+        if now - self.last_proactive_time < self.next_proactive_interval:
+            return
+
+        active_language = self._get_active_language()
+        messages = settings.PROACTIVE_MESSAGES_BY_LANGUAGE.get(
+            active_language,
+            settings.PROACTIVE_MESSAGES_BY_LANGUAGE.get(settings.DEFAULT_REPLY_LANGUAGE, [])
+        )
+        if not messages:
+            return
+
+        message = random.choice(messages)
+        message = self._enforce_unified_output_language(
+            message,
+            language=active_language,
+            force_tone=bool(self.tone_template),
+        )
+        sent = self.operations.send_message(message)
+        self.last_proactive_time = now
+        self.next_proactive_interval = random.uniform(
+            settings.PROACTIVE_MIN_INTERVAL,
+            settings.PROACTIVE_MAX_INTERVAL
+        )
+        if sent:
+            self._remember_sent_message(message)
+
+        self.danmu_log.appendleft({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "user": "系统",
+            "text": "[自动暖场]",
+            "status": "proactive_sent" if sent else "proactive_failed",
+            "reply": message
+        })
+
+    def _record_danmu_event(self, user, text, log_entry, llm_candidate, processing_ms):
+        try:
+            self.analytics.record_danmu_event(
+                {
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "user": user,
+                    "text": text,
+                    "status": log_entry.get("status"),
+                    "reply": log_entry.get("reply"),
+                    "action": log_entry.get("action"),
+                    "language": self._get_active_language(),
+                    "llm_candidate": bool(llm_candidate),
+                    "processing_ms": int(processing_ms),
+                }
+            )
+        except Exception as e:
+            logger.warning(f"写入弹幕分析事件失败: {e}")
+
+    def _maybe_generate_reports(self):
+        if not settings.ANALYTICS_AUTO_REPORT_ENABLED:
+            return
+        now = time.time()
+        if now - self.last_report_check_at < settings.ANALYTICS_REPORT_CHECK_INTERVAL_SECONDS:
+            return
+        self.last_report_check_at = now
+        try:
+            created = self.analytics.maybe_generate_periodic_reports()
+            for path in created:
+                logger.info(f"自动报表已生成: {path}")
+        except Exception as e:
+            logger.warning(f"自动报表生成失败: {e}")
+
+    def _mock_shop_file_path(self):
+        return (Path(__file__).resolve().parent / "stress" / "mock_shop" / "mock_tiktok_shop.html").resolve()
+
+    def get_mock_shop_url(self, view=None):
+        mock_file = self._mock_shop_file_path()
+        page_view = (view or settings.MOCK_SHOP_DEFAULT_VIEW or "dashboard_live").strip()
+        base = mock_file.as_uri()
+        return f"{base}?mock_tiktok_shop=1&view={page_view}"
+
+    def _is_current_page_mock_shop(self):
+        try:
+            page = getattr(self.vision, "page", None)
+            if not page:
+                return False
+            title = (getattr(page, "title", "") or "").lower()
+            url = (getattr(page, "url", "") or "").lower()
+            return (
+                "mock_tiktok_shop" in url
+                or "mock_tiktok_shop.html" in url
+                or "tiktok shop streamer mock" in title
+            )
+        except Exception:
+            return False
+
+    def _launch_debug_browser_with_url(self, url, user_data_path=None):
+        launch_plan = build_chrome_debug_launch_args(
+            port=settings.BROWSER_PORT,
+            user_data_path=user_data_path or settings.USER_DATA_PATH,
+            chrome_executable=settings.CHROME_EXECUTABLE,
+            startup_url=url,
+        )
+        argv_candidates = list(launch_plan.get("argv_candidates") or [])
+        if not argv_candidates:
+            argv = launch_plan.get("argv") or []
+            if argv:
+                argv_candidates = [argv]
+        if not argv_candidates:
+            return False, "launch_args_empty", launch_plan.get("display", "")
+
+        kwargs = {
+            "cwd": str(Path(__file__).resolve().parent),
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "stdin": subprocess.DEVNULL,
+            # Windows 下 close_fds=True 在部分环境会导致句柄继承/创建失败，改为平台分支。
+            "close_fds": os.name != "nt",
+        }
+        if os.name == "nt":
+            flags = 0
+            if hasattr(subprocess, "DETACHED_PROCESS"):
+                flags |= subprocess.DETACHED_PROCESS
+            if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+                flags |= subprocess.CREATE_NEW_PROCESS_GROUP
+            if flags:
+                kwargs["creationflags"] = flags
+        else:
+            # 与调用进程解耦，避免 UI 线程结束影响子进程。
+            kwargs["start_new_session"] = True
+
+        last_err = ""
+        last_cmd = launch_plan.get("display", "")
+        for argv in argv_candidates:
+            cmd_argv = list(argv)
+            if "--new-window" not in cmd_argv:
+                cmd_argv.append("--new-window")
+            last_cmd = " ".join(cmd_argv)
+            try:
+                subprocess.Popen(cmd_argv, **kwargs)
+                return True, "", last_cmd
+            except Exception as e:
+                last_err = str(e)
+                continue
+        return False, last_err or "launch_failed", last_cmd
+
+    def _listening_pids(self, port):
+        pids = set()
+        # macOS / Linux
+        try:
+            proc = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-t"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+            for line in (proc.stdout or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pids.add(int(line))
+                except ValueError:
+                    pass
+        except Exception:
+            pass
+
+        # Windows 兜底
+        if os.name == "nt" and not pids:
+            try:
+                ps_cmd = (
+                    f"Get-NetTCPConnection -LocalPort {int(port)} -State Listen "
+                    "| Select-Object -ExpandProperty OwningProcess"
+                )
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                )
+                for line in (proc.stdout or "").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        pids.add(int(line))
+                    except ValueError:
+                        pass
+            except Exception:
+                pass
+
+        # Windows 再兜底：netstat 输出在非英文系统会本地化，避免硬编码 LISTENING。
+        if os.name == "nt" and not pids:
+            try:
+                proc = subprocess.run(
+                    ["netstat", "-ano", "-p", "tcp"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                )
+                target = f":{int(port)}"
+                for raw in (proc.stdout or "").splitlines():
+                    parts = raw.split()
+                    if len(parts) < 5:
+                        continue
+                    proto = parts[0]
+                    local_addr = parts[1]
+                    remote_addr = parts[2] if len(parts) >= 3 else ""
+                    state = parts[3] if len(parts) >= 4 else ""
+                    pid_s = parts[-1]
+                    if not proto.upper().startswith("TCP"):
+                        continue
+                    if not local_addr.endswith(target):
+                        continue
+                    state_upper = state.upper()
+                    looks_listen = (
+                        state_upper in {"LISTENING", "LISTEN"}
+                        or ("LISTEN" in state_upper)
+                        or str(remote_addr).endswith(":0")
+                        or str(remote_addr).endswith(":*")
+                        or str(remote_addr) in {"0.0.0.0:0", "[::]:0", "*:*"}
+                    )
+                    if not looks_listen:
+                        continue
+                    try:
+                        pids.add(int(pid_s))
+                    except ValueError:
+                        pass
+            except Exception:
+                pass
+
+        return sorted(pids)
+
+    def _kill_listening_pids(self, port):
+        killed = []
+        for pid in self._listening_pids(port):
+            try:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                else:
+                    os.kill(pid, signal.SIGTERM)
+                    time.sleep(0.15)
+                    try:
+                        os.kill(pid, 0)
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                killed.append(pid)
+            except Exception:
+                pass
+        return killed
+
+    def _is_devtools_endpoint_ready(self, port=None):
+        """检测调试端口是否是可用的 Chrome DevTools。"""
+        target_port = int(port or settings.BROWSER_PORT)
+        url = f"http://127.0.0.1:{target_port}/json/version"
+        try:
+            with urllib.request.urlopen(url, timeout=0.8) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+            payload = json.loads(raw) if raw else {}
+            return bool(payload.get("webSocketDebuggerUrl"))
+        except Exception:
+            return False
+
+    def _ensure_debug_browser_process(self, startup_url=None):
+        """
+        保证存在可用的 DevTools 端口。
+        若 9222 不是可用调试端口，则主动拉起专用 Chrome 调试实例。
+        """
+        if self._is_devtools_endpoint_ready(settings.BROWSER_PORT):
+            return True
+
+        # 端口被非 DevTools 进程占用时先清理，避免重复拉起一直失败。
+        owners = self._listening_pids(settings.BROWSER_PORT)
+        if owners:
+            self._kill_listening_pids(settings.BROWSER_PORT)
+            time.sleep(0.2)
+            if self._is_devtools_endpoint_ready(settings.BROWSER_PORT):
+                return True
+
+        launch_url = startup_url or settings.TIKTOK_LIVE_URL
+        ok, err, cmd = self._launch_debug_browser_with_url(launch_url)
+        if not ok:
+            self.last_start_error = f"launch_debug_browser_failed:{err}"
+            self.last_start_detail = cmd
+            return False
+
+        for _ in range(8):
+            time.sleep(0.6)
+            if self._is_devtools_endpoint_ready(settings.BROWSER_PORT):
+                return True
+        self.last_start_error = "devtools_not_ready"
+        self.last_start_detail = cmd
+        return False
+
+    def _ensure_mock_debug_browser(self, mock_url, mock_user_data_path):
+        """
+        保证 mock 使用独立 profile 且 9222 为可用 DevTools 端口。
+        """
+        if self._is_devtools_endpoint_ready(settings.BROWSER_PORT):
+            return True, ""
+
+        # 端口被脏进程占用时先清理
+        self._kill_listening_pids(settings.BROWSER_PORT)
+        launched, launch_err, launch_cmd = self._launch_debug_browser_with_url(
+            mock_url,
+            user_data_path=mock_user_data_path,
+        )
+        if not launched:
+            return False, f"mock_launch_failed:{launch_err} | {launch_cmd}"
+
+        for _ in range(10):
+            time.sleep(0.45)
+            if self._is_devtools_endpoint_ready(settings.BROWSER_PORT):
+                return True, ""
+        return False, f"mock_devtools_not_ready | {launch_cmd}"
+
+    def _inject_mock_url_into_debug_browser(self, mock_url):
+        """
+        将 mock URL 强制注入当前 DevTools 浏览器。
+        解决“端口已就绪但当前标签不是 mock 页面”的情况。
+        """
+        try:
+            co = ChromiumOptions().set_local_port(settings.BROWSER_PORT)
+            browser = ChromiumPage(co)
+            tabs = browser.get_tabs() or []
+            target_tab = None
+
+            for tab in tabs:
+                title = (getattr(tab, "title", "") or "").lower()
+                url = (getattr(tab, "url", "") or "").lower()
+                if "mock_tiktok_shop" in url or "tiktok shop streamer mock" in title:
+                    self.vision.page = tab
+                    return True
+                if target_tab is None and ("shop.tiktok.com" in url or "tiktok.com" in url):
+                    target_tab = tab
+
+            if target_tab is None:
+                target_tab = tabs[0] if tabs else browser
+
+            target_tab.get(mock_url)
+            time.sleep(0.25)
+            self.vision.page = target_tab
+            return self._is_current_page_mock_shop()
+        except Exception as e:
+            logger.debug(f"注入 mock URL 失败: {e}")
+            return False
+
+    def connect_mock_shop(self, view=None):
+        """
+        显式连接项目内置 Mock 测试页：
+        1) 拉起带调试端口的 Chrome 并打开 mock 页面
+        2) 重试连接 VisionAgent，必要时强制导航到 mock URL
+        """
+        mock_file = self._mock_shop_file_path()
+        if not mock_file.exists():
+            self.last_start_error = "mock_file_missing"
+            self.last_start_detail = str(mock_file)
+            logger.error(f"Mock 页面不存在: {mock_file}")
+            return False
+
+        mock_url = self.get_mock_shop_url(view=view)
+        mock_user_data = str((Path(settings.USER_DATA_PATH).expanduser().resolve() / "mock_debug"))
+
+        # 快路径：当前已在 mock 页，直接成功。
+        if self._is_current_page_mock_shop():
+            self.last_start_error = ""
+            self.last_start_detail = f"mock_connected:{mock_url}"
+            return True
+
+        # 快路径：DevTools 已就绪时，先尝试注入，不做固定等待。
+        if self._is_devtools_endpoint_ready(settings.BROWSER_PORT):
+            injected_fast = self._inject_mock_url_into_debug_browser(mock_url)
+            if injected_fast and self._is_current_page_mock_shop():
+                self.last_start_error = ""
+                self.last_start_detail = f"mock_connected:{mock_url}"
+                logger.info(f"已快速连接内置 Mock 测试页: {mock_url}")
+                return True
+
+        ready, ready_err = self._ensure_mock_debug_browser(mock_url, mock_user_data)
+        if not ready:
+            self.last_start_error = ready_err
+            self.last_start_detail = mock_url
+            logger.warning(f"启动 Mock 浏览器失败: {ready_err}")
+            return False
+
+        retries = max(1, int(settings.MOCK_SHOP_CONNECT_RETRIES))
+        interval = max(0.2, float(settings.MOCK_SHOP_CONNECT_RETRY_INTERVAL_SECONDS))
+        last_err = ""
+
+        for attempt in range(1, retries + 1):
+            # 首轮立即尝试，失败后再按间隔重试，减少体感等待。
+            if attempt > 1:
+                time.sleep(interval)
+            if not self._is_devtools_endpoint_ready(settings.BROWSER_PORT):
+                ready, ready_err = self._ensure_mock_debug_browser(mock_url, mock_user_data)
+                if not ready:
+                    last_err = ready_err
+                    continue
+            injected = self._inject_mock_url_into_debug_browser(mock_url)
+            if injected and self._is_current_page_mock_shop():
+                self.last_start_error = ""
+                self.last_start_detail = f"mock_connected:{mock_url}"
+                logger.info(f"已注入并连接内置 Mock 测试页: {mock_url}")
+                return True
+            if not injected:
+                last_err = "inject_mock_url_failed"
+                # 注入失败时尝试重建调试浏览器，避免卡在脏会话。
+                self._kill_listening_pids(settings.BROWSER_PORT)
+                self._ensure_mock_debug_browser(mock_url, mock_user_data)
+                continue
+            try:
+                self.vision.connect_browser()
+                if self._is_current_page_mock_shop():
+                    self.last_start_error = ""
+                    self.last_start_detail = f"mock_connected:{mock_url}"
+                    logger.info(f"已连接内置 Mock 测试页: {mock_url}")
+                    return True
+
+                # 若连到非目标页，强制导航当前标签到 Mock。
+                page = getattr(self.vision, "page", None)
+                if page:
+                    try:
+                        page.get(mock_url)
+                        time.sleep(0.35)
+                        if self._is_current_page_mock_shop():
+                            self.last_start_error = ""
+                            self.last_start_detail = f"mock_connected:{mock_url}"
+                            logger.info(f"已切换到内置 Mock 测试页: {mock_url}")
+                            return True
+                    except Exception as nav_e:
+                        last_err = str(nav_e)
+                        logger.debug(f"导航到 Mock 页面失败(尝试{attempt}/{retries}): {nav_e}")
+            except Exception as e:
+                last_err = str(e)
+                emsg = (last_err or "").lower()
+                if "browser connection fails" in emsg or "address: 127.0.0.1:9222" in emsg:
+                    self._kill_listening_pids(settings.BROWSER_PORT)
+                    self._ensure_mock_debug_browser(mock_url, mock_user_data)
+
+        self.last_start_error = f"mock_connect_failed:{last_err or 'unknown'}"
+        self.last_start_detail = mock_url
+        logger.warning(f"连接内置 Mock 测试页失败: {self.last_start_error}")
+        return False
+
+    def connect_browser(self):
+        """连接到浏览器"""
+        try:
+            if self.get_web_info_source_mode() == "screen_ocr":
+                ok = bool(self.vision.ensure_connection(force=True))
+                if ok:
+                    self.last_start_error = ""
+                    self.last_start_detail = "screen_capture_ready"
+                else:
+                    self.last_start_error = "screen_capture_unavailable"
+                    self.last_start_detail = getattr(getattr(self.vision, "screen_capture", None), "last_error", "") or ""
+                return ok
+            # 先确保调试端口可用，避免“端口被占但不是 DevTools”的伪连接失败。
+            if not self._is_devtools_endpoint_ready(settings.BROWSER_PORT):
+                ready = self._ensure_debug_browser_process(startup_url=settings.TIKTOK_LIVE_URL)
+                if not ready:
+                    return False
+            self.vision.connect_browser()
+            self.last_start_error = ""
+            self.last_start_detail = "browser_connected"
+            return True
+        except Exception as e:
+            launch_info = build_chrome_debug_commands(
+                port=settings.BROWSER_PORT,
+                user_data_path=settings.USER_DATA_PATH,
+                chrome_executable=settings.CHROME_EXECUTABLE,
+            )
+            self.last_start_error = str(e)
+            self.last_start_detail = launch_info["primary"]
+            logger.warning(f"无法连接到浏览器，请确保已启动 Chrome 并开启调试端口 {settings.BROWSER_PORT}")
+            logger.warning(f"当前系统: {launch_info['platform_label']}")
+            logger.warning(f"命令示例: {launch_info['primary']}")
+            if launch_info["alternatives"]:
+                logger.warning(f"备选命令: {launch_info['alternatives'][0]}")
+            return False
+
+    def _ensure_browser_connected(self):
+        """启动阶段浏览器连接保障：先探活，再重试连接。"""
+        if self.get_web_info_source_mode() == "screen_ocr":
+            ok = bool(self.vision.ensure_connection(force=True))
+            if not ok:
+                self.last_start_error = "screen_capture_unavailable"
+                self.last_start_detail = getattr(getattr(self.vision, "screen_capture", None), "last_error", "") or ""
+            return ok
+
+        if self.vision.ensure_connection():
+            return True
+
+        retries = max(1, settings.STARTUP_CONNECT_RETRIES)
+        interval = max(0.0, settings.STARTUP_CONNECT_RETRY_INTERVAL_SECONDS)
+        for attempt in range(1, retries + 1):
+            ok = self.connect_browser()
+            if ok:
+                return True
+            if "未找到 TikTok 直播标签页" in (self.last_start_error or ""):
+                logger.warning("启动阶段未检测到直播标签页，停止快速重试，等待用户打开直播页")
+                break
+            if attempt < retries:
+                time.sleep(interval)
+        return False
+
+    def handle_message(self, msg, allow_llm=True):
+        """处理单条弹幕消息"""
+        started_at = time.time()
+        user = msg.get('user', '未知用户')
+        text = msg.get('text', '')
+        self.last_danmu_time = time.time()
+        
+        # 记录到内存日志
+        log_entry = {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "user": user,
+            "text": text,
+            "status": "pending",
+            "reply": ""
+        }
+        self.danmu_log.appendleft(log_entry)  # 最新的在最前
+        
+        logger.info(f"收到弹幕 [{user}]: {text}")
+        llm_candidate = False
+        try:
+            if self._is_self_echo_message(user, text):
+                log_entry["status"] = "self_echo_ignored"
+                return
+
+            if self._is_duplicate_message(user, text):
+                log_entry["status"] = "duplicate_message_skipped"
+                return
+
+            # 0. 先解析主播运营动作口令（优先级最高）
+            command = None
+            if self.get_web_info_source_mode() == "screen_ocr":
+                # screen_ocr 下弹幕源可能混入页面 UI 文案，运营动作仅接受明确助播唤醒词，防误触。
+                normalized_cmd_text = self._normalize_voice_command_text(text)
+                normalized_dense = re.sub(r"\s+", "", str(normalized_cmd_text or "").lower())
+                explicit_wake = any(
+                    w in normalized_dense
+                    for w in ["助播", "assistant", "cohost", "liveassistant", "streamassistant"]
+                )
+                if explicit_wake:
+                    command = self._parse_operation_command(user, text)
+                else:
+                    log_entry["action_guard"] = "screen_ocr_danmu_no_wake"
+            else:
+                command = self._parse_operation_command(user, text)
+            if command:
+                self._execute_operation_command(command, trigger_source="danmu", log_entry=log_entry)
+                return
+
+            if not self.reply_enabled:
+                log_entry["status"] = "reply_disabled"
+                return
+
+            active_language = self._get_active_language()
+            
+            # 1. 场控智能体优先分析 (关键词匹配速度快)
+            reply = self.atmosphere.analyze_and_reply(text, language=active_language)
+            reply_source = "atmosphere" if reply else ""
+            
+            llm_candidate = self._is_llm_candidate(text)
+            llm_skipped_for_backlog = False
+
+            # 2. 如果场控没有匹配，且是问题类弹幕，再尝试知识智能体
+            if not reply and llm_candidate and allow_llm:
+                now = time.time()
+                if now - self.last_llm_query_at >= settings.LLM_MIN_INTERVAL_SECONDS:
+                    self.last_llm_query_at = now
+                    reply = self.knowledge.query(
+                        text,
+                        language=active_language,
+                        tone_template=self.tone_template
+                    )
+                    reply_source = "knowledge" if reply else reply_source
+                    if reply:
+                        logger.info(f"知识库检索回复: {reply}")
+                else:
+                    logger.debug("跳过本次 LLM 调用：触发间隔保护")
+            elif not reply and llm_candidate and not allow_llm:
+                llm_skipped_for_backlog = True
+                logger.debug("跳过本条 LLM 调用：高峰期仅处理最新问题")
+            
+            # 更新内存日志状态
+            if reply:
+                reply = self._enforce_unified_output_language(
+                    reply,
+                    language=active_language,
+                    force_tone=bool(self.tone_template and reply_source != "knowledge"),
+                )
+                if len(reply) > settings.LLM_REPLY_MAX_CHARS:
+                    reply = reply[:settings.LLM_REPLY_MAX_CHARS]
+
+                if self._is_duplicate_reply(user, reply):
+                    log_entry["status"] = "duplicate_reply_skipped"
+                    log_entry["reply"] = reply
+                    return
+
+                log_entry["status"] = "replied"
+                log_entry["reply"] = reply
+                
+                # 3. 发送回复
+                full_reply = f"@{user} {reply}"
+                send_ok = self.operations.send_message(full_reply)
+                if not send_ok:
+                    log_entry["status"] = "send_failed"
+                else:
+                    self._remember_sent_message(full_reply)
+            else:
+                if llm_skipped_for_backlog:
+                    log_entry["status"] = "llm_skipped_backlog"
+                else:
+                    log_entry["status"] = "ignored"
+        finally:
+            processing_ms = int((time.time() - started_at) * 1000)
+            self._record_danmu_event(
+                user=user,
+                text=text,
+                log_entry=log_entry,
+                llm_candidate=llm_candidate,
+                processing_ms=processing_ms,
+            )
+
+    def _run_loop(self):
+        """后台运行循环"""
+        logger.info("AI 助手后台监听循环已启动")
+        # 使用手动轮询，便于优雅退出
+        while not self._stop_event.is_set():
+            try:
+                self._poll_voice_commands()
+                messages = self.vision.get_new_danmu()
+                if len(messages) > settings.MAX_MESSAGES_PER_CYCLE:
+                    logger.debug(
+                        f"弹幕高峰: 本轮抓到 {len(messages)} 条，仅处理最新 {settings.MAX_MESSAGES_PER_CYCLE} 条"
+                    )
+                    messages = messages[-settings.MAX_MESSAGES_PER_CYCLE:]
+                if len(messages) > 1:
+                    # 高峰期优先处理最新弹幕，降低体感延迟
+                    messages = list(reversed(messages))
+                for idx, msg in enumerate(messages):
+                    # get_new_danmu 已去重，这里直接处理即可
+                    self.handle_message(msg, allow_llm=(idx == 0))
+
+                self._maybe_send_proactive_message()
+                self._maybe_generate_reports()
+
+                sleep_seconds = (
+                    settings.MAIN_LOOP_BUSY_INTERVAL_SECONDS
+                    if messages else settings.MAIN_LOOP_IDLE_INTERVAL_SECONDS
+                )
+                self._stop_event.wait(max(0.01, sleep_seconds))
+            except Exception as e:
+                logger.error(f"监听循环出错: {e}")
+                self._stop_event.wait(max(0.05, settings.MAIN_LOOP_ERROR_BACKOFF_SECONDS))
+        
+        logger.info("AI 助手后台监听循环已停止")
+
+    def _prewarm_local_runtime(self):
+        """
+        轻量本地预热，降低首轮语音/知识链路冷启动耗时。
+        """
+        try:
+            if hasattr(self.voice, "prewarm_local_asr"):
+                self.voice.prewarm_local_asr()
+        except Exception as e:
+            logger.debug(f"语音本地预热失败: {e}")
+        try:
+            # 触发一次本地检索路径，预热向量检索与分词流程。
+            if hasattr(self.knowledge, "_retrieve_context"):
+                self.knowledge._retrieve_context("warmup")
+        except Exception as e:
+            logger.debug(f"知识检索预热失败: {e}")
+
+    def start(self):
+        """启动助手"""
+        if self.is_running and self._thread and self._thread.is_alive():
+            logger.warning("助手已经在运行中")
+            return True
+        if self.is_starting:
+            logger.warning("助手正在启动中，请稍后")
+            return False
+
+        with self._start_lock:
+            if self.is_running and self._thread and self._thread.is_alive():
+                return True
+
+            self.is_starting = True
+            self.last_start_error = ""
+            self.last_start_detail = ""
+            self.last_start_at = time.time()
+            try:
+                if not self._ensure_browser_connected():
+                    self.last_start_error = self.last_start_error or "browser_not_connected"
+                    logger.error("浏览器连接失败，未启动监听")
+                    return False
+
+                self._stop_event.clear()
+                self.is_running = True
+                self._thread = threading.Thread(target=self._run_loop, daemon=True)
+                self._thread.start()
+
+                wait_s = max(0.0, settings.STARTUP_THREAD_READY_TIMEOUT_SECONDS)
+                if wait_s > 0:
+                    time.sleep(wait_s)
+                if not self._thread.is_alive():
+                    raise RuntimeError("listener_thread_not_alive")
+
+                # 语音通道改为循环内懒启动，避免阻塞系统启动。
+                if self.voice_command_enabled:
+                    logger.info("语音监听将在后台循环中自动就绪")
+
+                # 异步预热本地链路，不阻塞主监听启动。
+                threading.Thread(target=self._prewarm_local_runtime, daemon=True).start()
+
+                self.last_start_detail = "ok"
+                logger.info("系统已启动")
+                return True
+            except Exception as e:
+                self.is_running = False
+                self.last_start_error = str(e)
+                logger.error(f"系统启动失败: {e}")
+                return False
+            finally:
+                self.is_starting = False
+
+    def stop(self):
+        """停止助手"""
+        if not self.is_running:
+            return
+            
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        try:
+            self.voice.stop()
+        except Exception:
+            pass
+        self.is_running = False
+        self.is_starting = False
+        logger.info("系统已停止")
+
+# 为了兼容旧的 main.py 运行方式
+def main():
+    logger.info("启动 AI 智能直播助手 (Pro版)...")
+    assistant = LiveAssistant()
+    
+    # 连接浏览器
+    assistant.connect_browser()
+    
+    # 定义回调适配器 (因为 vision.listen 需要回调)
+    # 但我们的 LiveAssistant 已经重构了循环逻辑。
+    # 如果要复用 VisionAgent.listen 的死循环逻辑 (如果不修改 VisionAgent):
+    # assistant.vision.listen(assistant.handle_message)
+    
+    # 既然我们重构了 LiveAssistant 使用线程，这里直接调用 start() 并主线程等待
+    if not assistant.start():
+        logger.error("启动失败，请检查浏览器连接和标签页。")
+        return
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        assistant.stop()
+
+if __name__ == "__main__":
+    main()
