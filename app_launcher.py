@@ -47,15 +47,28 @@ def _ensure_runtime_dirs(root: Path) -> None:
 
 
 def _port_open(port: int, host: str = "127.0.0.1") -> bool:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.25)
-    try:
-        s.connect((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    hosts = []
+    normalized = str(host or "").strip().lower()
+    if normalized in {"", "0.0.0.0", "::"}:
+        hosts = ["127.0.0.1", "localhost"]
+    elif normalized == "127.0.0.1":
+        hosts = ["127.0.0.1", "localhost"]
+    elif normalized == "localhost":
+        hosts = ["localhost", "127.0.0.1"]
+    else:
+        hosts = [str(host), "127.0.0.1", "localhost"]
+
+    for item in hosts:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.25)
+        try:
+            s.connect((item, port))
+            return True
+        except OSError:
+            pass
+        finally:
+            s.close()
+    return False
 
 
 def _pick_available_port(preferred: int, host: str = "127.0.0.1") -> int:
@@ -69,14 +82,37 @@ def _pick_available_port(preferred: int, host: str = "127.0.0.1") -> int:
     return preferred
 
 
-def _open_browser_later(url: str, port: int, delay: float = 1.0) -> None:
+def _browser_host_for_bind_host(bind_host: str) -> str:
+    host = str(bind_host or "").strip()
+    if host in {"", "0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return host
+
+
+def _open_browser_later(
+    url: str,
+    port: int,
+    host: str = "127.0.0.1",
+    delay: float = 1.0,
+    timeout_seconds: float = 45.0,
+    on_timeout=None,
+) -> None:
     def _worker():
         time.sleep(max(0.1, delay))
-        deadline = time.time() + 15
+        deadline = time.time() + max(3.0, float(timeout_seconds))
+        ready = False
         while time.time() < deadline:
-            if _port_open(port):
+            if _port_open(port, host=host):
+                ready = True
                 break
             time.sleep(0.3)
+        if not ready:
+            if callable(on_timeout):
+                try:
+                    on_timeout()
+                except Exception:
+                    pass
+            return
         try:
             webbrowser.open(url, new=1)
         except Exception:
@@ -200,20 +236,38 @@ def main() -> int:
         return 2
     _append_boot_log(runtime_root, f"dashboard_script={dashboard_script}")
 
-    host = os.getenv("DASHBOARD_HOST", "127.0.0.1")
+    host = os.getenv("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    browser_host = _browser_host_for_bind_host(host)
     self_check = _is_truthy(os.getenv("APP_LAUNCHER_SELF_CHECK", ""))
+    try:
+        browser_timeout = float(os.getenv("DASHBOARD_OPEN_BROWSER_TIMEOUT_SECONDS", "45"))
+    except Exception:
+        browser_timeout = 45.0
     try:
         configured_port = int(os.getenv("DASHBOARD_PORT", "8501"))
     except Exception:
         configured_port = 8501
-    port = _pick_available_port(configured_port, host="127.0.0.1")
+    port = _pick_available_port(configured_port, host=browser_host)
     if port != configured_port:
         _append_boot_log(runtime_root, f"port_busy_fallback: {configured_port} -> {port}")
     os.environ["DASHBOARD_PORT"] = str(port)
-    url = f"http://127.0.0.1:{port}"
+    url = f"http://{browser_host}:{port}"
     auto_open = os.getenv("DASHBOARD_AUTO_OPEN", "true").lower() in ("1", "true", "yes", "on")
     if auto_open and not self_check:
-        _open_browser_later(url=url, port=port, delay=1.2)
+        _open_browser_later(
+            url=url,
+            port=port,
+            host=browser_host,
+            delay=1.2,
+            timeout_seconds=browser_timeout,
+            on_timeout=lambda: _append_boot_log(
+                runtime_root,
+                (
+                    f"skip_open_browser: server_not_ready host={browser_host} "
+                    f"port={port} wait_seconds={browser_timeout}"
+                ),
+            ),
+        )
 
     # 延迟导入，确保环境变量/工作目录已就位。
     try:

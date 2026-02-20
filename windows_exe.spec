@@ -58,6 +58,7 @@ for pkg in (
     "langchain_openai",
     "chromadb",
     "speech_recognition",
+    "dashscope",
     "DrissionPage",
     "openpyxl",
 ):

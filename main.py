@@ -217,6 +217,8 @@ class LiveAssistant:
             voice_mic_index = data.get("voice_mic_device_index")
             voice_mic_name_hint = data.get("voice_mic_name_hint")
             voice_asr_provider = str(data.get("voice_asr_provider") or "").strip().lower()
+            if voice_asr_provider in {"dashscope", "aliyun_funasr", "funasr"}:
+                voice_asr_provider = "dashscope_funasr"
             operation_execution_mode = str(data.get("operation_execution_mode") or "").strip().lower()
             web_info_source_mode = str(data.get("web_info_source_mode") or "").strip().lower()
             human_like_settings = data.get("human_like_settings") or data.get("human_like") or {}
@@ -240,7 +242,7 @@ class LiveAssistant:
                     )
             if voice_asr_provider == "google" and self.reply_language.startswith("zh"):
                 voice_asr_provider = "auto"
-            if voice_asr_provider in {"google", "auto", "sphinx", "whisper_local"}:
+            if voice_asr_provider in {"google", "auto", "sphinx", "whisper_local", "dashscope_funasr"}:
                 settings.VOICE_PYTHON_ASR_PROVIDER = voice_asr_provider
             if operation_execution_mode:
                 self.set_operation_execution_mode(operation_execution_mode, persist=False)
@@ -473,7 +475,9 @@ class LiveAssistant:
 
     def set_voice_asr_provider(self, provider):
         provider = str(provider or "").strip().lower()
-        if provider not in {"google", "auto", "sphinx", "whisper_local"}:
+        if provider in {"dashscope", "aliyun_funasr", "funasr"}:
+            provider = "dashscope_funasr"
+        if provider not in {"google", "auto", "sphinx", "whisper_local", "dashscope_funasr"}:
             return False
         settings.VOICE_PYTHON_ASR_PROVIDER = provider
         if bool(getattr(self.voice, "_local_running", False)):
@@ -915,6 +919,10 @@ class LiveAssistant:
         def _has_token_like(candidates):
             return any(_token_like(tok, cand) for tok in ascii_tokens for cand in candidates)
 
+        def _has_ascii_token(candidates):
+            cand_set = {str(c).strip().lower() for c in candidates if str(c).strip()}
+            return any(str(tok).strip().lower() in cand_set for tok in ascii_tokens)
+
         def _first_ascii_index_token():
             for tok in ascii_tokens:
                 idx = _parse_index(tok)
@@ -927,16 +935,34 @@ class LiveAssistant:
             "秒杀", "flashsale", "flashdeal", "flashpromo", "flashpromotion",
             "limiteddeal", "limitedoffer", "promotion", "promo", "deal", "saleevent"
         ]
-        flash_stop_actions = [
+        flash_stop_actions_cn = [
             "结束", "停止", "下架", "关闭", "撤下", "停一下", "收一下",
+        ]
+        flash_stop_actions_en = [
             "end", "stop", "close", "disable", "off", "finish", "over", "remove",
         ]
-        flash_actions = [
-            "上架", "开启", "开始", "开一下", "挂一下", "launch", "start",
-            "enable", "open", "golive", "live", "on", "run", "push", "publish",
+        flash_actions_cn = ["上架", "开启", "开始", "开一下", "挂一下"]
+        flash_actions_en = [
+            "launch", "start", "enable", "open", "golive", "live", "on", "run", "push", "publish",
             # ASR 英文动词误识别兜底
             "lounge", "lanch", "launche", "lunch", "lunge", "launge", "long"
         ]
+        has_flash_marker = any(marker in normalized for marker in flash_markers)
+        has_en_flash_surface = (
+            any(k in normalized for k in ["flashsale", "flashdeal", "flashpromo", "flashpromotion", "limiteddeal", "limitedoffer", "saleevent"])
+            or (
+                _has_token_like(["flash", "slash", "flesh", "flush", "flask"])
+                and _has_token_like(["sale", "sail", "cell", "seal", "deal", "promo", "promotion"])
+            )
+            or (
+                _has_token_like(["limited"])
+                and _has_token_like(["offer", "deal", "promotion", "promo", "sale", "event"])
+            )
+        )
+        has_cn_flash_stop = any(k in normalized for k in flash_stop_actions_cn)
+        has_en_flash_stop = _has_ascii_token(flash_stop_actions_en) or ("turnoff" in normalized)
+        has_cn_flash_start = any(k in normalized for k in flash_actions_cn)
+        has_en_flash_start = _has_ascii_token(flash_actions_en) or ("turnon" in normalized)
 
         flash_stop_cmd = (
             ("秒杀" in normalized and any(k in normalized for k in ["结束", "停止", "下架", "关闭", "撤下", "停一下"]))
@@ -945,8 +971,8 @@ class LiveAssistant:
             or ("下架秒杀" in normalized)
             or ("活动" in normalized and "结束" in normalized and "秒杀" in normalized)
             or (
-                any(marker in normalized for marker in flash_markers)
-                and any(action in normalized for action in flash_stop_actions)
+                (has_flash_marker or has_en_flash_surface)
+                and (has_cn_flash_stop or has_en_flash_stop)
             )
             or ("flash" in normalized and "sale" in normalized and any(k in normalized for k in ["stop", "end", "close", "disable", "off", "finish", "over", "remove"]))
             or ("endflashsale" in normalized)
@@ -968,8 +994,8 @@ class LiveAssistant:
             or ("活动" in normalized and "上架" in normalized and "秒杀" in normalized)
             or ("上架" in normalized and "秒杀" in normalized)
             or (
-                any(marker in normalized for marker in flash_markers)
-                and any(action in normalized for action in flash_actions)
+                (has_flash_marker or has_en_flash_surface)
+                and (has_cn_flash_start or has_en_flash_start)
             )
             or ("flash" in normalized and "sale" in normalized and any(k in normalized for k in ["start", "launch", "lounge", "lanch", "launche", "lunch", "lunge", "launge", "long", "on", "enable", "open"]))
             or ("put" in normalized and "flashsale" in normalized and "live" in normalized)

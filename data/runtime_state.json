@@ -19,7 +19,7 @@
     "typing_min_interval_seconds": 0.012,
     "typing_max_interval_seconds": 0.034
   },
-  "voice_mic_device_index": 0,
-  "voice_mic_name_hint": "",
+  "voice_mic_device_index": null,
+  "voice_mic_name_hint": "blackhole,stereo mix,loopback,vb-cable",
   "voice_asr_provider": "whisper_local"
 }

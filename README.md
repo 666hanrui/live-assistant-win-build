@@ -87,6 +87,7 @@ flowchart LR
 ├── scripts/
 │   ├── dashboard_service.py      # 控制台服务启停/重启/日志
 │   ├── voice_stress_pack.py      # 语音离线压测 + 日志复盘
+│   ├── loopback_asr_real_test.py # 回采模式真实链路压测
 │   ├── voice_audio_runner.py     # 语音样本生成与播放（Win/mac）
 │   ├── mock_shop_server.py       # 本地 Mock 页面 HTTP 服务
 │   ├── build_windows_exe.ps1     # Windows 打包脚本
@@ -298,6 +299,11 @@ Windows CMD：
   - 只依赖系统麦克风权限
   - 不依赖 TikTok 网页的麦克风站点权限
 
+- `system_loopback_asr`（本机直采网页声音）：
+  - 从系统回采输入设备读取浏览器播放音频（如 BlackHole/Stereo Mix/VB-CABLE）
+  - 不走物理麦克风
+  - 仍走 Python ASR 命令解析链路
+
 - `web_speech`：
   - 浏览器 Web Speech API
   - 依赖当前网页安全上下文和站点授权
@@ -305,6 +311,7 @@ Windows CMD：
 ### 11.2 ASR Provider
 
 - `whisper_local`：本地识别，稳定，适合中文
+- `dashscope_funasr`：阿里云 FunASR（实时云端识别，需配置 API Key）
 - `google`：在线识别，依赖网络
 - `auto`：按语言与本地优先策略动态链路
 - `sphinx`：离线英文兜底
@@ -512,6 +519,30 @@ powershell -ExecutionPolicy Bypass -File stress/voice/windows_playback_loop.ps1 
 
 `📈 数据报表` 页底部：`🚀 一键跑本地语音压测`。
 
+### 16.6 回采模式真实链路压测（新增）
+
+```bash
+python scripts/loopback_asr_real_test.py --profile quick --mode system_loopback_asr --json
+python scripts/loopback_asr_real_test.py --profile quick --mode tab_audio_asr --json
+```
+
+- 真实覆盖：音频播放 -> loopback 回采 -> VAD/RMS 门控 -> ASR provider 链 -> `_local_push_text()` -> 命令执行链。
+- 输出报告：`data/reports/voice_stress/loopback_real_*.{md,json}`
+
+### 16.7 全局功能测试（新增）
+
+```bash
+python scripts/global_feature_test.py --profile full
+```
+
+- `full`：强制覆盖 EXE 启动链路、Mock 联调、语音链路、运营动作、知识库、报表等核心功能，并包含 loopback 真实链路压测。
+- `offline`：仅离线验证（不跑浏览器与麦克风端到端）。
+
+输出报告：
+
+- `data/reports/global_feature_test/*.json`
+- `data/reports/global_feature_test/*.md`
+
 ---
 
 ## 17. Windows EXE 打包与上线
@@ -537,6 +568,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 - `dist/AI_Live_Assistant/启动助手.bat`
 
 打包脚本会优先复制根目录 `.env`（若不存在则复制 `.env.example`），并按配置自动带入模型目录。
+同时会在发布包内 `.env` 缺失时补齐语音回采默认项（`VOICE_COMMAND_INPUT_MODE=system_loopback_asr` 等），并补齐 FunASR 备用通道基础项（`VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK`/`VOICE_DASHSCOPE_MODEL`/`VOICE_DASHSCOPE_SAMPLE_RATE`）。
 首次上线需确认：`dist/AI_Live_Assistant/.env`
 
 详细见：`docs/WINDOWS_EXE_BUILD.md`
@@ -630,6 +662,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 
 - `VOICE_PYTHON_ASR_PROVIDER`
 - `VOICE_ASR_ALLOW_GOOGLE_FALLBACK`
+- `VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK`
 - `VOICE_PYTHON_ASR_QUEUE_MAX`
 - `VOICE_PYTHON_LISTEN_TIMEOUT_SECONDS`
 - `VOICE_PYTHON_PHRASE_TIME_LIMIT_SECONDS`
@@ -639,6 +672,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 - `VOICE_PYTHON_NO_TEXT_WARN_RMS`
 - `VOICE_PYTHON_MIC_DEVICE_INDEX`
 - `VOICE_PYTHON_MIC_DEVICE_NAME_HINT`
+- `VOICE_LOOPBACK_DEVICE_INDEX`
+- `VOICE_LOOPBACK_DEVICE_NAME_HINT`
+- `VOICE_DASHSCOPE_API_KEY`
+- `VOICE_DASHSCOPE_MODEL`
+- `VOICE_DASHSCOPE_SAMPLE_RATE`
+- `VOICE_DASHSCOPE_BASE_WEBSOCKET_API_URL`
+- `VOICE_DASHSCOPE_LANGUAGE_HINTS`
+- `VOICE_DASHSCOPE_ENABLE_PUNCTUATION`
+- `VOICE_DASHSCOPE_DISABLE_ITN`
 - `VOICE_WHISPER_MODEL`
 - `VOICE_WHISPER_DOWNLOAD_ROOT`
 - `VOICE_WHISPER_MAX_LANGS`
@@ -663,6 +705,7 @@ VOICE_COMMAND_INPUT_MODE=python_asr
 VOICE_PYTHON_ASR_PROVIDER=whisper_local
 VOICE_WHISPER_MAX_LANGS=1
 VOICE_ASR_ALLOW_GOOGLE_FALLBACK=false
+VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK=false
 EMBEDDING_LOCAL_FILES_ONLY=true
 EMBEDDING_ENABLE_ONLINE_FALLBACK=false
 MAIN_LOOP_BUSY_INTERVAL_SECONDS=0.16
@@ -800,6 +843,8 @@ MAX_MESSAGES_PER_CYCLE=3
 - [ ] 语音口令可触发置顶/取消置顶/秒杀上架
 - [ ] 报表页可刷新并能生成日报
 - [ ] `scripts/voice_stress_pack.py offline --profile quick --json` 通过
+- [ ] `scripts/loopback_asr_real_test.py --profile quick --mode system_loopback_asr --json` 通过
+- [ ] `scripts/global_feature_test.py --profile full` 通过
 - [ ] 自检通过率满足预期
 
 ---

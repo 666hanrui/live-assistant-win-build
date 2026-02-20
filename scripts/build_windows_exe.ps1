@@ -102,6 +102,14 @@ function Set-EnvValue([string]$EnvFile, [string]$Key, [string]$Value) {
   Set-Content -Path $EnvFile -Value $out -Encoding UTF8
 }
 
+function Ensure-EnvDefault([string]$EnvFile, [string]$Key, [string]$DefaultValue) {
+  $current = Get-EnvValue $EnvFile $Key
+  if ([string]::IsNullOrWhiteSpace([string]$current)) {
+    Set-EnvValue $EnvFile $Key $DefaultValue
+    Write-Host "Set default env: $Key=$DefaultValue"
+  }
+}
+
 function Normalize-Name([string]$Name, [string]$Fallback) {
   $clean = [Regex]::Replace([string]$Name, "[^A-Za-z0-9._-]", "_")
   if ([string]::IsNullOrWhiteSpace($clean)) {
@@ -376,6 +384,18 @@ $EnvTarget = Join-Path $BundleDir ".env"
 if (Test-Path $EnvSource) {
   Copy-Item $EnvSource $EnvTarget -Force
 }
+
+# 确保发布包内包含语音回采模式所需关键配置（仅在缺失时补默认值，不覆盖用户已有设置）。
+Ensure-EnvDefault $EnvTarget "VOICE_COMMAND_ENABLED" "true"
+Ensure-EnvDefault $EnvTarget "VOICE_COMMAND_INPUT_MODE" "system_loopback_asr"
+Ensure-EnvDefault $EnvTarget "VOICE_PYTHON_ASR_PROVIDER" "whisper_local"
+Ensure-EnvDefault $EnvTarget "VOICE_ASR_ALLOW_GOOGLE_FALLBACK" "false"
+Ensure-EnvDefault $EnvTarget "VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK" "false"
+Ensure-EnvDefault $EnvTarget "VOICE_DASHSCOPE_MODEL" "paraformer-realtime-v2"
+Ensure-EnvDefault $EnvTarget "VOICE_DASHSCOPE_SAMPLE_RATE" "16000"
+Ensure-EnvDefault $EnvTarget "VOICE_WHISPER_MAX_LANGS" "1"
+Ensure-EnvDefault $EnvTarget "VOICE_LOOPBACK_DEVICE_INDEX" "-1"
+Ensure-EnvDefault $EnvTarget "VOICE_LOOPBACK_DEVICE_NAME_HINT" "blackhole,stereo mix,loopback,vb-cable"
 
 $ModelsDir = Join-Path $BundleDir "models"
 New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null

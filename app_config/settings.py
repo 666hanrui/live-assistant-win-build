@@ -265,6 +265,7 @@ SCREEN_CAPTURE_MONITOR_INDEX = int(os.getenv("SCREEN_CAPTURE_MONITOR_INDEX", "1"
 # 语音口令监听（物理听到主播说话）
 # 模式：
 # - python_asr: 本地 Python 麦克风采集 + ASR（默认，依赖系统麦克风权限，不依赖 TikTok 网页权限）
+# - system_loopback_asr: 本机系统回采（浏览器播放音频）+ ASR（需配置回采设备，如 BlackHole/Stereo Mix/VB-CABLE）
 # - web_speech: 浏览器 Web Speech API（依赖 TikTok 网页权限）
 VOICE_COMMAND_INPUT_MODE = os.getenv("VOICE_COMMAND_INPUT_MODE", "python_asr").strip().lower()
 VOICE_COMMAND_ENABLED = os.getenv("VOICE_COMMAND_ENABLED", "false").lower() in ("1", "true", "yes", "on")
@@ -278,8 +279,10 @@ VOICE_COMMAND_FALLBACK_LANGUAGES = _split_csv_env("VOICE_COMMAND_FALLBACK_LANGUA
 VOICE_COMMAND_CROSS_LANGUAGE_ENABLED = os.getenv("VOICE_COMMAND_CROSS_LANGUAGE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 VOICE_COMMAND_CROSS_LANGUAGE_ORDER = _split_csv_env("VOICE_COMMAND_CROSS_LANGUAGE_ORDER", "zh-CN,en-US")
 VOICE_COMMAND_MAX_LANGS = int(os.getenv("VOICE_COMMAND_MAX_LANGS", "2"))
+# provider: whisper_local / auto / dashscope_funasr / google / sphinx
 VOICE_PYTHON_ASR_PROVIDER = os.getenv("VOICE_PYTHON_ASR_PROVIDER", "whisper_local").strip().lower()
 VOICE_ASR_ALLOW_GOOGLE_FALLBACK = os.getenv("VOICE_ASR_ALLOW_GOOGLE_FALLBACK", "false").lower() in ("1", "true", "yes", "on")
+VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK = os.getenv("VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK", "false").lower() in ("1", "true", "yes", "on")
 VOICE_PYTHON_ASR_QUEUE_MAX = int(os.getenv("VOICE_PYTHON_ASR_QUEUE_MAX", "200"))
 VOICE_PYTHON_LISTEN_TIMEOUT_SECONDS = float(os.getenv("VOICE_PYTHON_LISTEN_TIMEOUT_SECONDS", "2.5"))
 VOICE_PYTHON_PHRASE_TIME_LIMIT_SECONDS = float(os.getenv("VOICE_PYTHON_PHRASE_TIME_LIMIT_SECONDS", "4.0"))
@@ -289,6 +292,15 @@ VOICE_PYTHON_DYNAMIC_ENERGY = os.getenv("VOICE_PYTHON_DYNAMIC_ENERGY", "true").l
 VOICE_PYTHON_NO_TEXT_WARN_RMS = int(os.getenv("VOICE_PYTHON_NO_TEXT_WARN_RMS", "120"))
 VOICE_PYTHON_MIC_DEVICE_INDEX = int(os.getenv("VOICE_PYTHON_MIC_DEVICE_INDEX", "-1"))
 VOICE_PYTHON_MIC_DEVICE_NAME_HINT = os.getenv("VOICE_PYTHON_MIC_DEVICE_NAME_HINT", "").strip()
+VOICE_LOOPBACK_DEVICE_INDEX = int(os.getenv("VOICE_LOOPBACK_DEVICE_INDEX", "-1"))
+VOICE_LOOPBACK_DEVICE_NAME_HINT = os.getenv("VOICE_LOOPBACK_DEVICE_NAME_HINT", "").strip()
+VOICE_DASHSCOPE_API_KEY = os.getenv("VOICE_DASHSCOPE_API_KEY", os.getenv("DASHSCOPE_API_KEY", "")).strip()
+VOICE_DASHSCOPE_MODEL = os.getenv("VOICE_DASHSCOPE_MODEL", "paraformer-realtime-v2").strip()
+VOICE_DASHSCOPE_SAMPLE_RATE = int(os.getenv("VOICE_DASHSCOPE_SAMPLE_RATE", "16000"))
+VOICE_DASHSCOPE_BASE_WEBSOCKET_API_URL = os.getenv("VOICE_DASHSCOPE_BASE_WEBSOCKET_API_URL", "").strip()
+VOICE_DASHSCOPE_LANGUAGE_HINTS = _split_csv_env("VOICE_DASHSCOPE_LANGUAGE_HINTS", "")
+VOICE_DASHSCOPE_ENABLE_PUNCTUATION = os.getenv("VOICE_DASHSCOPE_ENABLE_PUNCTUATION", "true").lower() in ("1", "true", "yes", "on")
+VOICE_DASHSCOPE_DISABLE_ITN = os.getenv("VOICE_DASHSCOPE_DISABLE_ITN", "false").lower() in ("1", "true", "yes", "on")
 VOICE_WHISPER_MODEL = os.getenv("VOICE_WHISPER_MODEL", "tiny").strip()
 VOICE_WHISPER_DOWNLOAD_ROOT = os.getenv("VOICE_WHISPER_DOWNLOAD_ROOT", "data/whisper_cache").strip()
 VOICE_WHISPER_MAX_LANGS = int(os.getenv("VOICE_WHISPER_MAX_LANGS", "2"))
@@ -307,6 +319,8 @@ if LOCAL_FIRST_MODE:
         VOICE_PYTHON_ASR_PROVIDER = "whisper_local"
     if "VOICE_ASR_ALLOW_GOOGLE_FALLBACK" not in os.environ:
         VOICE_ASR_ALLOW_GOOGLE_FALLBACK = False
+    if "VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK" not in os.environ:
+        VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK = False
     if "EMBEDDING_LOCAL_FILES_ONLY" not in os.environ:
         EMBEDDING_LOCAL_FILES_ONLY = True
     if "EMBEDDING_ENABLE_ONLINE_FALLBACK" not in os.environ:

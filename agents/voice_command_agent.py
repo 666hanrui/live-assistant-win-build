@@ -3,6 +3,8 @@ import time
 import re
 import math
 import struct
+import tempfile
+from http import HTTPStatus
 from pathlib import Path
 from collections import deque
 import numpy as np
@@ -20,6 +22,7 @@ class VoiceCommandAgent:
     def __init__(self, vision_agent):
         self.vision_agent = vision_agent
         self.input_mode = str(getattr(settings, "VOICE_COMMAND_INPUT_MODE", "web_speech") or "web_speech").strip().lower()
+        self._local_capture_mode = "loopback" if self._is_loopback_asr_mode() else "mic"
         self.last_lang = None
         self.last_langs = []
         self.enabled_in_page = False
@@ -45,16 +48,23 @@ class VoiceCommandAgent:
         self._local_last_audio_rms = 0
         self._local_no_text_count = 0
         self._provider_chain_logged = ""
-        self._preferred_mic_device_index = int(getattr(settings, "VOICE_PYTHON_MIC_DEVICE_INDEX", -1))
-        self._preferred_mic_name_hint = str(getattr(settings, "VOICE_PYTHON_MIC_DEVICE_NAME_HINT", "") or "").strip()
+        if self._local_capture_mode == "loopback":
+            self._preferred_mic_device_index = int(getattr(settings, "VOICE_LOOPBACK_DEVICE_INDEX", -1))
+            self._preferred_mic_name_hint = str(getattr(settings, "VOICE_LOOPBACK_DEVICE_NAME_HINT", "") or "").strip()
+        else:
+            self._preferred_mic_device_index = int(getattr(settings, "VOICE_PYTHON_MIC_DEVICE_INDEX", -1))
+            self._preferred_mic_name_hint = str(getattr(settings, "VOICE_PYTHON_MIC_DEVICE_NAME_HINT", "") or "").strip()
         self._local_mic_state = {
             "status": "idle",
             "error": None,
             "updatedAt": None,
             "provider": str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local"),
+            "captureMode": self._local_capture_mode,
         }
         self._google_backoff_until = 0.0
         self._google_error_count = 0
+        self._dashscope_backoff_until = 0.0
+        self._dashscope_error_count = 0
         self._whisper_model_name = None
         self._whisper_model = None
         self._whisper_prewarm_started = False
@@ -63,7 +73,26 @@ class VoiceCommandAgent:
         return self.input_mode
 
     def _is_python_asr_mode(self):
-        return self.input_mode in {"python_asr", "local_python_asr", "python_local", "local"}
+        return self.input_mode in {
+            "python_asr",
+            "local_python_asr",
+            "python_local",
+            "local",
+            "system_loopback_asr",
+            "loopback_asr",
+            "system_audio_asr",
+            "tab_audio_asr",
+            "loopback",
+        }
+
+    def _is_loopback_asr_mode(self):
+        return self.input_mode in {
+            "system_loopback_asr",
+            "loopback_asr",
+            "system_audio_asr",
+            "tab_audio_asr",
+            "loopback",
+        }
 
     def requires_browser_page(self):
         return not self._is_python_asr_mode()
@@ -167,8 +196,9 @@ class VoiceCommandAgent:
         text = str(text or "").strip()
         if not text:
             return
+        source = "python_loopback" if self._is_loopback_asr_mode() else "python_mic"
         item = {
-            "source": "python_mic",
+            "source": source,
             "text": text,
             "confidence": confidence,
             "lang": lang,
@@ -222,6 +252,7 @@ class VoiceCommandAgent:
             self._preferred_mic_name_hint = str(name_hint or "").strip()
         self._local_mic_state["deviceIndex"] = (self._preferred_mic_device_index if self._preferred_mic_device_index >= 0 else None)
         self._local_mic_state["nameHint"] = self._preferred_mic_name_hint
+        self._local_mic_state["captureMode"] = self._local_capture_mode
 
         if restart_if_running and self._local_running and self._is_python_asr_mode():
             langs = list(self.last_langs or ["zh-CN"])
@@ -295,17 +326,24 @@ class VoiceCommandAgent:
 
     def _select_local_microphone(self, sr):
         """
-        选择麦克风设备：
-        1) 优先使用配置索引 VOICE_PYTHON_MIC_DEVICE_INDEX
+        选择输入设备（麦克风/系统回采）：
+        1) 优先使用显式配置索引（mic: VOICE_PYTHON_MIC_DEVICE_INDEX / loopback: VOICE_LOOPBACK_DEVICE_INDEX）
         2) 再尝试默认设备
         3) 默认失败时，按名称 hint 或第一个可用设备兜底
         """
         configured_idx = int(self._preferred_mic_device_index)
         if configured_idx < 0:
-            configured_idx = int(getattr(settings, "VOICE_PYTHON_MIC_DEVICE_INDEX", -1))
-        name_hint = str(self._preferred_mic_name_hint or "").strip().lower()
-        if not name_hint:
-            name_hint = str(getattr(settings, "VOICE_PYTHON_MIC_DEVICE_NAME_HINT", "") or "").strip().lower()
+            if self._is_loopback_asr_mode():
+                configured_idx = int(getattr(settings, "VOICE_LOOPBACK_DEVICE_INDEX", -1))
+            else:
+                configured_idx = int(getattr(settings, "VOICE_PYTHON_MIC_DEVICE_INDEX", -1))
+        name_hint_raw = str(self._preferred_mic_name_hint or "").strip().lower()
+        if not name_hint_raw:
+            if self._is_loopback_asr_mode():
+                name_hint_raw = str(getattr(settings, "VOICE_LOOPBACK_DEVICE_NAME_HINT", "") or "").strip().lower()
+            else:
+                name_hint_raw = str(getattr(settings, "VOICE_PYTHON_MIC_DEVICE_NAME_HINT", "") or "").strip().lower()
+        name_hints = [x.strip() for x in re.split(r"[,;|/]+", name_hint_raw) if str(x or "").strip()]
 
         names = self._list_local_microphones(sr)
 
@@ -322,16 +360,23 @@ class VoiceCommandAgent:
             except Exception:
                 raise RuntimeError("No Input Device Available")
 
-        if name_hint:
+        if name_hints:
             for idx, name in enumerate(names):
-                if name_hint in name.lower():
+                if any(h in name.lower() for h in name_hints):
                     return sr.Microphone(device_index=idx), idx
 
-        # 自动优先选择“真实麦克风”设备，避免系统默认路由到异常输入源。
-        preferred_tokens = [
-            "microphone", "mic", "麦克风", "内建", "built-in", "builtin",
-            "array", "default",
-        ]
+        # 自动优先选择匹配当前采集模式的设备。
+        if self._is_loopback_asr_mode():
+            preferred_tokens = [
+                "loopback", "stereo mix", "立体声混音", "what u hear",
+                "blackhole", "vb-audio", "vb cable", "cable output",
+                "monitor of", "wave out", "system audio", "系统声音", "soundflower",
+            ]
+        else:
+            preferred_tokens = [
+                "microphone", "mic", "麦克风", "内建", "built-in", "builtin",
+                "array", "default",
+            ]
         for idx, name in enumerate(names):
             n = str(name or "").lower()
             if any(tok in n for tok in preferred_tokens):
@@ -441,10 +486,166 @@ class VoiceCommandAgent:
         text = str((result or {}).get("text") or "").strip()
         return text
 
+    def _get_dashscope_api_key(self):
+        return str(getattr(settings, "VOICE_DASHSCOPE_API_KEY", "") or "").strip()
+
+    def _resolve_dashscope_language_hints(self, lang=None):
+        configured = list(getattr(settings, "VOICE_DASHSCOPE_LANGUAGE_HINTS", []) or [])
+        if configured:
+            return [str(x or "").strip() for x in configured if str(x or "").strip()]
+        code = str(lang or "").strip().lower()
+        if not code:
+            return []
+        if code.startswith("zh"):
+            return ["zh"]
+        if code.startswith("en"):
+            return ["en"]
+        if code.startswith("yue"):
+            return ["yue"]
+        if code.startswith("ja"):
+            return ["ja"]
+        return []
+
+    def _extract_text_from_dashscope_result(self, result):
+        texts = []
+        if result is None:
+            return ""
+        try:
+            sentence = result.get_sentence() if hasattr(result, "get_sentence") else None
+            if isinstance(sentence, dict):
+                t = str(sentence.get("text") or "").strip()
+                if t:
+                    texts.append(t)
+        except Exception:
+            pass
+
+        data = result
+        if not isinstance(data, dict):
+            try:
+                if hasattr(result, "to_dict"):
+                    data = result.to_dict()
+                elif hasattr(result, "__dict__"):
+                    data = dict(result.__dict__)
+            except Exception:
+                data = result
+
+        text_keys = {"text", "transcript", "sentence_text", "result_text"}
+        container_keys = {"sentence", "sentences", "output", "payload", "result", "results", "data", "message"}
+
+        def _walk(node, depth=0):
+            if depth > 8 or node is None:
+                return
+            if isinstance(node, str):
+                s = node.strip()
+                if s:
+                    texts.append(s)
+                return
+            if isinstance(node, (list, tuple)):
+                for it in node:
+                    _walk(it, depth + 1)
+                return
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    key = str(k or "").strip().lower()
+                    if key in text_keys and isinstance(v, str):
+                        s = v.strip()
+                        if s:
+                            texts.append(s)
+                        continue
+                    if key in container_keys or isinstance(v, (dict, list, tuple)):
+                        _walk(v, depth + 1)
+
+        _walk(data, depth=0)
+        if not texts:
+            return ""
+        # 优先返回较长文本，通常更接近最终句子。
+        texts = [t for t in texts if t and len(t) <= 400]
+        if not texts:
+            return ""
+        return max(texts, key=len)
+
+    def _transcribe_with_dashscope_funasr(self, audio, lang=None):
+        api_key = self._get_dashscope_api_key()
+        if not api_key:
+            raise RuntimeError("dashscope_api_key_missing")
+
+        try:
+            from dashscope.audio.asr import Recognition  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"dashscope_sdk_unavailable:{e}")
+
+        sample_rate = max(8000, int(getattr(settings, "VOICE_DASHSCOPE_SAMPLE_RATE", 16000) or 16000))
+        wav_data = audio.get_wav_data(convert_rate=sample_rate, convert_width=2)
+        if not wav_data:
+            return ""
+        if len(wav_data) < int(sample_rate * 0.20 * 2) + 44:
+            return ""
+
+        model = str(getattr(settings, "VOICE_DASHSCOPE_MODEL", "paraformer-realtime-v2") or "paraformer-realtime-v2").strip()
+        base_ws = str(getattr(settings, "VOICE_DASHSCOPE_BASE_WEBSOCKET_API_URL", "") or "").strip()
+
+        recognition_kwargs = {
+            "model": model,
+            "format": "wav",
+            "sample_rate": sample_rate,
+            "api_key": api_key,
+        }
+        if base_ws:
+            recognition_kwargs["base_websocket_api_url"] = base_ws
+
+        call_kwargs = {}
+        language_hints = self._resolve_dashscope_language_hints(lang=lang)
+        if language_hints:
+            call_kwargs["language_hints"] = language_hints
+        if bool(getattr(settings, "VOICE_DASHSCOPE_ENABLE_PUNCTUATION", True)):
+            call_kwargs["semantic_punctuation_enabled"] = True
+        if bool(getattr(settings, "VOICE_DASHSCOPE_DISABLE_ITN", False)):
+            call_kwargs["inverse_text_normalization_enabled"] = False
+
+        tmp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fp:
+                fp.write(wav_data)
+                tmp_path = fp.name
+            recognition = Recognition(**recognition_kwargs)
+            result = recognition.call(tmp_path, **call_kwargs)
+        finally:
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        status_code = getattr(result, "status_code", None)
+        if status_code is not None:
+            try:
+                code = int(status_code)
+            except Exception:
+                code = status_code
+            if code != int(HTTPStatus.OK):
+                message = str(
+                    getattr(result, "message", "")
+                    or getattr(result, "error_message", "")
+                    or getattr(result, "error", "")
+                    or ""
+                ).strip()
+                raise RuntimeError(f"dashscope_http_{code}:{message or 'request_failed'}")
+
+        return str(self._extract_text_from_dashscope_result(result) or "").strip()
+
     def _recognize_with_provider(self, recognizer, audio, langs):
-        provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").lower()
+        provider_raw = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").lower()
+        provider_aliases = {
+            "dashscope": "dashscope_funasr",
+            "aliyun_funasr": "dashscope_funasr",
+            "funasr": "dashscope_funasr",
+        }
+        provider = provider_aliases.get(provider_raw, provider_raw)
         primary_lang = str((langs or [""])[0] or "").lower()
         allow_google_fallback = bool(getattr(settings, "VOICE_ASR_ALLOW_GOOGLE_FALLBACK", False))
+        allow_dashscope_fallback = bool(getattr(settings, "VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK", False))
+        dashscope_available = bool(self._get_dashscope_api_key())
+        include_dashscope_fallback = bool(allow_dashscope_fallback and dashscope_available)
         # 统一 provider 链路：
         # - auto: 默认本地优先；LOCAL_FIRST_MODE=false 时英文优先 google（更快但依赖网络）
         # - google: 遇到超时等网络错误时回退 whisper/sphinx
@@ -453,24 +654,55 @@ class VoiceCommandAgent:
             local_first = bool(getattr(settings, "LOCAL_FIRST_MODE", False))
             if primary_lang.startswith("zh"):
                 providers = ["whisper_local", "sphinx"]
+                if include_dashscope_fallback:
+                    providers.insert(1, "dashscope_funasr")
                 if allow_google_fallback:
                     providers.insert(1, "google")
             else:
                 providers = ["whisper_local", "sphinx"] if local_first else ["google", "whisper_local", "sphinx"]
+                if include_dashscope_fallback:
+                    providers.insert(1, "dashscope_funasr")
                 if allow_google_fallback and "google" not in providers:
                     providers.append("google")
         elif provider == "google":
             providers = ["google", "whisper_local", "sphinx"] if allow_google_fallback else ["google"]
+            if include_dashscope_fallback and "dashscope_funasr" not in providers:
+                providers.insert(1, "dashscope_funasr")
         elif provider == "whisper_local":
             providers = ["whisper_local", "sphinx"] if allow_google_fallback else ["whisper_local"]
+            if include_dashscope_fallback and "dashscope_funasr" not in providers:
+                providers.insert(1, "dashscope_funasr")
+            if allow_google_fallback and "google" not in providers:
+                providers.insert(1, "google")
+        elif provider == "dashscope_funasr":
+            if allow_google_fallback:
+                providers = ["dashscope_funasr", "google", "whisper_local", "sphinx"]
+            else:
+                providers = ["dashscope_funasr"]
         elif provider == "sphinx":
             providers = ["sphinx"]
         else:
             providers = ["whisper_local", "sphinx"] if primary_lang.startswith("zh") else ["google", "whisper_local", "sphinx"]
+            if include_dashscope_fallback and "dashscope_funasr" not in providers:
+                providers.insert(1, "dashscope_funasr")
+
+        deduped = []
+        seen = set()
+        for item in providers:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        providers = deduped
 
         # Google 通道网络波动时，短时间内跳过，避免每轮都被 timeout 拖慢。
         if time.time() < float(self._google_backoff_until or 0.0):
             providers = [p for p in providers if p != "google"]
+            if not providers:
+                providers = ["whisper_local", "sphinx"]
+        # DashScope 通道网络波动时短暂退避，避免频繁阻塞。
+        if time.time() < float(self._dashscope_backoff_until or 0.0):
+            providers = [p for p in providers if p != "dashscope_funasr"]
             if not providers:
                 providers = ["whisper_local", "sphinx"]
         chain_key = f"{provider}|{','.join(providers)}|{','.join(langs or [])}"
@@ -488,6 +720,22 @@ class VoiceCommandAgent:
                 "connection",
                 "temporarily unavailable",
                 "service unavailable",
+                "remote end closed connection",
+            ]
+            return any(k in lower for k in keywords)
+
+        def _is_dashscope_network_error(msg):
+            lower = str(msg or "").lower()
+            keywords = [
+                "timed out",
+                "time-out",
+                "timeout",
+                "connection",
+                "temporarily unavailable",
+                "service unavailable",
+                "network",
+                "ssl",
+                "connection reset",
                 "remote end closed connection",
             ]
             return any(k in lower for k in keywords)
@@ -579,6 +827,15 @@ class VoiceCommandAgent:
                                 continue
                             recognized.append((text, lang))
                         continue
+                    if p == "dashscope_funasr":
+                        text = self._transcribe_with_dashscope_funasr(audio, lang=lang)
+                        if text:
+                            if not self._is_text_lang_compatible(text, expected_lang=lang, detected_lang=lang):
+                                continue
+                            self._dashscope_error_count = 0
+                            self._dashscope_backoff_until = 0.0
+                            recognized.append((text, lang))
+                        continue
                 except Exception as e:
                     msg = str(e)
                     if "UnknownValueError" in type(e).__name__:
@@ -590,6 +847,13 @@ class VoiceCommandAgent:
                         self._google_backoff_until = time.time() + cooldown
                         provider_errors.append(f"google_network_error:{msg}")
                         last_err = f"google_network_error:{msg}"
+                        break
+                    if p == "dashscope_funasr" and _is_dashscope_network_error(msg):
+                        self._dashscope_error_count = min(self._dashscope_error_count + 1, 12)
+                        cooldown = min(180, 20 * self._dashscope_error_count)
+                        self._dashscope_backoff_until = time.time() + cooldown
+                        provider_errors.append(f"dashscope_network_error:{msg}")
+                        last_err = f"dashscope_network_error:{msg}"
                         break
                     if p == "whisper_local" and (
                         "no module named" in msg.lower() or "recognize_whisper" in msg.lower()
@@ -670,7 +934,8 @@ class VoiceCommandAgent:
                             pass
                     logger.info(
                         "Python ASR recorder params: "
-                        f"provider={provider_now}, dyn_energy={recognizer.dynamic_energy_threshold}, "
+                        f"capture_mode={self._local_capture_mode}, provider={provider_now}, "
+                        f"dyn_energy={recognizer.dynamic_energy_threshold}, "
                         f"energy_threshold={recognizer.energy_threshold}, timeout={timeout_s}, "
                         f"phrase_time_limit={phrase_s}, forced_record={forced_record_seconds}"
                     )
@@ -682,6 +947,7 @@ class VoiceCommandAgent:
                     self._local_mic_state["deviceName"] = (
                         names[selected_idx] if (selected_idx is not None and 0 <= selected_idx < len(names)) else None
                     )
+                    self._local_mic_state["captureMode"] = self._local_capture_mode
                     while not self._local_stop_event.is_set():
                         try:
                             # 连续无文本时，改为固定窗口录音，避免只抓到噪声片段。
@@ -763,9 +1029,16 @@ class VoiceCommandAgent:
             self.last_langs = list(langs or [])
             self.last_start_reason = None
             self.last_start_errors = []
-            self.last_start_diag = {"mode": self.input_mode, "provider": settings.VOICE_PYTHON_ASR_PROVIDER}
+            self.last_start_diag = {
+                "mode": self.input_mode,
+                "provider": settings.VOICE_PYTHON_ASR_PROVIDER,
+                "captureMode": self._local_capture_mode,
+            }
             self.last_start_success_at = time.time()
-            logger.info(f"Python ASR 语音监听已启动: provider={settings.VOICE_PYTHON_ASR_PROVIDER}, langs={langs}")
+            logger.info(
+                "Python ASR 语音监听已启动: "
+                f"capture_mode={self._local_capture_mode}, provider={settings.VOICE_PYTHON_ASR_PROVIDER}, langs={langs}"
+            )
             return True
         self.last_start_reason = self._local_error or "python_asr_start_failed"
         return False
@@ -1158,6 +1431,8 @@ class VoiceCommandAgent:
                 "provider": settings.VOICE_PYTHON_ASR_PROVIDER,
                 "deviceIndex": self._local_mic_state.get("deviceIndex"),
                 "deviceName": self._local_mic_state.get("deviceName"),
+                "captureMode": self._local_capture_mode,
+                "source": ("python_loopback" if self._is_loopback_asr_mode() else "python_mic"),
                 "lastAudioAt": self._local_last_audio_at,
                 "lastAudioRms": self._local_last_audio_rms,
                 "noTextCount": self._local_no_text_count,
@@ -1347,6 +1622,7 @@ class VoiceCommandAgent:
                 "ctx": "python_asr",
                 "mode": self.input_mode,
                 "provider": settings.VOICE_PYTHON_ASR_PROVIDER,
+                "captureMode": self._local_capture_mode,
                 "speechRecognition": bool(sr),
                 "mediaDevices": bool(sr),
                 "secureContext": True,
@@ -1417,6 +1693,7 @@ class VoiceCommandAgent:
                     "error": None,
                     "mode": self.input_mode,
                     "provider": settings.VOICE_PYTHON_ASR_PROVIDER,
+                    "captureMode": self._local_capture_mode,
                     "deviceIndex": selected_idx,
                     "deviceName": device_name,
                 }
@@ -1603,6 +1880,7 @@ class VoiceCommandAgent:
             state = dict(self._local_mic_state)
             state.setdefault("mode", self.input_mode)
             state.setdefault("provider", settings.VOICE_PYTHON_ASR_PROVIDER)
+            state.setdefault("captureMode", self._local_capture_mode)
             if self._local_running:
                 state["status"] = "granted"
                 state["error"] = None

@@ -13,6 +13,7 @@
 - `VOICE_COMMAND_INPUT_MODE=python_asr`
 - `VOICE_PYTHON_ASR_PROVIDER=whisper_local`
 - `VOICE_ASR_ALLOW_GOOGLE_FALLBACK=false`
+- `VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK=false`
 - `EMBEDDING_LOCAL_FILES_ONLY=true`
 - `EMBEDDING_ENABLE_ONLINE_FALLBACK=false`
 
@@ -55,6 +56,7 @@
 - 不依赖 TikTok 网页的麦克风权限
 - 若语音状态异常，先检查系统默认输入设备是否存在
 - 推荐 `ASR Provider=whisper_local`，可减少云端语音请求
+- 若要阿里云兜底：设置 `VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK=true` 并配置 `VOICE_DASHSCOPE_API_KEY`
 
 常见状态解释：
 
@@ -96,9 +98,30 @@
 - 场控调试：模拟弹幕触发完整链路
 - 数据报表：日报/周报生成与历史查看
 - 本地语音压测（一键）：Win/mac 一键执行离线校验、语音生成、播放与日志复盘
+- 全局功能测试：一条命令串行验证主链路能力并输出测试报告
 - 系统自检：一键检查关键链路
 
-## 8. 数据与报告路径
+## 8. 全局功能测试（上线前建议）
+
+```bash
+python scripts/global_feature_test.py --profile full
+```
+
+- `full`：包含浏览器 + Mock + 麦克风能力检查，未通过即视为不可上线。
+- `full`：在 `VOICE_COMMAND_INPUT_MODE=system_loopback_asr/tab_audio_asr` 时，会额外执行回采真实链路压测。
+- `offline`：仅离线能力检查（适合本地快速回归）。
+- 报告目录：`data/reports/global_feature_test/`
+
+## 9. 回采模式真实链路压测（推荐）
+
+```bash
+python scripts/loopback_asr_real_test.py --profile quick --mode system_loopback_asr --json
+```
+
+- 覆盖路径：音频播放 -> loopback 回采 -> ASR -> `_local_push_text()` -> 命令执行链。
+- 报告目录：`data/reports/voice_stress/`
+
+## 10. 数据与报告路径
 
 - 弹幕事件：`data/analytics/danmu_events.jsonl`
 - 日报：`data/reports/daily/`
