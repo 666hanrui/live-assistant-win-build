@@ -34,6 +34,8 @@ class LiveAssistant:
             self.operations.set_reaction_judge(self.knowledge)
         if hasattr(self.operations, "set_action_planner"):
             self.operations.set_action_planner(self.knowledge)
+        if hasattr(self.operations, "set_operation_navigator"):
+            self.operations.set_operation_navigator(self.knowledge)
         self.operation_execution_mode = "dom"
         if hasattr(self.operations, "set_execution_mode"):
             self.operation_execution_mode = self.operations.set_execution_mode(
@@ -217,8 +219,15 @@ class LiveAssistant:
             voice_mic_index = data.get("voice_mic_device_index")
             voice_mic_name_hint = data.get("voice_mic_name_hint")
             voice_asr_provider = str(data.get("voice_asr_provider") or "").strip().lower()
-            if voice_asr_provider in {"dashscope", "aliyun_funasr", "funasr"}:
-                voice_asr_provider = "dashscope_funasr"
+            provider_aliases = {
+                "dashscope": "dashscope_funasr",
+                "aliyun_funasr": "dashscope_funasr",
+                "funasr": "dashscope_funasr",
+                "hybrid": "hybrid_local_cloud",
+                "local_cloud": "hybrid_local_cloud",
+                "cloud_local": "hybrid_local_cloud",
+            }
+            voice_asr_provider = provider_aliases.get(voice_asr_provider, voice_asr_provider)
             operation_execution_mode = str(data.get("operation_execution_mode") or "").strip().lower()
             web_info_source_mode = str(data.get("web_info_source_mode") or "").strip().lower()
             human_like_settings = data.get("human_like_settings") or data.get("human_like") or {}
@@ -240,9 +249,7 @@ class LiveAssistant:
                         name_hint=voice_mic_name_hint,
                         restart_if_running=False,
                     )
-            if voice_asr_provider == "google" and self.reply_language.startswith("zh"):
-                voice_asr_provider = "auto"
-            if voice_asr_provider in {"google", "auto", "sphinx", "whisper_local", "dashscope_funasr"}:
+            if voice_asr_provider in {"google", "auto", "sphinx", "whisper_local", "dashscope_funasr", "hybrid_local_cloud"}:
                 settings.VOICE_PYTHON_ASR_PROVIDER = voice_asr_provider
             if operation_execution_mode:
                 self.set_operation_execution_mode(operation_execution_mode, persist=False)
@@ -302,6 +309,17 @@ class LiveAssistant:
             self.tone_template = tone_template.strip()
         # 暖场与回复统一使用同一语言配置，并持久化到本地。
         self.reply_language = self._get_active_language()
+        if self.voice_command_enabled:
+            # 统一语言切换后立即同步语音识别语言，避免继续使用旧语言参数。
+            try:
+                active_language = self._get_active_language()
+                self.voice.ensure_started(
+                    language=active_language,
+                    fallback_languages=self._get_voice_fallback_languages(active_language),
+                    silence_restart_seconds=settings.VOICE_COMMAND_SILENCE_RESTART_SECONDS,
+                )
+            except Exception:
+                pass
         self._save_runtime_state()
         logger.info(
             f"回复设置已更新并保存: language={self.reply_language}, tone_template={'on' if self.tone_template else 'off'}"
@@ -475,16 +493,24 @@ class LiveAssistant:
 
     def set_voice_asr_provider(self, provider):
         provider = str(provider or "").strip().lower()
-        if provider in {"dashscope", "aliyun_funasr", "funasr"}:
-            provider = "dashscope_funasr"
-        if provider not in {"google", "auto", "sphinx", "whisper_local", "dashscope_funasr"}:
+        provider_aliases = {
+            "dashscope": "dashscope_funasr",
+            "aliyun_funasr": "dashscope_funasr",
+            "funasr": "dashscope_funasr",
+            "hybrid": "hybrid_local_cloud",
+            "local_cloud": "hybrid_local_cloud",
+            "cloud_local": "hybrid_local_cloud",
+        }
+        provider = provider_aliases.get(provider, provider)
+        if provider not in {"google", "auto", "sphinx", "whisper_local", "dashscope_funasr", "hybrid_local_cloud"}:
             return False
         settings.VOICE_PYTHON_ASR_PROVIDER = provider
         if bool(getattr(self.voice, "_local_running", False)):
             try:
                 self.voice.stop()
-                langs = list(getattr(self.voice, "last_langs", []) or [self._get_active_language()])
-                self.voice.start(language=langs[0], fallback_languages=langs[1:])
+                active_language = self._get_active_language()
+                fallback_languages = self._get_voice_fallback_languages(active_language)
+                self.voice.start(language=active_language, fallback_languages=fallback_languages)
             except Exception:
                 pass
         self._save_runtime_state()
@@ -1431,6 +1457,14 @@ class LiveAssistant:
         last_audio_rms = state.get("lastAudioRms") if isinstance(state, dict) else None
         no_text_count = state.get("noTextCount") if isinstance(state, dict) else None
         device_name = state.get("deviceName") if isinstance(state, dict) else None
+        runtime_provider = ""
+        if isinstance(state, dict):
+            runtime_provider = str(
+                state.get("runtimeProvider")
+                or state.get("provider")
+                or ""
+            ).strip()
+        provider_note = f"asr={runtime_provider}" if runtime_provider else "asr=unknown"
         if voice_err and now - self.last_voice_health_log_at >= settings.VOICE_COMMAND_HEALTH_LOG_INTERVAL_SECONDS:
             logger.warning(f"语音识别异常: err={voice_err}, rms={last_audio_rms}, no_text_count={no_text_count}, device={device_name}, state={state}")
             self.last_voice_health_log_at = now
@@ -1453,7 +1487,11 @@ class LiveAssistant:
             self._google_voice_error_streak += 1
             self._google_voice_error_last_at = now
             current_provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").lower()
-            if current_provider == "google" and self._google_voice_error_streak >= 2:
+            if (
+                current_provider == "google"
+                and self._google_voice_error_streak >= 2
+                and bool(getattr(settings, "VOICE_ASR_AUTO_SWITCH_ON_TIMEOUT", False))
+            ):
                 switched = self.set_voice_asr_provider("whisper_local")
                 if switched:
                     logger.warning("检测到 Google ASR 持续超时，已自动切换到 whisper_local。")
@@ -1510,7 +1548,7 @@ class LiveAssistant:
                     text=text,
                     lang=lang,
                     status="ignored",
-                    note="lang_blocked",
+                    note=f"lang_blocked|{provider_note}",
                     command=None,
                 )
                 continue
@@ -1521,7 +1559,7 @@ class LiveAssistant:
                 text=text,
                 lang=lang,
                 status="captured",
-                note=("wake" if has_wake_word else "no_wake"),
+                note=(f"{'wake' if has_wake_word else 'no_wake'}|{provider_note}"),
                 command=command,
             )
             if settings.VOICE_STRICT_WAKE_WORD and not has_wake_word:
@@ -1531,7 +1569,7 @@ class LiveAssistant:
                     text=text,
                     lang=lang,
                     status="ignored",
-                    note="strict_no_wake",
+                    note=f"strict_no_wake|{provider_note}",
                     command=command,
                 )
                 continue
@@ -1542,7 +1580,7 @@ class LiveAssistant:
                     text=text,
                     lang=lang,
                     status="ignored",
-                    note="no_command",
+                    note=f"no_command|{provider_note}",
                     command=command,
                 )
                 continue
@@ -1553,7 +1591,7 @@ class LiveAssistant:
                     text=text,
                     lang=lang,
                     status="ignored",
-                    note="duplicate_text",
+                    note=f"duplicate_text|{provider_note}",
                     command=command,
                 )
                 continue
@@ -1564,7 +1602,7 @@ class LiveAssistant:
                     text=text,
                     lang=lang,
                     status="ignored",
-                    note="duplicate_action",
+                    note=f"duplicate_action|{provider_note}",
                     command=command,
                 )
                 continue
@@ -1594,7 +1632,7 @@ class LiveAssistant:
                     text=text,
                     lang=lang,
                     status="action_done" if ok else "action_failed",
-                    note=note,
+                    note=(f"{note}|{provider_note}"),
                     command=command,
                 )
 

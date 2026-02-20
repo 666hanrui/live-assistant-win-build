@@ -4,6 +4,7 @@ from datetime import datetime, date, timedelta
 import subprocess
 import sys
 import importlib
+import json
 import pandas as pd
 from main import LiveAssistant
 import app_config.settings as settings
@@ -121,6 +122,8 @@ if 'report_generation_result' not in st.session_state:
     st.session_state.report_generation_result = None
 if 'voice_stress_result' not in st.session_state:
     st.session_state.voice_stress_result = None
+if 'full_regression_result' not in st.session_state:
+    st.session_state.full_regression_result = None
 if "show_user_guide" not in st.session_state:
     st.session_state.show_user_guide = False
 
@@ -548,6 +551,11 @@ def _get_status_snapshot(assistant):
         "voice_running": bool(voice_state.get("running")),
         "voice_error": voice_state.get("error") or "none",
         "voice_provider": voice_state.get("provider") or "",
+        "voice_runtime_provider": voice_state.get("runtimeProvider") or "",
+        "voice_runtime_provider_type": voice_state.get("runtimeProviderType") or "",
+        "voice_runtime_chain": voice_state.get("runtimeProviderChain") if isinstance(voice_state.get("runtimeProviderChain"), list) else [],
+        "voice_runtime_error": voice_state.get("runtimeProviderError") or "",
+        "voice_loopback_likely_mic": bool(voice_state.get("loopbackLikelyMic", False)),
         "voice_capture_mode": voice_state.get("captureMode") or "",
         "voice_langs": voice_state.get("langs") if isinstance(voice_state.get("langs"), list) else [],
         "voice_last_text": (voice_state.get("lastText") or "").strip(),
@@ -924,6 +932,61 @@ def _run_local_voice_stress_pipeline(profile="quick", rounds=1, gap_seconds=2):
     return {"ok": all_ok, "steps": results, "run_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 
+def _run_global_feature_regression(profile="full"):
+    py = _script_python()
+    if not py:
+        return {
+            "ok": False,
+            "run_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "step": {
+                "ok": False,
+                "code": 2,
+                "cmd": "python scripts/global_feature_test.py --profile full",
+                "stdout": "",
+                "stderr": "frozen_runtime_no_python: EXE 模式下不支持脚本回归，请在源码环境运行。",
+            },
+            "report_json": "",
+            "report_md": "",
+            "report": {},
+        }
+
+    base = _app_base_dir()
+    cmd = [py, str(base / "scripts" / "global_feature_test.py"), "--profile", str(profile or "full")]
+    timeout = 1200 if str(profile or "full") == "full" else 420
+    step = _run_local_cmd(cmd, timeout=timeout)
+
+    report_json = ""
+    report_md = ""
+    merged = "\n".join([str(step.get("stdout") or ""), str(step.get("stderr") or "")])
+    for line in merged.splitlines():
+        if line.startswith("global_feature_report_json="):
+            report_json = line.split("=", 1)[1].strip()
+        elif line.startswith("global_feature_report_md="):
+            report_md = line.split("=", 1)[1].strip()
+
+    report_payload = {}
+    if report_json:
+        try:
+            p = Path(report_json)
+            if p.exists():
+                report_payload = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            report_payload = {}
+
+    overall_ok = bool(step.get("ok"))
+    if isinstance(report_payload, dict) and report_payload:
+        overall_ok = bool(report_payload.get("overall_ok"))
+
+    return {
+        "ok": overall_ok,
+        "run_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "step": step,
+        "report_json": report_json,
+        "report_md": report_md,
+        "report": report_payload,
+    }
+
+
 def _run_system_self_check(assistant):
     checks = []
 
@@ -1024,18 +1087,19 @@ def _run_system_self_check(assistant):
         or "whisper_local"
     ).lower()
     voice_google_fallback = bool(getattr(settings, "VOICE_ASR_ALLOW_GOOGLE_FALLBACK", False))
-    voice_dashscope_fallback = bool(getattr(settings, "VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK", False))
-    voice_dashscope_ready = (not voice_dashscope_fallback) or bool(str(getattr(settings, "VOICE_DASHSCOPE_API_KEY", "") or "").strip())
-    voice_local_chain_ok = (
+    voice_dashscope_ready = bool(str(getattr(settings, "VOICE_DASHSCOPE_API_KEY", "") or "").strip())
+    voice_chain_ok = (
         _is_local_voice_mode(voice_mode)
-        and voice_provider in {"whisper_local", "sphinx", "auto"}
-        and (not voice_google_fallback)
-        and voice_dashscope_ready
+        and voice_provider in {"whisper_local", "sphinx", "auto", "google", "dashscope_funasr", "hybrid_local_cloud"}
+        and (
+            voice_provider not in {"dashscope_funasr", "hybrid_local_cloud"}
+            or voice_dashscope_ready
+        )
     )
     add(
-        "Voice Local Chain",
-        voice_local_chain_ok,
-        f"mode={voice_mode}, provider={voice_provider}, google_fallback={voice_google_fallback}, dashscope_fallback={voice_dashscope_fallback}, dashscope_ready={voice_dashscope_ready}",
+        "Voice ASR Chain",
+        voice_chain_ok,
+        f"mode={voice_mode}, provider={voice_provider}, google_fallback={voice_google_fallback}, dashscope_ready={voice_dashscope_ready}",
     )
 
     if voice_enabled:
@@ -1044,6 +1108,49 @@ def _run_system_self_check(assistant):
         add("Voice Listener", voice_running and voice_err == "none", f"running={voice_running}, err={voice_err}")
     else:
         add("Voice Listener", True, "已关闭（按配置）")
+
+    # 3.1) 语音输入链路诊断（尤其用于 VM 场景）
+    if _is_local_voice_mode(voice_mode):
+        devices = _list_python_mic_devices(assistant)
+        device_count = len(devices)
+        device_preview = ",".join(f"{d.get('index')}:{d.get('name')}" for d in devices[:6]) if devices else "none"
+        vm_audio_hint = (
+            "若在 VMware/远程桌面：请在虚拟机设置启用声卡并透传麦克风，Windows 隐私里允许桌面应用访问麦克风。"
+            if os.name == "nt"
+            else "若在虚拟机：请确认宿主机麦克风已透传到来宾系统。"
+        )
+        devices_ok = device_count > 0
+        devices_detail = f"count={device_count}, devices={device_preview}"
+        if not devices_ok:
+            devices_detail += f" | hint={vm_audio_hint}"
+        add("Audio Input Devices", devices_ok, devices_detail)
+
+        perm = _request_mic_permission(assistant)
+        perm_status = str((perm or {}).get("status") or "").strip().lower() or "unknown"
+        perm_ok = perm_status == "granted"
+        perm_detail = f"status={perm_status}, err={(perm or {}).get('error') or 'none'}"
+        if not perm_ok:
+            perm_detail += f" | hint={vm_audio_hint}"
+        add("Voice Permission", perm_ok, perm_detail)
+
+        if perm_ok:
+            probe = _probe_python_mic(assistant, duration_seconds=2.0)
+            probe_ok = bool((probe or {}).get("ok"))
+            probe_detail = (
+                f"ok={probe_ok}, rms={(probe or {}).get('rms')}, "
+                f"text={str((probe or {}).get('text') or '')[:48]}, err={(probe or {}).get('error') or 'none'}"
+            )
+            add("Voice Probe", probe_ok, probe_detail)
+
+        if _is_loopback_voice_mode(voice_mode):
+            capture_mode = str(voice_state.get("captureMode") or "").strip().lower()
+            source = str(voice_state.get("source") or "").strip().lower()
+            loopback_ok = capture_mode == "loopback" and source == "python_loopback"
+            add("Loopback Route", loopback_ok, f"mode={voice_mode}, capture={capture_mode or '-'}, source={source or '-'}")
+    else:
+        perm_state = _get_mic_permission_state(assistant)
+        perm_status = str((perm_state or {}).get("status") or "").strip().lower() or "unknown"
+        add("Browser Mic Permission", perm_status in {"granted", "requesting", "idle"}, f"status={perm_status}, err={(perm_state or {}).get('error') or 'none'}")
 
     # 4) 口令解析（中英文）
     parser_ok = hasattr(assistant, "_parse_operation_command_text")
@@ -1330,9 +1437,11 @@ def render_top_live_status_fragment():
     )
     langs = live_snapshot.get("voice_langs") or []
     lang_chain = ",".join(langs) if langs else "-"
+    runtime_chain = ",".join(list(live_snapshot.get("voice_runtime_chain") or [])) or "-"
     st.caption(
-        f"语音模式: {live_voice_mode} | ASR Provider: {live_snapshot.get('voice_provider') or 'n/a'} "
-        f"| 识别语言链: {lang_chain}"
+        f"语音模式: {live_voice_mode} | ASR配置: {live_snapshot.get('voice_provider') or 'n/a'} "
+        f"| ASR运行: {live_snapshot.get('voice_runtime_provider') or '-'}({live_snapshot.get('voice_runtime_provider_type') or 'unknown'}) "
+        f"| 链路: {runtime_chain} | 识别语言链: {lang_chain}"
     )
     st.caption(
         f"动作执行模式: {live_snapshot.get('operation_mode') or 'dom'} "
@@ -1405,6 +1514,8 @@ def render_top_live_status_fragment():
         f"| rms={live_snapshot.get('voice_last_audio_rms') or 0} "
         f"| no_text_count={live_snapshot.get('voice_no_text_count') or 0}"
     )
+    if live_snapshot.get("voice_capture_mode") == "loopback" and live_snapshot.get("voice_loopback_likely_mic"):
+        st.warning("当前 loopback 模式疑似仍在使用实体麦克风，建议切到回采设备（BlackHole/Stereo Mix/VB-CABLE）。")
 
     latest_text = latest.get("text") or live_snapshot.get("voice_last_text") or "-"
     latest_text = _short_text(latest_text, 220)
@@ -1610,10 +1721,8 @@ with st.sidebar:
                 st.success(f"已写入配置：{env_path}")
                 st.rerun()
 
-    with st.expander("🎙️ 阿里云 ASR API（备用）", expanded=False):
-        st.caption("用于语音识别云端备用链路（FunASR）。建议保持本地识别为主，仅在需要时启用备用。")
-        if "voice_dashscope_fallback_ui" not in st.session_state:
-            st.session_state.voice_dashscope_fallback_ui = bool(getattr(settings, "VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK", False))
+    with st.expander("🎙️ 阿里云 ASR API 配置", expanded=False):
+        st.caption("用于云端语音识别（FunASR）。在下方 `ASR Provider` 中可直接选择 `dashscope_funasr` 或 `hybrid_local_cloud`。")
         if "voice_dashscope_api_key_ui" not in st.session_state:
             st.session_state.voice_dashscope_api_key_ui = str(getattr(settings, "VOICE_DASHSCOPE_API_KEY", "") or "")
         if "voice_dashscope_model_ui" not in st.session_state:
@@ -1630,7 +1739,6 @@ with st.sidebar:
             st.session_state.voice_dashscope_disable_itn_ui = bool(getattr(settings, "VOICE_DASHSCOPE_DISABLE_ITN", False))
 
         with st.form("dashscope_asr_config_form", clear_on_submit=False):
-            st.checkbox("启用阿里云备用链路（VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK）", key="voice_dashscope_fallback_ui")
             st.text_input("VOICE_DASHSCOPE_API_KEY", key="voice_dashscope_api_key_ui", type="password", placeholder="sk-...")
             st.text_input("VOICE_DASHSCOPE_MODEL", key="voice_dashscope_model_ui", placeholder="paraformer-realtime-v2")
             st.number_input(
@@ -1651,7 +1759,6 @@ with st.sidebar:
             save_dashscope_cfg = st.form_submit_button("💾 保存阿里云 ASR 配置并重载系统", use_container_width=True)
 
         if save_dashscope_cfg:
-            fallback_enabled = bool(st.session_state.voice_dashscope_fallback_ui)
             api_key = str(st.session_state.voice_dashscope_api_key_ui or "").strip()
             model_name = str(st.session_state.voice_dashscope_model_ui or "").strip()
             sample_rate = int(st.session_state.voice_dashscope_sample_rate_ui or 16000)
@@ -1660,13 +1767,11 @@ with st.sidebar:
             punctuation_enabled = bool(st.session_state.voice_dashscope_punctuation_ui)
             disable_itn = bool(st.session_state.voice_dashscope_disable_itn_ui)
 
-            if fallback_enabled and (not api_key):
-                st.error("你已启用阿里云备用链路，请先填写 VOICE_DASHSCOPE_API_KEY。")
-            elif not model_name:
+            if not model_name:
                 st.error("请填写 VOICE_DASHSCOPE_MODEL。")
             else:
                 updates = {
-                    "VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK": "true" if fallback_enabled else "false",
+                    "VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK": "false",
                     "VOICE_DASHSCOPE_API_KEY": api_key,
                     "DASHSCOPE_API_KEY": api_key,
                     "VOICE_DASHSCOPE_MODEL": model_name,
@@ -1680,7 +1785,7 @@ with st.sidebar:
                 os.environ.update(updates)
                 _reload_runtime_settings()
                 _reset_assistant_for_rerun()
-                st.success(f"阿里云 ASR 配置已写入：{env_path}")
+                st.success(f"阿里云 ASR 配置已写入：{env_path}（请在 ASR Provider 里显式选择云端或混合模式）")
                 st.rerun()
 
     with st.expander("统一语言与回复设置", expanded=True):
@@ -1986,20 +2091,30 @@ with st.sidebar:
                 st.caption("🎛️ 本地音频回采调试（Loopback ASR）")
             else:
                 st.caption("🎛️ 本地麦克风调试（Python ASR）")
-            provider_options = ["whisper_local", "auto", "dashscope_funasr", "google", "sphinx"]
+            provider_options = ["whisper_local", "dashscope_funasr", "hybrid_local_cloud", "auto", "google", "sphinx"]
             if "voice_asr_provider_ui" not in st.session_state:
                 st.session_state.voice_asr_provider_ui = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local")
-            if st.session_state.voice_asr_provider_ui in {"dashscope", "aliyun_funasr", "funasr"}:
-                st.session_state.voice_asr_provider_ui = "dashscope_funasr"
+            provider_aliases = {
+                "dashscope": "dashscope_funasr",
+                "aliyun_funasr": "dashscope_funasr",
+                "funasr": "dashscope_funasr",
+                "hybrid": "hybrid_local_cloud",
+                "local_cloud": "hybrid_local_cloud",
+                "cloud_local": "hybrid_local_cloud",
+            }
+            st.session_state.voice_asr_provider_ui = provider_aliases.get(
+                st.session_state.voice_asr_provider_ui,
+                st.session_state.voice_asr_provider_ui,
+            )
             if st.session_state.voice_asr_provider_ui not in provider_options:
                 st.session_state.voice_asr_provider_ui = "whisper_local"
             st.selectbox(
                 "ASR Provider",
                 options=provider_options,
                 key="voice_asr_provider_ui",
-                help="whisper_local: 本地识别(推荐中文)；auto: 自动切换；dashscope_funasr: 阿里云实时识别；google: 在线识别；sphinx: 离线识别(偏英文)。"
+                help="whisper_local: 本地识别；dashscope_funasr: 阿里云识别；hybrid_local_cloud: 本地+阿里云混合链路；auto: 自动本地链路；google: 在线识别；sphinx: 离线识别(偏英文)。"
             )
-            st.caption("阿里云 Key 可在左侧「🎙️ 阿里云 ASR API（备用）」里一键配置并保存。")
+            st.caption("阿里云 Key 可在左侧「🎙️ 阿里云 ASR API 配置」里配置；云端不会再被自动当作备用链路注入。")
             if st.button("应用 ASR Provider", key="btn_apply_asr_provider", use_container_width=True):
                 if hasattr(st.session_state.assistant, "set_voice_asr_provider") and st.session_state.assistant.set_voice_asr_provider(st.session_state.voice_asr_provider_ui):
                     st.success(f"ASR Provider 已切换为 {st.session_state.voice_asr_provider_ui}")
@@ -2132,8 +2247,11 @@ with st.sidebar:
         if voice_state:
             running = "running" if voice_state.get("running") else "stopped"
             err = voice_state.get("error") or "none"
+            runtime_provider = voice_state.get("runtimeProvider") or voice_state.get("provider") or "-"
+            runtime_type = voice_state.get("runtimeProviderType") or "unknown"
             st.caption(
-                f"Voice State: {running} | err={err} | capture={voice_state.get('captureMode') or '-'}"
+                f"Voice State: {running} | err={err} | capture={voice_state.get('captureMode') or '-'} "
+                f"| asr={runtime_provider}({runtime_type})"
             )
             if voice_state.get("deviceIndex") is not None:
                 st.caption(f"Voice Device(Runtime): {voice_state.get('deviceIndex')} | {voice_state.get('deviceName') or '-'}")
@@ -2627,7 +2745,7 @@ with tab5:
 # Tab 6: 系统自检
 with tab6:
     st.subheader("✅ 系统自检")
-    st.markdown("一键检查关键链路：配置、浏览器、语音监听、口令解析、唤醒词、发送清洗。")
+    st.markdown("一键检查关键链路：配置、浏览器、语音监听、设备权限、口令解析、唤醒词、发送清洗。")
 
     col_t1, col_t2 = st.columns([1, 1])
     with col_t1:
@@ -2647,3 +2765,59 @@ with tab6:
         st.dataframe(report["checks"], use_container_width=True, hide_index=True)
     else:
         st.info("点击上方按钮执行自检。")
+
+    st.divider()
+    st.subheader("🚀 全链路自动回归（替代人工冒烟）")
+    st.caption("调用 scripts/global_feature_test.py，自动覆盖 EXE/Mock/语音/运营/知识库/报表等能力。")
+    col_r1, col_r2, col_r3 = st.columns([1.2, 1, 1])
+    with col_r1:
+        regression_profile = st.selectbox(
+            "回归档位",
+            options=["full", "offline"],
+            index=0,
+            key="global_regression_profile_ui",
+            help="full: 包含浏览器与麦克风端到端；offline: 仅离线验证。",
+        )
+    with col_r2:
+        if st.button("▶️ 运行全链路回归", key="btn_run_global_regression", use_container_width=True):
+            with st.spinner("正在执行全链路回归，请稍候..."):
+                st.session_state.full_regression_result = _run_global_feature_regression(profile=regression_profile)
+            if st.session_state.full_regression_result.get("ok"):
+                st.success("全链路回归通过。")
+            else:
+                st.error("全链路回归未通过，请查看失败项与日志。")
+    with col_r3:
+        if st.button("清空回归结果", key="btn_clear_global_regression", use_container_width=True):
+            st.session_state.full_regression_result = None
+            st.rerun()
+
+    gr = st.session_state.full_regression_result
+    if gr:
+        st.caption(f"最近运行时间: {gr.get('run_at')} | 结果: {'PASS' if gr.get('ok') else 'FAIL'}")
+        payload = gr.get("report") if isinstance(gr.get("report"), dict) else {}
+        if payload:
+            st.metric("回归通过率", f"{payload.get('pass_count', 0)}/{payload.get('total_checks', 0)}")
+            failed = [x for x in (payload.get("checks") or []) if not bool(x.get("ok"))]
+            if failed:
+                fail_df = [
+                    {
+                        "检查项": item.get("name"),
+                        "结果": "FAIL",
+                        "详情": item.get("detail"),
+                    }
+                    for item in failed
+                ]
+                st.dataframe(fail_df, use_container_width=True, hide_index=True)
+            else:
+                st.success("未发现失败项。")
+            if gr.get("report_json"):
+                st.code(str(gr.get("report_json")), language="text")
+        step = gr.get("step") or {}
+        with st.expander(f"[global_feature_test] {'OK' if step.get('ok') else 'FAIL'} | code={step.get('code')}"):
+            st.code(step.get("cmd", ""), language="bash")
+            if gr.get("report_md"):
+                st.caption(f"报告文件: {gr.get('report_md')}")
+            if step.get("stdout"):
+                st.text_area("stdout", value=step.get("stdout"), height=140, key=f"global_reg_stdout_{gr.get('run_at')}")
+            if step.get("stderr"):
+                st.text_area("stderr", value=step.get("stderr"), height=140, key=f"global_reg_stderr_{gr.get('run_at')}")

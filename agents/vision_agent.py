@@ -353,6 +353,11 @@ class VisionAgent:
                 return "shop_dashboard"
             if "直播大屏" in title:
                 return "shop_overview"
+        if "business.tiktokshop.com" in url:
+            if "/creator/live" in url or "/live" in url:
+                return "shop_dashboard"
+            if "live shopping" in title_lower and "tiktok shop" in title_lower:
+                return "shop_dashboard"
 
         if re.search(r"tiktok\.com/@[^/]+/live", url):
             return "tiktok_live_room"
@@ -438,6 +443,36 @@ class VisionAgent:
             return page_type == "shop_dashboard"
         return page_type in ("shop_dashboard", "tiktok_live_dashboard")
 
+    def _action_requires_shop_dashboard(self, action):
+        action = (action or "").strip().lower()
+        return action in {"pin_product", "unpin_product", "start_flash_sale"}
+
+    def _try_open_shop_dashboard(self):
+        page = self.page
+        if not page:
+            return False
+        urls = list(getattr(settings, "ACTION_PAGE_SHOP_DASHBOARD_URLS", []) or [])
+        if not urls:
+            return False
+
+        for raw_url in urls[:4]:
+            url = str(raw_url or "").strip()
+            if not url:
+                continue
+            try:
+                page.get(url, retry=0, timeout=4.0)
+                time.sleep(0.30)
+                title = getattr(page, "title", "") or ""
+                cur_url = getattr(page, "url", "") or ""
+                page_type = self._classify_page(title, cur_url)
+                if page_type == "shop_dashboard":
+                    logger.info(f"已切换到 Shop 控制台执行页: {cur_url}")
+                    return True
+            except Exception as e:
+                logger.debug(f"跳转 Shop 控制台失败: url={url}, err={e}")
+                continue
+        return False
+
     def _find_best_tab_for_action(self, action):
         co = ChromiumOptions().set_local_port(self.port)
         browser = ChromiumPage(co)
@@ -483,6 +518,12 @@ class VisionAgent:
         if self._is_operable_page_for_action(cur.get("page_type"), action):
             return True
 
+        if self._action_requires_shop_dashboard(action) and str(cur.get("page_type") or "") == "tiktok_live_dashboard":
+            if self._try_open_shop_dashboard():
+                cur2 = self.get_page_context()
+                if self._is_operable_page_for_action(cur2.get("page_type"), action):
+                    return True
+
         try:
             best_tab, best_type, best_score = self._find_best_tab_for_action(action)
             if best_tab is None:
@@ -495,6 +536,8 @@ class VisionAgent:
                 f"执行页切换: action={action}, page_type={best_type}, "
                 f"score={best_score}, title={getattr(self.page, 'title', '')}"
             )
+            if self._action_requires_shop_dashboard(action) and best_type == "tiktok_live_dashboard":
+                self._try_open_shop_dashboard()
         except Exception as e:
             logger.warning(f"执行页切换失败: {e}")
             return False
@@ -528,6 +571,8 @@ class VisionAgent:
             "直播",
             "shop.tiktok.com/streamer/live/product/dashboard",
             "shop.tiktok.com/workbench/live/overview",
+            "business.tiktokshop.com/us/creator/live",
+            "live shopping",
             "直播控制台",
             "直播大屏",
         ]
@@ -547,6 +592,8 @@ class VisionAgent:
             return False
         # TikTok Shop 直播控制台视为目标页（便于稳定复用，不反复重连）
         if "shop.tiktok.com/streamer/live/product/dashboard" in url:
+            return True
+        if "business.tiktokshop.com/us/creator/live" in url:
             return True
         if self._is_local_mock_shop_page(title, url):
             return True

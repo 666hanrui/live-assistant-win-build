@@ -1,6 +1,6 @@
 {
-  "unified_language": "zh-CN",
-  "reply_language": "zh-CN",
+  "unified_language": "en-US",
+  "reply_language": "en-US",
   "tone_template": "",
   "reply_enabled": true,
   "proactive_enabled": true,
@@ -17,9 +17,11 @@
     "ocr_physical_click_enabled": true,
     "keyboard_fallback_enabled": false,
     "typing_min_interval_seconds": 0.012,
-    "typing_max_interval_seconds": 0.034
+    "typing_max_interval_seconds": 0.034,
+    "message_keyboard_only_enabled": true,
+    "message_keyboard_input_mode": "type"
   },
-  "voice_mic_device_index": null,
+  "voice_mic_device_index": -1,
   "voice_mic_name_hint": "blackhole,stereo mix,loopback,vb-cable",
   "voice_asr_provider": "whisper_local"
 }

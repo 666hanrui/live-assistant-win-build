@@ -11,6 +11,79 @@ from utils.ocr_engine import LocalOcrEngine
 class PageOCRReader:
     """页面 OCR 读取器：文本 + 图片特征联合识别。"""
 
+    _CHAT_MIN_LINE_SCORE = 0.16
+    _CHAT_RIGHT_PANEL_X_RATIO = 0.52
+    _CHAT_EN_STOPWORDS = {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "can",
+        "did",
+        "do",
+        "does",
+        "for",
+        "go",
+        "how",
+        "i",
+        "if",
+        "in",
+        "is",
+        "it",
+        "join",
+        "me",
+        "my",
+        "now",
+        "of",
+        "on",
+        "or",
+        "please",
+        "scan",
+        "she",
+        "that",
+        "the",
+        "they",
+        "this",
+        "to",
+        "we",
+        "what",
+        "when",
+        "where",
+        "who",
+        "why",
+        "you",
+        "your",
+    }
+    _CHAT_NOISE_KEYWORDS = [
+        "voice",
+        "asr",
+        "ocr",
+        "streamlit",
+        "dashboard",
+        "language=",
+        "web_info_mode",
+        "listen_error",
+        "huggingface",
+        "embedding",
+        "python asr",
+        "python_asr",
+        "网页信息源模式",
+        "运营执行模式",
+        "已加载上次设置",
+        "语音识别异常",
+        "后台监听循环",
+        "runtimeprovider",
+        "welcome to tiktok live",
+        "community guidelines",
+        "while earning commissions",
+        "scan the qr code",
+        "to apply now",
+        "欢迎使用 tiktok 直播",
+    ]
+
     def __init__(self):
         self.ocr_engine = LocalOcrEngine()
         self._last_scan = None
@@ -22,6 +95,170 @@ class PageOCRReader:
     @staticmethod
     def _norm(s: str) -> str:
         return re.sub(r"\s+", "", str(s or "").lower())
+
+    @staticmethod
+    def _line_sort_key(ln: Dict):
+        rect = (ln or {}).get("rect") or {}
+        return (float(rect.get("y1") or 0.0), float(rect.get("x1") or 0.0))
+
+    @staticmethod
+    def _rect_iou(a: Dict, b: Dict) -> float:
+        try:
+            x1 = max(float(a.get("x1", 0)), float(b.get("x1", 0)))
+            y1 = max(float(a.get("y1", 0)), float(b.get("y1", 0)))
+            x2 = min(float(a.get("x2", 0)), float(b.get("x2", 0)))
+            y2 = min(float(a.get("y2", 0)), float(b.get("y2", 0)))
+            iw = max(0.0, x2 - x1)
+            ih = max(0.0, y2 - y1)
+            inter = iw * ih
+            if inter <= 0:
+                return 0.0
+            area_a = max(1.0, (float(a.get("x2", 0)) - float(a.get("x1", 0))) * (float(a.get("y2", 0)) - float(a.get("y1", 0))))
+            area_b = max(1.0, (float(b.get("x2", 0)) - float(b.get("x1", 0))) * (float(b.get("y2", 0)) - float(b.get("y1", 0))))
+            union = max(1.0, area_a + area_b - inter)
+            return inter / union
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _line_confidence(ln: Dict) -> float:
+        try:
+            score = (ln or {}).get("score")
+            if score is None:
+                return 0.55
+            val = float(score)
+            if val > 1.0:
+                val = val / 100.0
+            if val < 0:
+                return 0.0
+            return min(1.0, val)
+        except Exception:
+            return 0.55
+
+    @staticmethod
+    def _line_height(ln: Dict) -> float:
+        rect = (ln or {}).get("rect") or {}
+        try:
+            return max(1.0, float(rect.get("y2", 0)) - float(rect.get("y1", 0)))
+        except Exception:
+            return 1.0
+
+    @staticmethod
+    def _line_center_x(ln: Dict) -> float:
+        rect = (ln or {}).get("rect") or {}
+        try:
+            return (float(rect.get("x1", 0)) + float(rect.get("x2", 0))) / 2.0
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _sanitize_text(text: str) -> str:
+        s = str(text or "").replace("\u200b", " ").replace("\xa0", " ")
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    @staticmethod
+    def _looks_like_timestamp(text: str) -> bool:
+        t = str(text or "").strip()
+        if not t:
+            return False
+        if re.match(r"^\d{1,2}:\d{2}(:\d{2})?(\.\d+)?$", t):
+            return True
+        if re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$", t):
+            return True
+        if re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}", t):
+            return True
+        return False
+
+    def _is_noise_chat_line(self, text: str) -> bool:
+        t = self._sanitize_text(text)
+        if not t:
+            return True
+        lower = t.lower()
+        if self._looks_like_timestamp(t):
+            return True
+        if re.search(r"\b(info|debug|warning|error)\b", lower) and ("|" in t or ":" in t):
+            return True
+        if any(k in lower for k in self._CHAT_NOISE_KEYWORDS):
+            return True
+        if lower.startswith("http://") or lower.startswith("https://"):
+            return True
+        if re.search(r"[\\/].+\.(py|md|json|log|txt)\b", lower):
+            return True
+        if t.count("|") >= 2:
+            return True
+        if re.match(r"^[\[\]():;.,\-_=+*/\\\s]+$", t):
+            return True
+        return False
+
+    def _is_probable_username(self, token: str) -> bool:
+        user = self._sanitize_text(token).strip(":@")
+        if len(user) < 2 or len(user) > 24:
+            return False
+        if not re.match(r"^[A-Za-z0-9_\-\u4e00-\u9fff]+$", user):
+            return False
+        low = user.lower()
+        if low in self._CHAT_EN_STOPWORDS:
+            return False
+        has_digit_or_sep = bool(re.search(r"[0-9_-]", user))
+        has_cjk = bool(re.search(r"[\u4e00-\u9fff]", user))
+        # 纯英文单词很容易是句子首词，避免误拆 “How do I …”。
+        if user.isalpha() and (not has_digit_or_sep) and (not has_cjk) and len(user) >= 4 and low in self._CHAT_EN_STOPWORDS:
+            return False
+        if user.isalpha() and (not has_digit_or_sep) and (not has_cjk) and len(user) >= 6 and low == user:
+            return False
+        return True
+
+    def _lines_to_text(self, lines: List[Dict], fallback: str = "") -> str:
+        parts = []
+        for ln in sorted(list(lines or []), key=self._line_sort_key):
+            txt = self._sanitize_text((ln or {}).get("text") or "")
+            if txt:
+                parts.append(txt)
+        if not parts:
+            return str(fallback or "").strip()
+        return "\n".join(parts).strip()
+
+    def _merge_ocr_lines(self, primary: List[Dict], secondary: List[Dict]) -> List[Dict]:
+        merged = []
+        seen_no_rect = set()
+
+        def _push_line(ln):
+            text = self._sanitize_text((ln or {}).get("text") or "")
+            if not text:
+                return
+            rect = (ln or {}).get("rect") or {}
+            norm_text = self._norm(text)
+            if not isinstance(rect, dict) or not rect:
+                if norm_text in seen_no_rect:
+                    return
+                seen_no_rect.add(norm_text)
+                merged.append({"text": text, "score": (ln or {}).get("score"), "rect": {}})
+                return
+
+            for old in merged:
+                old_rect = (old or {}).get("rect") or {}
+                old_norm = self._norm((old or {}).get("text") or "")
+                if old_norm != norm_text:
+                    continue
+                if self._rect_iou(rect, old_rect) >= 0.6:
+                    old_score = self._line_confidence(old)
+                    new_score = self._line_confidence(ln)
+                    if new_score > old_score:
+                        old["text"] = text
+                        old["score"] = (ln or {}).get("score")
+                        old["rect"] = dict(rect)
+                    return
+
+            merged.append({"text": text, "score": (ln or {}).get("score"), "rect": dict(rect)})
+
+        for ln in list(primary or []):
+            _push_line(ln)
+        for ln in list(secondary or []):
+            _push_line(ln)
+
+        merged.sort(key=self._line_sort_key)
+        return merged[:1200]
 
     @staticmethod
     def _infer_flash_action(norm: str) -> str:
@@ -342,15 +579,20 @@ class PageOCRReader:
             dedup.append(t)
         return dedup
 
-    def _extract_chat_messages(self, lines: List[Dict], max_messages: int = 6, blocks: List[Dict] = None) -> List[Dict]:
+    def _extract_chat_messages(
+        self,
+        lines: List[Dict],
+        max_messages: int = 6,
+        blocks: List[Dict] = None,
+        visual: Dict = None,
+        source: str = "image",
+    ) -> List[Dict]:
         candidates = []
 
-        def _rect_y(ln):
-            rect = (ln or {}).get("rect") or {}
-            return float(rect.get("y1") or 0)
-
         source_lines = list(lines or [])
+        max_messages = max(1, int(max_messages or 6))
         # 若存在区块识别结果，优先从“聊天概率高”的区块抽取，减少无关区域干扰。
+        scoped_by_chat_block = False
         if blocks:
             best = sorted(blocks, key=lambda b: float(b.get("chat_score") or 0.0), reverse=True)
             if best and float(best[0].get("chat_score") or 0.0) >= 0.65:
@@ -363,38 +605,94 @@ class PageOCRReader:
                         scoped.append(ln)
                 if scoped:
                     source_lines = scoped
+                    scoped_by_chat_block = True
 
-        ordered = sorted(source_lines, key=_rect_y)
-        for ln in ordered:
-            text = str((ln or {}).get("text") or "").strip()
+        # 屏幕 OCR 且未定位到聊天区时，优先保留右侧区域文本，减少左侧 UI/日志串扰。
+        vis_w = int((visual or {}).get("w") or 0)
+        if (not scoped_by_chat_block) and vis_w > 0 and str(source or "").startswith("screen"):
+            right_lines = [ln for ln in source_lines if self._line_center_x(ln) >= vis_w * self._CHAT_RIGHT_PANEL_X_RATIO]
+            if len(right_lines) >= max(3, max_messages):
+                source_lines = right_lines
+
+        ordered = sorted(source_lines, key=self._line_sort_key)
+        idx = 0
+        while idx < len(ordered):
+            ln = ordered[idx]
+            text = self._sanitize_text((ln or {}).get("text") or "")
             rect = (ln or {}).get("rect") or {}
-            if not text or len(text) < 3:
+            line_conf = self._line_confidence(ln)
+            if line_conf < self._CHAT_MIN_LINE_SCORE:
+                idx += 1
                 continue
-            if len(text) > 170:
+            if not text or len(text) < 2 or len(text) > 170:
+                idx += 1
                 continue
-            norm = text.lower()
-            if any(x in norm for x in ["观众", "gmv", "流量来源", "product", "库存", "成交件数"]):
+            if self._is_noise_chat_line(text):
+                idx += 1
                 continue
 
             user = "观众"
             content = text
-            score = 0.45
+            score = 0.48
+            consumed_next_line = False
 
             # 形如 "user: message" / "user：message"
             m = re.match(r"^([A-Za-z0-9_\-\u4e00-\u9fff]{2,24})\s*[:：]\s*(.+)$", text)
-            if m:
-                user = m.group(1).strip()
-                content = m.group(2).strip()
+            if m and self._is_probable_username(m.group(1)):
+                user = self._sanitize_text(m.group(1))
+                content = self._sanitize_text(m.group(2))
                 score = 0.88
             else:
                 # 形如 "user message"
                 m2 = re.match(r"^([A-Za-z0-9_\-\u4e00-\u9fff]{2,24})\s+(.+)$", text)
-                if m2 and len(m2.group(2).strip()) >= 2:
-                    user = m2.group(1).strip()
-                    content = m2.group(2).strip()
-                    score = 0.62
+                if m2 and self._is_probable_username(m2.group(1)) and len(self._sanitize_text(m2.group(2))) >= 2:
+                    user = self._sanitize_text(m2.group(1))
+                    content = self._sanitize_text(m2.group(2))
+                    score = 0.70
+                elif self._is_probable_username(text) and idx + 1 < len(ordered):
+                    # 兼容 “用户名一行 + 内容下一行” 的弹幕布局。
+                    nxt = ordered[idx + 1]
+                    nxt_text = self._sanitize_text((nxt or {}).get("text") or "")
+                    if nxt_text and (not self._is_noise_chat_line(nxt_text)):
+                        y_gap = self._line_sort_key(nxt)[0] - self._line_sort_key(ln)[0]
+                        gap_limit = max(12.0, 2.2 * max(self._line_height(ln), self._line_height(nxt)))
+                        if 0 <= y_gap <= gap_limit:
+                            user = self._sanitize_text(text)
+                            content = nxt_text
+                            # 使用较低者作为保守置信度。
+                            score = 0.74
+                            line_conf = min(line_conf, self._line_confidence(nxt))
+                            consumed_next_line = True
 
-            if len(content) < 2:
+            content = self._sanitize_text(content)
+            # 英文弹幕常被 OCR 切成两行（如 "How" + "do I go Live?"），在此做轻量拼接。
+            if user == "观众" and idx + 1 < len(ordered):
+                words = [w for w in re.split(r"\s+", content) if w]
+                first = words[0].lower() if words else ""
+                if len(words) <= 1 and len(content) <= 10 and (first in self._CHAT_EN_STOPWORDS or len(content) <= 3):
+                    nxt = ordered[idx + 1]
+                    nxt_text = self._sanitize_text((nxt or {}).get("text") or "")
+                    if nxt_text and (not self._is_noise_chat_line(nxt_text)):
+                        y_gap = self._line_sort_key(nxt)[0] - self._line_sort_key(ln)[0]
+                        gap_limit = max(10.0, 2.0 * max(self._line_height(ln), self._line_height(nxt)))
+                        if 0 <= y_gap <= gap_limit:
+                            content = self._sanitize_text(f"{content} {nxt_text}")
+                            line_conf = min(line_conf, self._line_confidence(nxt))
+                            consumed_next_line = True
+
+            if len(content) < 2 or self._is_noise_chat_line(content):
+                idx += 1
+                continue
+            if re.match(r"^[\d\s:./-]+$", content):
+                idx += 1
+                continue
+            if len(content) >= 80 and content.count(" ") <= 1:
+                idx += 1
+                continue
+
+            score = score + (line_conf - 0.55) * 0.28
+            if score < 0.42:
+                idx += 1
                 continue
 
             candidates.append(
@@ -406,6 +704,20 @@ class PageOCRReader:
                     "rect": rect,
                 }
             )
+            if consumed_next_line:
+                idx += 1
+            idx += 1
+
+        # 去重：同一轮中避免重复 OCR 行污染
+        dedup = []
+        seen = set()
+        for item in candidates:
+            key = f"{self._norm(item.get('user') or '')}|{self._norm(item.get('text') or '')}"
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            dedup.append(item)
+        candidates = dedup
 
         # 默认取底部最新若干条
         if len(candidates) > max_messages:
@@ -448,17 +760,49 @@ class PageOCRReader:
 
         start = time.time()
         try:
+            visual = self._analyze_visual_features(img_bgr)
             ocr = self.ocr_engine.recognize(img_bgr, preprocess=True)
             lines = list(ocr.get("lines") or [])
-            text = str(ocr.get("text") or "").strip()
+            text = self._lines_to_text(lines, fallback=str(ocr.get("text") or "").strip())
             text_norm = self._norm(text)
-            visual = self._analyze_visual_features(img_bgr)
             page_type = self._classify_page(text_norm, visual)
             blocks = self._detect_blocks(img_bgr, lines)
             blocks = self._assign_block_roles(blocks, visual)
             action_candidates = self._extract_action_candidates(lines)
             action_candidates.extend(self._extract_action_candidates_from_blocks(blocks))
-            chat_messages = self._extract_chat_messages(lines, max_messages=max_chat_messages, blocks=blocks)
+            chat_messages = self._extract_chat_messages(
+                lines,
+                max_messages=max_chat_messages,
+                blocks=blocks,
+                visual=visual,
+                source=source,
+            )
+            used_secondary_pass = False
+            # 屏幕 OCR 下若弹幕召回偏弱，补一轮原图识别并融合，提升英文细字体的识别率。
+            if str(source or "").startswith("screen") and len(chat_messages) < max(2, int(max_chat_messages // 2)):
+                ocr_raw = self.ocr_engine.recognize(img_bgr, preprocess=False)
+                raw_lines = list((ocr_raw or {}).get("lines") or [])
+                if raw_lines:
+                    merged_lines = self._merge_ocr_lines(lines, raw_lines)
+                    merged_blocks = self._detect_blocks(img_bgr, merged_lines)
+                    merged_blocks = self._assign_block_roles(merged_blocks, visual)
+                    merged_chat = self._extract_chat_messages(
+                        merged_lines,
+                        max_messages=max_chat_messages,
+                        blocks=merged_blocks,
+                        visual=visual,
+                        source=source,
+                    )
+                    if len(merged_chat) >= len(chat_messages):
+                        used_secondary_pass = True
+                        lines = merged_lines
+                        blocks = merged_blocks
+                        chat_messages = merged_chat
+                        text = self._lines_to_text(merged_lines, fallback=text)
+                        text_norm = self._norm(text)
+                        page_type = self._classify_page(text_norm, visual)
+                        action_candidates = self._extract_action_candidates(lines)
+                        action_candidates.extend(self._extract_action_candidates_from_blocks(blocks))
             live_state = self._extract_live_state(text_norm, lines)
             scene_tags = self._derive_scene_tags(text_norm, visual, blocks)
 
@@ -481,6 +825,7 @@ class PageOCRReader:
                 "visual": visual,
                 "scene_tags": scene_tags,
                 "source": source,
+                "ocr_secondary_pass": bool(used_secondary_pass),
                 "cached": False,
             }
             cap = dict(capture_meta or {})

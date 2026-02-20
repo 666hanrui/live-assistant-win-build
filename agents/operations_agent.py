@@ -12,6 +12,7 @@ from utils.mouse_utils import (
     human_pause,
     human_paste,
     human_press,
+    human_scroll,
     human_select_all_and_delete,
     human_typewrite,
 )
@@ -90,6 +91,31 @@ class OperationsAgent:
             or "data/reports/operation_plan_replay.jsonl"
         )
         self._last_action_plan_trace = {}
+        self._operation_navigator_agent = None
+        self._nav_llm_enabled = bool(getattr(settings, "OPS_LLM_NAVIGATION_ENABLED", True))
+        self._nav_unknown_page_enabled = bool(getattr(settings, "OPS_LLM_NAVIGATION_UNKNOWN_PAGE_ENABLED", True))
+        self._nav_min_confidence = max(0.0, min(1.0, float(getattr(settings, "OPS_LLM_NAVIGATION_MIN_CONFIDENCE", 0.58) or 0.58)))
+        self._nav_max_scroll_rounds = max(0, int(getattr(settings, "OPS_LLM_NAVIGATION_MAX_SCROLL_ROUNDS", 6) or 6))
+        self._nav_max_llm_calls = max(1, int(getattr(settings, "OPS_LLM_NAVIGATION_MAX_LLM_CALLS", 3) or 3))
+        self._nav_min_interval = max(0.2, float(getattr(settings, "OPS_LLM_NAVIGATION_MIN_INTERVAL_SECONDS", 0.9) or 0.9))
+        self._nav_scroll_cooldown = max(0.05, float(getattr(settings, "OPS_LLM_NAVIGATION_SCROLL_COOLDOWN_SECONDS", 0.32) or 0.32))
+        self._nav_scroll_pixels = max(180, int(getattr(settings, "OPS_LLM_NAVIGATION_SCROLL_PIXELS", 520) or 520))
+        self._nav_last_llm_at = 0.0
+        self._last_nav_trace = {}
+        self._run_js_timeout_seconds = max(
+            0.2,
+            float(getattr(settings, "OPS_RUN_JS_TIMEOUT_SECONDS", 1.2) or 1.2),
+        )
+        self._run_js_fallback_timeout_seconds = max(
+            0.1,
+            float(getattr(settings, "OPS_RUN_JS_FALLBACK_TIMEOUT_SECONDS", 0.45) or 0.45),
+        )
+        self._run_js_max_contexts = max(
+            1,
+            int(getattr(settings, "OPS_RUN_JS_MAX_CONTEXTS", 3) or 3),
+        )
+        self._run_js_include_frames = bool(getattr(settings, "OPS_RUN_JS_INCLUDE_FRAMES", False))
+        self._last_js_context_name = "page"
 
     def _normalize_execution_mode(self, mode):
         mode = str(mode or "").strip().lower()
@@ -117,6 +143,10 @@ class OperationsAgent:
     def set_action_planner(self, planner_agent=None):
         self._action_planner_agent = planner_agent
         return bool(planner_agent)
+
+    def set_operation_navigator(self, navigator_agent=None):
+        self._operation_navigator_agent = navigator_agent
+        return bool(navigator_agent)
 
     def _is_ocr_vision_mode(self):
         return self.get_execution_mode() == "ocr_vision"
@@ -1243,7 +1273,7 @@ class OperationsAgent:
         )
         return fail_payload
 
-    def _pick_ocr_target_line(self, action, lines, link_index=None, ocr=None, preferred_text=""):
+    def _pick_ocr_target_line(self, action, lines, link_index=None, ocr=None, preferred_text="", preferred_role=""):
         if not lines:
             return None, None
 
@@ -1265,6 +1295,9 @@ class OperationsAgent:
         metrics_blocks = []
         strict_action_blocks = []
         actionish_blocks = []
+        product_blocks = []
+        action_blocks = []
+        main_blocks = []
         for b in blocks:
             if not isinstance(b, dict):
                 continue
@@ -1281,6 +1314,12 @@ class OperationsAgent:
                 strict_action_blocks.append(rect)
             if role in {"action_panel", "product_panel", "main_content"}:
                 actionish_blocks.append(rect)
+            if role == "product_panel":
+                product_blocks.append(rect)
+            if role == "action_panel":
+                action_blocks.append(rect)
+            if role == "main_content":
+                main_blocks.append(rect)
 
         norm_lines = []
         for ln in lines:
@@ -1297,6 +1336,9 @@ class OperationsAgent:
             in_metrics = any(_rect_intersection_area(rect, mb) > 0 for mb in metrics_blocks)
             in_strict_action = any(_rect_intersection_area(rect, ab) > 0 for ab in strict_action_blocks)
             in_actionish = any(_rect_intersection_area(rect, ab) > 0 for ab in actionish_blocks)
+            in_product_panel = any(_rect_intersection_area(rect, ab) > 0 for ab in product_blocks)
+            in_action_panel = any(_rect_intersection_area(rect, ab) > 0 for ab in action_blocks)
+            in_main_content = any(_rect_intersection_area(rect, ab) > 0 for ab in main_blocks)
             norm_lines.append({
                 "text": txt,
                 "norm": self._norm_ocr_text(txt),
@@ -1307,6 +1349,9 @@ class OperationsAgent:
                 "in_metrics": bool(in_metrics),
                 "in_strict_action": bool(in_strict_action),
                 "in_actionish": bool(in_actionish),
+                "in_product_panel": bool(in_product_panel),
+                "in_action_panel": bool(in_action_panel),
+                "in_main_content": bool(in_main_content),
             })
         if not norm_lines:
             return None, None
@@ -1315,6 +1360,14 @@ class OperationsAgent:
             return any(k in s for k in keys)
 
         preferred_norm = self._norm_ocr_text(preferred_text)
+        preferred_role = str(preferred_role or "").strip().lower()
+        role_flag_map = {
+            "product_panel": "in_product_panel",
+            "action_panel": "in_action_panel",
+            "main_content": "in_main_content",
+        }
+        role_flag = role_flag_map.get(preferred_role, "")
+        role_gate = bool(role_flag and any(bool(x.get(role_flag)) for x in norm_lines))
 
         if action in {"start_flash_sale", "stop_flash_sale"}:
             pri = []
@@ -1331,6 +1384,8 @@ class OperationsAgent:
                 if ln.get("in_chat"):
                     continue
                 if ln.get("in_metrics"):
+                    continue
+                if role_gate and (not ln.get(role_flag)):
                     continue
                 s = ln["norm"]
                 raw_text = ln["text"]
@@ -1387,12 +1442,17 @@ class OperationsAgent:
                 else ["置顶", "pin", "top"]
             )
             row_anchor = None
+            anchor_pool = norm_lines
+            if role_gate:
+                gated = [ln for ln in norm_lines if ln.get(role_flag)]
+                if gated:
+                    anchor_pool = gated
             if link_index:
                 idx = int(link_index)
                 anchor_keys = [
                     f"序号{idx}", f"{idx}号链接", f"第{idx}", f"link{idx}", f"item{idx}", f"product{idx}",
                 ]
-                for ln in norm_lines:
+                for ln in anchor_pool:
                     if _has_any(ln["norm"], [self._norm_ocr_text(k) for k in anchor_keys]):
                         row_anchor = ln
                         break
@@ -1401,7 +1461,7 @@ class OperationsAgent:
                         rf"(序号|第|link|item|product|#)?\s*{idx}(?:号|no|number)?",
                         re.IGNORECASE,
                     )
-                    for ln in norm_lines:
+                    for ln in anchor_pool:
                         if row_pat.search(ln["text"]):
                             row_anchor = ln
                             break
@@ -1411,6 +1471,8 @@ class OperationsAgent:
                 if ln.get("in_chat"):
                     continue
                 if ln.get("in_metrics"):
+                    continue
+                if role_gate and (not ln.get(role_flag)):
                     continue
                 s = ln["norm"]
                 if not _has_any(s, [self._norm_ocr_text(k) for k in target_words]):
@@ -1433,64 +1495,466 @@ class OperationsAgent:
 
         return None, None
 
-    def _perform_action_by_ocr_anchor(self, action, link_index=None, preferred_text=""):
-        ocr = self._ocr_extract_page_text(use_cache=False)
-        lines = list(ocr.get("lines") or [])
-        if not lines:
-            return {"ok": False, "reason": "ocr_no_lines", "ocr": ocr}
+    def _pick_ocr_target_from_action_candidates(self, action, ocr, anchor=None, preferred_text="", preferred_role=""):
+        cands = []
         preferred_norm = self._norm_ocr_text(preferred_text)
+        preferred_role = str(preferred_role or "").strip().lower()
+        img_w = float((ocr or {}).get("image_w") or 0.0)
+        img_h = float((ocr or {}).get("image_h") or 0.0)
+        role_gate = False
+        if preferred_role:
+            role_gate = any(
+                str((c or {}).get("role") or "").strip().lower() == preferred_role
+                for c in list((ocr or {}).get("action_candidates") or [])
+            )
+
+        for c in list((ocr or {}).get("action_candidates") or []):
+            if str((c or {}).get("action") or "").strip() != str(action):
+                continue
+            if self._is_streamlit_panel_noise_text((c or {}).get("text") or ""):
+                continue
+            c_role = str((c or {}).get("role") or "").strip().lower()
+            if role_gate and c_role != preferred_role:
+                continue
+            c_text_norm = self._norm_ocr_text((c or {}).get("text") or "")
+            if action in {"start_flash_sale", "stop_flash_sale"}:
+                # flash 操作禁止用粗粒度 block 候选，避免命中整行/整块导致点击偏右下。
+                if str((c or {}).get("source") or "") == "block":
+                    continue
+                match = self._match_flash_action_text(c_text_norm, action)
+                if not match.get("ok"):
+                    continue
+            rect = (c or {}).get("rect")
+            center = self._extract_rect_center(rect)
+            if not center:
+                continue
+            if action in {"start_flash_sale", "stop_flash_sale"}:
+                if img_w > 0 and center[0] >= img_w * 0.72:
+                    continue
+                if img_h > 0 and center[1] >= img_h * 0.88:
+                    continue
+                if c_role in {"chat_panel", "metrics_panel"}:
+                    continue
+                if self._is_noisy_non_button_text((c or {}).get("text") or ""):
+                    continue
+            score = float((c or {}).get("score") or 0.4)
+            if preferred_norm and preferred_norm in c_text_norm:
+                score += 3.0
+            if isinstance(anchor, dict):
+                dy = abs(center[1] - float(anchor.get("cy") or center[1]))
+                dx = center[0] - float(anchor.get("cx") or center[0])
+                score += max(0.0, 120.0 - dy) / 80.0
+                if dx > 0:
+                    score += 0.9
+            cands.append((score, c))
+        if cands:
+            cands.sort(key=lambda x: x[0], reverse=True)
+            return cands[0][1]
+        return None
+
+    def _pick_ocr_target_with_fallback(self, action, ocr, link_index=None, preferred_text="", preferred_role=""):
+        lines = list((ocr or {}).get("lines") or [])
         line, anchor = self._pick_ocr_target_line(
             action,
             lines,
             link_index=link_index,
             ocr=ocr,
             preferred_text=preferred_text,
+            preferred_role=preferred_role,
         )
-        if not line:
-            cands = []
-            img_w = float(ocr.get("image_w") or 0.0)
-            img_h = float(ocr.get("image_h") or 0.0)
-            for c in list(ocr.get("action_candidates") or []):
-                if str((c or {}).get("action") or "").strip() != str(action):
+        if line:
+            return line, anchor
+        line = self._pick_ocr_target_from_action_candidates(
+            action,
+            ocr=ocr,
+            anchor=anchor,
+            preferred_text=preferred_text,
+            preferred_role=preferred_role,
+        )
+        return line, anchor
+
+    def _build_ocr_scan_signature(self, ocr):
+        text_norm = self._norm_ocr_text((ocr or {}).get("text") or "")[:220]
+        line_norms = []
+        for ln in list((ocr or {}).get("lines") or [])[:14]:
+            if not isinstance(ln, dict):
+                continue
+            n = self._norm_ocr_text((ln or {}).get("text") or "")
+            if n:
+                line_norms.append(n[:42])
+        blob = "|".join([text_norm] + line_norms)
+        return blob[:1200]
+
+    def _build_nav_ocr_digest(self, ocr):
+        blocks = []
+        for b in list((ocr or {}).get("blocks") or [])[:8]:
+            if not isinstance(b, dict):
+                continue
+            blocks.append(
+                {
+                    "role": str((b or {}).get("role") or ""),
+                    "text": str((b or {}).get("text") or "")[:100],
+                }
+            )
+        return {
+            "page_type": str((ocr or {}).get("page_type") or ""),
+            "scene_tags": list((ocr or {}).get("scene_tags") or [])[:10],
+            "line_preview": [
+                str((ln or {}).get("text") or "")[:80]
+                for ln in list((ocr or {}).get("lines") or [])[:14]
+                if isinstance(ln, dict)
+            ],
+            "blocks": blocks,
+            "text_preview": str((ocr or {}).get("text") or "")[:420],
+        }
+
+    def _llm_build_navigation_hint(self, action, link_index=None, preferred_text="", ocr=None, history=None):
+        llm = self._navigator_llm()
+        if llm is None:
+            return {}
+        if not self._allow_nav_llm_now():
+            return {}
+        payload = {
+            "action": str(action or ""),
+            "link_index": int(link_index or 0),
+            "preferred_text": str(preferred_text or "")[:120],
+            "ocr": self._build_nav_ocr_digest(ocr or {}),
+            "history": list(history or [])[-5:],
+            "allowed_region_roles": ["product_panel", "action_panel", "main_content", "unknown"],
+            "allowed_scroll_direction": ["down", "up", "none"],
+        }
+        prompt = (
+            "你是直播运营页面导航器。"
+            "目标：在 OCR 文本里定位动作目标区域，并给出下一步滚动策略。"
+            "请只输出 JSON，不要输出额外文本。"
+            "JSON格式:"
+            "{\"region_role\":\"product_panel|action_panel|main_content|unknown\","
+            "\"keyword_hints\":[\"...\"],"
+            "\"should_scroll\":true|false,"
+            "\"scroll_direction\":\"down|up|none\","
+            "\"confidence\":0~1,"
+            "\"reason\":\"...\"}\n\n"
+            f"{json.dumps(payload, ensure_ascii=False)}"
+        )
+        try:
+            response = llm.invoke(prompt)
+            raw = str(getattr(response, "content", response) or "").strip()
+            data = self._extract_json_payload(raw)
+            if not isinstance(data, dict):
+                return {}
+            role = str(data.get("region_role") or "unknown").strip().lower()
+            if role not in {"product_panel", "action_panel", "main_content", "unknown"}:
+                role = "unknown"
+            direction = str(data.get("scroll_direction") or "down").strip().lower()
+            if direction not in {"down", "up", "none"}:
+                direction = "down"
+            hints = []
+            for item in list(data.get("keyword_hints") or [])[:6]:
+                s = str(item or "").strip()
+                if s:
+                    hints.append(s[:24])
+            return {
+                "region_role": role,
+                "keyword_hints": hints,
+                "should_scroll": bool(data.get("should_scroll", True)),
+                "scroll_direction": direction,
+                "confidence": float(data.get("confidence") or 0.0),
+                "reason": str(data.get("reason") or "")[:160],
+            }
+        except Exception as e:
+            logger.warning(f"LLM导航提示失败: {e}")
+            return {}
+
+    def _resolve_nav_region_rect(self, ocr, nav_hint):
+        hint = dict(nav_hint or {})
+        role = str(hint.get("region_role") or "").strip().lower()
+        if role not in {"product_panel", "action_panel", "main_content"}:
+            return None
+        blocks = []
+        for b in list((ocr or {}).get("blocks") or []):
+            if not isinstance(b, dict):
+                continue
+            if str((b or {}).get("role") or "").strip().lower() != role:
+                continue
+            rect = (b or {}).get("rect")
+            if not isinstance(rect, dict):
+                continue
+            try:
+                area = max(0.0, float(rect.get("x2") or 0) - float(rect.get("x1") or 0)) * max(
+                    0.0,
+                    float(rect.get("y2") or 0) - float(rect.get("y1") or 0),
+                )
+            except Exception:
+                area = 0.0
+            blocks.append((area, rect))
+        if not blocks:
+            return None
+        blocks.sort(key=lambda x: x[0], reverse=True)
+        return dict(blocks[0][1] or {})
+
+    def _scroll_operation_surface(self, direction="down", ocr=None, region_rect=None):
+        direction = str(direction or "down").strip().lower()
+        if direction not in {"down", "up"}:
+            return {"ok": False, "reason": "invalid_direction", "direction": direction}
+
+        delta = int(abs(self._nav_scroll_pixels))
+        if direction == "up":
+            delta = -delta
+
+        vx = vy = -1
+        if isinstance(region_rect, dict):
+            center = self._extract_rect_center(region_rect)
+            if center and (not self._is_screen_ocr_info_mode()):
+                vp = self._map_ocr_point_to_viewport(center[0], center[1], ocr or {})
+                if vp:
+                    vx, vy = int(vp[0]), int(vp[1])
+
+        script = """
+        const delta = Number(arguments[0] || 0);
+        const ax = Number(arguments[1] || -1);
+        const ay = Number(arguments[2] || -1);
+        const isVisible = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          const s = window.getComputedStyle(el);
+          return r.width > 24 && r.height > 24 && s.display !== 'none' && s.visibility !== 'hidden';
+        };
+        const isScrollable = (el) => {
+          if (!el || !isVisible(el)) return false;
+          const st = window.getComputedStyle(el);
+          const oy = String(st.overflowY || '').toLowerCase();
+          const canScroll = (el.scrollHeight - el.clientHeight) > 24;
+          return canScroll && (oy.includes('auto') || oy.includes('scroll') || oy.includes('overlay'));
+        };
+        const nearestScrollable = (node) => {
+          let cur = node || null;
+          while (cur && cur !== document.body) {
+            if (isScrollable(cur)) return cur;
+            cur = cur.parentElement;
+          }
+          return null;
+        };
+
+        let anchor = null;
+        if (ax >= 0 && ay >= 0) {
+          try { anchor = document.elementFromPoint(ax, ay); } catch (e) {}
+        }
+        let scroller = nearestScrollable(anchor);
+        if (!scroller) {
+          const cands = Array.from(document.querySelectorAll('div,section,main,aside,ul,ol,table,tbody,[role="list"],[data-e2e*="product"],[class*="list"],[class*="panel"]'))
+            .filter(el => isScrollable(el));
+          let best = null;
+          let bestScore = -1e9;
+          for (const el of cands) {
+            const r = el.getBoundingClientRect();
+            const area = Math.max(1, r.width * r.height);
+            const centerY = (r.top + r.bottom) / 2;
+            const centerX = (r.left + r.right) / 2;
+            let score = Math.log(area);
+            score += Math.max(0, 1.2 - Math.abs(centerY - window.innerHeight * 0.56) / 420);
+            score += Math.max(0, 0.8 - Math.abs(centerX - window.innerWidth * 0.45) / 560);
+            if (score > bestScore) {
+              bestScore = score;
+              best = el;
+            }
+          }
+          scroller = best;
+        }
+        if (scroller) {
+          const before = Number(scroller.scrollTop || 0);
+          try { scroller.scrollBy({ top: delta, behavior: 'instant' }); } catch (e) { scroller.scrollTop = before + delta; }
+          const after = Number(scroller.scrollTop || 0);
+          const moved = after - before;
+          return {ok: Math.abs(moved) >= 1, source: 'container', moved: moved, tag: String(scroller.tagName || '')};
+        }
+        const beforeWin = Number(window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0);
+        try { window.scrollBy({ top: delta, behavior: 'instant' }); } catch (e) { window.scrollBy(0, delta); }
+        const afterWin = Number(window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0);
+        const movedWin = afterWin - beforeWin;
+        return {ok: Math.abs(movedWin) >= 1, source: 'window', moved: movedWin};
+        """
+
+        dom_fail = None
+        if not self._is_screen_ocr_info_mode():
+            for ctx_name, ctx in self._iter_contexts():
+                try:
+                    result = ctx.run_js(script, int(delta), int(vx), int(vy))
+                except Exception:
                     continue
-                if self._is_streamlit_panel_noise_text((c or {}).get("text") or ""):
-                    continue
-                c_text_norm = self._norm_ocr_text((c or {}).get("text") or "")
-                if action in {"start_flash_sale", "stop_flash_sale"}:
-                    # flash 操作禁止用粗粒度 block 候选，避免命中整行/整块导致点击偏右下。
-                    if str((c or {}).get("source") or "") == "block":
-                        continue
-                    match = self._match_flash_action_text(c_text_norm, action)
-                    if not match.get("ok"):
-                        continue
-                rect = (c or {}).get("rect")
-                center = self._extract_rect_center(rect)
-                if not center:
-                    continue
-                if action in {"start_flash_sale", "stop_flash_sale"}:
-                    if img_w > 0 and center[0] >= img_w * 0.72:
-                        continue
-                    if img_h > 0 and center[1] >= img_h * 0.88:
-                        continue
-                    if str((c or {}).get("role") or "") == "chat_panel":
-                        continue
-                    if str((c or {}).get("role") or "") == "metrics_panel":
-                        continue
-                    if self._is_noisy_non_button_text((c or {}).get("text") or ""):
-                        continue
-                score = float((c or {}).get("score") or 0.4)
-                if preferred_norm and preferred_norm in c_text_norm:
-                    score += 3.0
-                if isinstance(anchor, dict):
-                    dy = abs(center[1] - float(anchor.get("cy") or center[1]))
-                    dx = center[0] - float(anchor.get("cx") or center[0])
-                    score += max(0.0, 120.0 - dy) / 80.0
-                    if dx > 0:
-                        score += 0.9
-                cands.append((score, c))
-            if cands:
-                cands.sort(key=lambda x: x[0], reverse=True)
-                line = cands[0][1]
+                if isinstance(result, dict):
+                    payload = dict(result)
+                    payload["ctx"] = ctx_name
+                    payload["driver"] = "dom_scroll"
+                    payload["direction"] = direction
+                    payload["delta"] = int(delta)
+                    if bool(payload.get("ok")):
+                        return payload
+                    if dom_fail is None:
+                        dom_fail = payload
+
+        screen_anchor = None
+        if isinstance(region_rect, dict):
+            center = self._extract_rect_center(region_rect)
+            if center:
+                vp = self._map_ocr_point_to_viewport(center[0], center[1], ocr or {})
+                if vp:
+                    if self._is_screen_ocr_info_mode():
+                        sx, sy, _ = self._normalize_screen_click_point(vp[0], vp[1], ocr=ocr or {})
+                        screen_anchor = (int(sx), int(sy))
+                    else:
+                        screen_anchor = self._viewport_to_screen_point(vp[0], vp[1])
+        if screen_anchor is None and self._is_screen_ocr_info_mode():
+            try:
+                left = int((ocr or {}).get("screen_left") or 0)
+                top = int((ocr or {}).get("screen_top") or 0)
+                sw = int((ocr or {}).get("screen_width") or (ocr or {}).get("image_w") or 0)
+                sh = int((ocr or {}).get("screen_height") or (ocr or {}).get("image_h") or 0)
+                if sw > 20 and sh > 20:
+                    screen_anchor = (int(left + sw * 0.45), int(top + sh * 0.60))
+            except Exception:
+                screen_anchor = None
+
+        wheel_units = -abs(int(self._nav_scroll_pixels))
+        if direction == "up":
+            wheel_units = abs(int(self._nav_scroll_pixels))
+        try:
+            self._human_action_delay("nav_scroll_pre")
+            if isinstance(screen_anchor, tuple) and len(screen_anchor) >= 2:
+                human_scroll(wheel_units, x=int(screen_anchor[0]), y=int(screen_anchor[1]))
+            else:
+                human_scroll(wheel_units)
+            self._human_action_post_delay("nav_scroll_post")
+            return {
+                "ok": True,
+                "driver": "physical_scroll",
+                "direction": direction,
+                "wheel_units": int(wheel_units),
+                "anchor": {"x": int(screen_anchor[0]), "y": int(screen_anchor[1])} if isinstance(screen_anchor, tuple) else {},
+                "dom_fail": dom_fail or {},
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "driver": "physical_scroll_failed",
+                "direction": direction,
+                "reason": str(e),
+                "dom_fail": dom_fail or {},
+            }
+
+    def _resolve_ocr_target_with_navigation(self, action, link_index=None, preferred_text=""):
+        ocr = self._ocr_extract_page_text(use_cache=False)
+        nav_trace = []
+        if (not list(ocr.get("lines") or [])) and (not list(ocr.get("action_candidates") or [])):
+            return {"ok": False, "reason": "ocr_no_lines", "ocr": ocr, "line": None, "anchor": None, "nav_trace": nav_trace}
+
+        nav_hint = {}
+        llm_calls = 0
+        stagnant_rounds = 0
+        last_sig = self._build_ocr_scan_signature(ocr)
+        max_rounds = int(self._nav_max_scroll_rounds) if self._nav_llm_enabled else 0
+
+        for round_idx in range(max(0, max_rounds) + 1):
+            role_hint = str((nav_hint or {}).get("region_role") or "").strip().lower()
+            keyword_hints = [str(x or "").strip() for x in list((nav_hint or {}).get("keyword_hints") or []) if str(x or "").strip()]
+            merged_preferred = " ".join([str(preferred_text or "")] + keyword_hints).strip()
+            line, anchor = self._pick_ocr_target_with_fallback(
+                action,
+                ocr=ocr,
+                link_index=link_index,
+                preferred_text=merged_preferred,
+                preferred_role=role_hint,
+            )
+            if line:
+                self._last_nav_trace = {
+                    "ok": True,
+                    "round": int(round_idx),
+                    "hint": dict(nav_hint or {}),
+                    "trace": list(nav_trace or [])[-8:],
+                }
+                return {
+                    "ok": True,
+                    "reason": "target_found",
+                    "ocr": ocr,
+                    "line": line,
+                    "anchor": anchor,
+                    "nav_trace": nav_trace,
+                    "nav_hint": nav_hint,
+                }
+
+            if round_idx >= max_rounds:
+                break
+
+            if self._nav_llm_enabled and llm_calls < self._nav_max_llm_calls:
+                hint = self._llm_build_navigation_hint(
+                    action=action,
+                    link_index=link_index,
+                    preferred_text=preferred_text,
+                    ocr=ocr,
+                    history=nav_trace,
+                )
+                if isinstance(hint, dict) and hint:
+                    nav_hint = hint
+                    llm_calls += 1
+                    nav_trace.append(
+                        {
+                            "round": int(round_idx + 1),
+                            "phase": "llm_hint",
+                            "hint": dict(hint),
+                        }
+                    )
+
+            direction = str((nav_hint or {}).get("scroll_direction") or "down").strip().lower()
+            if direction not in {"down", "up"}:
+                direction = "down"
+            if bool((nav_hint or {}).get("should_scroll", True)) is False:
+                break
+
+            region_rect = self._resolve_nav_region_rect(ocr, nav_hint)
+            scroll_res = self._scroll_operation_surface(direction=direction, ocr=ocr, region_rect=region_rect)
+            nav_trace.append(
+                {
+                    "round": int(round_idx + 1),
+                    "phase": "scroll",
+                    "direction": direction,
+                    "region_role": str((nav_hint or {}).get("region_role") or ""),
+                    "scroll": dict(scroll_res or {}),
+                }
+            )
+            if not bool((scroll_res or {}).get("ok")):
+                break
+
+            time.sleep(float(self._nav_scroll_cooldown))
+            ocr_next = self._ocr_extract_page_text(use_cache=False)
+            next_sig = self._build_ocr_scan_signature(ocr_next)
+            if next_sig and next_sig == last_sig:
+                stagnant_rounds += 1
+            else:
+                stagnant_rounds = 0
+            if stagnant_rounds >= 2 and direction == "down":
+                nav_hint = dict(nav_hint or {})
+                nav_hint["scroll_direction"] = "up"
+            ocr = ocr_next
+            last_sig = next_sig
+
+        reason = "ocr_target_not_found_after_scroll" if nav_trace else "ocr_target_not_found"
+        self._last_nav_trace = {
+            "ok": False,
+            "reason": reason,
+            "hint": dict(nav_hint or {}),
+            "trace": list(nav_trace or [])[-8:],
+        }
+        return {"ok": False, "reason": reason, "ocr": ocr, "line": None, "anchor": None, "nav_trace": nav_trace, "nav_hint": nav_hint}
+
+    def _perform_action_by_ocr_anchor(self, action, link_index=None, preferred_text=""):
+        target = self._resolve_ocr_target_with_navigation(
+            action,
+            link_index=link_index,
+            preferred_text=preferred_text,
+        )
+        ocr = dict(target.get("ocr") or {})
+        line = target.get("line")
+        anchor = target.get("anchor")
+        nav_trace = list(target.get("nav_trace") or [])
         if not line and action in {"start_flash_sale", "stop_flash_sale"}:
             logger.warning(
                 f"OCR秒杀按钮未定位: action={action}, page_type={ocr.get('page_type')}, "
@@ -1498,7 +1962,7 @@ class OperationsAgent:
                 f"cand_count={len(list(ocr.get('action_candidates') or []))}"
             )
         if not line:
-            return {"ok": False, "reason": "ocr_target_not_found", "ocr": ocr, "anchor": anchor}
+            return {"ok": False, "reason": str(target.get("reason") or "ocr_target_not_found"), "ocr": ocr, "anchor": anchor, "nav_trace": nav_trace}
         center = self._extract_rect_center(line.get("rect"))
         if not center:
             return {"ok": False, "reason": "ocr_rect_invalid", "line": line}
@@ -1577,8 +2041,60 @@ class OperationsAgent:
             "ocr_page_type": ocr.get("page_type"),
             "ocr_scene_tags": list(ocr.get("scene_tags") or []),
             "ocr_action_candidate_count": len(list(ocr.get("action_candidates") or [])),
+            "navigation_trace": nav_trace,
         }
         return {"ok": ok, "reason": "clicked_verified" if verified else ("clicked" if ok else "click_failed"), "detail": detail}
+
+    def _llm_judge_operable_page(self, action, ocr):
+        if (not self._nav_llm_enabled) or (not self._nav_unknown_page_enabled):
+            return {}
+        llm = self._navigator_llm()
+        if llm is None:
+            return {}
+        if not self._allow_nav_llm_now():
+            return {}
+        payload = {
+            "action": str(action or ""),
+            "ocr": self._build_nav_ocr_digest(ocr or {}),
+            "operable_page_hints": {
+                "pin_product": ["商品列表", "置顶", "取消置顶", "product", "pin", "unpin", "link"],
+                "unpin_product": ["商品列表", "取消置顶", "unpin", "pinned", "link"],
+                "start_flash_sale": ["秒杀", "上架", "活动", "flash", "promotion", "launch", "start"],
+                "stop_flash_sale": ["结束秒杀", "停止秒杀", "下架", "flash", "promotion", "stop", "end"],
+            }.get(str(action or "").strip().lower(), []),
+        }
+        prompt = (
+            "你是直播运营页面判定器。"
+            "请根据 OCR 文本判断当前页面是否可以执行给定动作。"
+            "即使页面样式没见过，也要根据语义判断。"
+            "仅输出 JSON，不要输出额外文本。"
+            "JSON格式:"
+            "{\"operable\":true|false,"
+            "\"confidence\":0~1,"
+            "\"reason\":\"...\","
+            "\"target_region_role\":\"product_panel|action_panel|main_content|unknown\","
+            "\"evidence\":[\"...\"]}\n\n"
+            f"{json.dumps(payload, ensure_ascii=False)}"
+        )
+        try:
+            response = llm.invoke(prompt)
+            raw = str(getattr(response, "content", response) or "").strip()
+            data = self._extract_json_payload(raw)
+            if not isinstance(data, dict):
+                return {}
+            role = str(data.get("target_region_role") or "unknown").strip().lower()
+            if role not in {"product_panel", "action_panel", "main_content", "unknown"}:
+                role = "unknown"
+            return {
+                "operable": bool(data.get("operable")),
+                "confidence": float(data.get("confidence") or 0.0),
+                "reason": str(data.get("reason") or "")[:180],
+                "target_region_role": role,
+                "evidence": [str(x or "")[:80] for x in list(data.get("evidence") or [])[:4] if str(x or "").strip()],
+            }
+        except Exception as e:
+            logger.warning(f"LLM页面判定失败: {e}")
+            return {}
 
     def _is_ocr_operable_page(self, action):
         if not bool(getattr(settings, "OCR_VISION_PRECHECK_ENABLED", True)):
@@ -1601,6 +2117,15 @@ class OperationsAgent:
             return True, {"ocr": ocr, "reason": "no_required_keywords"}
         hit = any(k in text for k in required)
         detail = {"ocr": ocr, "keywords": required[:8], "hit": hit, "action": action}
+        if hit:
+            return True, detail
+        llm_judge = self._llm_judge_operable_page(action, ocr)
+        if bool(llm_judge.get("operable")) and float(llm_judge.get("confidence") or 0.0) >= float(self._nav_min_confidence):
+            detail["llm_page_judge"] = llm_judge
+            detail["reason"] = "llm_unknown_page_operable"
+            return True, detail
+        if llm_judge:
+            detail["llm_page_judge"] = llm_judge
         return hit, detail
 
     def get_mode_status(self):
@@ -1630,6 +2155,12 @@ class OperationsAgent:
             "plan_situation_driven": bool(self._llm_plan_situation_driven),
             "plan_min_confidence": float(self._llm_plan_min_confidence),
             "plan_last_trace": dict(self._last_action_plan_trace or {}),
+            "nav_enabled": bool(self._nav_llm_enabled),
+            "nav_unknown_page_enabled": bool(self._nav_unknown_page_enabled),
+            "nav_min_confidence": float(self._nav_min_confidence),
+            "nav_max_scroll_rounds": int(self._nav_max_scroll_rounds),
+            "nav_max_llm_calls": int(self._nav_max_llm_calls),
+            "nav_last_trace": dict(self._last_nav_trace or {}),
         }
 
     def get_last_action_plan_trace(self):
@@ -1650,6 +2181,23 @@ class OperationsAgent:
         if has_llm and llm is not None:
             return llm
         return None
+
+    def _navigator_llm(self):
+        if not self._nav_llm_enabled:
+            return None
+        agent = self._operation_navigator_agent or self._action_planner_agent or self._reaction_judge_agent
+        llm = getattr(agent, "llm", None) if agent else None
+        has_llm = bool(getattr(agent, "has_llm", False))
+        if has_llm and llm is not None:
+            return llm
+        return None
+
+    def _allow_nav_llm_now(self):
+        now = time.time()
+        if (now - float(self._nav_last_llm_at or 0.0)) < float(self._nav_min_interval):
+            return False
+        self._nav_last_llm_at = now
+        return True
 
     def _build_plan_observation(self, command):
         getter = getattr(self.vision_agent, "get_operation_observation", None)
@@ -2694,15 +3242,64 @@ class OperationsAgent:
 
         return contexts
 
-    def _run_js_in_contexts(self, script, *args):
+    def _ordered_contexts(self, prefer_ctx_name=None):
+        page = self.vision_agent.page
+        if not page:
+            return []
+
+        if self._run_js_include_frames:
+            contexts = list(self._iter_contexts() or [])
+        else:
+            contexts = [("page", page)]
+        if not contexts:
+            return []
+
+        prefer = str(prefer_ctx_name or self._last_js_context_name or "").strip()
+        if not prefer:
+            return contexts
+
+        def _score(item):
+            name = str(item[0] or "")
+            if name == prefer:
+                return 0
+            if name == "page":
+                return 1
+            return 2
+
+        contexts.sort(key=_score)
+        return contexts
+
+    def _run_js_in_contexts(self, script, *args, prefer_ctx_name=None, timeout=None, require_truthy=True):
         """在 page/frame 上下文中执行 JS，返回第一个 truthy 结果。"""
-        for ctx_name, ctx in self._iter_contexts():
+        contexts = self._ordered_contexts(prefer_ctx_name=prefer_ctx_name)
+        if not contexts:
+            return None, None
+
+        total_limit = max(1, int(self._run_js_max_contexts))
+        primary = contexts[:total_limit]
+        timeout_s = max(0.1, float(timeout or self._run_js_timeout_seconds))
+
+        for ctx_name, ctx in primary:
             try:
-                result = ctx.run_js(script, *args)
-                if result:
+                result = ctx.run_js(script, *args, timeout=timeout_s)
+                if (not require_truthy) or bool(result):
+                    self._last_js_context_name = str(ctx_name or "page")
                     return ctx_name, result
-            except Exception:
+            except Exception as e:
+                logger.debug(f"JS执行失败(primary:{ctx_name}): {e}")
                 continue
+
+        # 仅补充尝试一个额外上下文，避免跨大量 frame 线性超时。
+        if len(contexts) > total_limit:
+            ctx_name, ctx = contexts[total_limit]
+            fallback_timeout = max(0.1, float(self._run_js_fallback_timeout_seconds))
+            try:
+                result = ctx.run_js(script, *args, timeout=fallback_timeout)
+                if (not require_truthy) or bool(result):
+                    self._last_js_context_name = str(ctx_name or "page")
+                    return ctx_name, result
+            except Exception as e:
+                logger.debug(f"JS执行失败(fallback:{ctx_name}): {e}")
         return None, None
 
     def _find_first_ele(self, selectors, preferred_ctx=None, preferred_selector=None, timeout=0.25):

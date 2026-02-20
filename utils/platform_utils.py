@@ -138,6 +138,32 @@ def _resolve_browser_family(exec_path):
     return "chrome"
 
 
+def _split_cli_args(raw, platform_key):
+    s = str(raw or "").strip()
+    if not s:
+        return []
+    try:
+        return [x for x in shlex.split(s, posix=(platform_key != "windows")) if str(x or "").strip()]
+    except Exception:
+        return [x.strip() for x in s.split() if x.strip()]
+
+
+def _get_debug_extra_args(platform_key):
+    # 允许通过环境变量扩展启动参数（示例：CHROME_DEBUG_EXTRA_ARGS="--disable-gpu --lang=zh-CN"）
+    env_args = _split_cli_args(os.getenv("CHROME_DEBUG_EXTRA_ARGS", ""), platform_key)
+    if platform_key != "windows":
+        return env_args
+
+    # Windows 默认启用前台计时与渲染策略，减少后台降频导致的动作抖动和延迟。
+    win_defaults = [
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-features=CalculateNativeWinOcclusion",
+    ]
+    return _dedupe_keep_order([*win_defaults, *env_args])
+
+
 def _display_cmd(argv, platform_key):
     if platform_key == "windows":
         try:
@@ -157,6 +183,7 @@ def build_chrome_debug_launch_args(port=9222, user_data_path="./user_data", chro
     ordered_execs = _dedupe_keep_order([resolved, *candidates])
     exec_path = ordered_execs[0] if ordered_execs else resolve_chrome_executable(chrome_executable=chrome_executable)
     user_data_abs = str(Path(user_data_path).expanduser().resolve())
+    extra_args = _get_debug_extra_args(key)
 
     def _make_argv(executable):
         argv = [
@@ -164,6 +191,8 @@ def build_chrome_debug_launch_args(port=9222, user_data_path="./user_data", chro
             f"--remote-debugging-port={int(port)}",
             f"--user-data-dir={user_data_abs}",
         ]
+        if extra_args:
+            argv.extend(list(extra_args))
         if startup_url:
             argv.append(str(startup_url))
         return argv

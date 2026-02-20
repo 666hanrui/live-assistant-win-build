@@ -1,4 +1,5 @@
 import time
+import threading
 from typing import Dict, Optional
 
 import cv2
@@ -16,6 +17,9 @@ class ScreenCapture:
         self.backend = ""
         self.last_error = ""
         self._mss = None
+        self._mss_instance = None
+        self._mss_monitors = []
+        self._lock = threading.Lock()
         self._init_backend()
 
     def _init_backend(self):
@@ -41,30 +45,64 @@ class ScreenCapture:
     def available(self) -> bool:
         return bool(self.backend)
 
+    def _get_mss_instance(self):
+        if not self._mss:
+            return None
+        if self._mss_instance is None:
+            self._mss_instance = self._mss.mss()
+            self._mss_monitors = list(getattr(self._mss_instance, "monitors", []) or [])
+        return self._mss_instance
+
+    def _reset_mss_instance(self):
+        inst = self._mss_instance
+        self._mss_instance = None
+        self._mss_monitors = []
+        if inst is not None:
+            try:
+                inst.close()
+            except Exception:
+                pass
+
+    def __del__(self):
+        try:
+            self._reset_mss_instance()
+        except Exception:
+            pass
+
     def _capture_with_mss(self, monitor_index: int = 1) -> Optional[Dict]:
         if not self._mss:
             return None
-        with self._mss.mss() as sct:
-            monitors = list(getattr(sct, "monitors", []) or [])
-            if len(monitors) <= 1:
+        with self._lock:
+            try:
+                sct = self._get_mss_instance()
+                monitors = list(self._mss_monitors or [])
+                if len(monitors) <= 1:
+                    self._reset_mss_instance()
+                    sct = self._get_mss_instance()
+                    monitors = list(self._mss_monitors or [])
+                if len(monitors) <= 1:
+                    return None
+                idx = max(1, min(int(monitor_index), len(monitors) - 1))
+                mon = monitors[idx]
+                shot = sct.grab(mon)
+                arr = np.array(shot)
+                # BGRA -> BGR
+                if arr.ndim == 3 and arr.shape[2] == 4:
+                    img = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+                else:
+                    img = arr
+                return {
+                    "image": img,
+                    "left": int(mon.get("left", 0)),
+                    "top": int(mon.get("top", 0)),
+                    "width": int(mon.get("width", img.shape[1] if img is not None else 0)),
+                    "height": int(mon.get("height", img.shape[0] if img is not None else 0)),
+                    "backend": "mss",
+                }
+            except Exception:
+                # mss 上下文可能在系统切屏/锁屏后失效，重建一次。
+                self._reset_mss_instance()
                 return None
-            idx = max(1, min(int(monitor_index), len(monitors) - 1))
-            mon = monitors[idx]
-            shot = sct.grab(mon)
-            arr = np.array(shot)
-            # BGRA -> BGR
-            if arr.ndim == 3 and arr.shape[2] == 4:
-                img = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
-            else:
-                img = arr
-            return {
-                "image": img,
-                "left": int(mon.get("left", 0)),
-                "top": int(mon.get("top", 0)),
-                "width": int(mon.get("width", img.shape[1] if img is not None else 0)),
-                "height": int(mon.get("height", img.shape[0] if img is not None else 0)),
-                "backend": "mss",
-            }
 
     def _capture_with_pyautogui(self) -> Optional[Dict]:
         try:

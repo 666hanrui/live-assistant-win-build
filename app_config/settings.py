@@ -230,6 +230,16 @@ OCR_ACTION_RETRY_POLL_SECONDS = float(os.getenv("OCR_ACTION_RETRY_POLL_SECONDS",
 OCR_ACTION_REACTION_LLM_ENABLED = os.getenv("OCR_ACTION_REACTION_LLM_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 OCR_ACTION_REACTION_LLM_MAX_CHECKS = int(os.getenv("OCR_ACTION_REACTION_LLM_MAX_CHECKS", "4"))
 OCR_ACTION_REACTION_LLM_MIN_INTERVAL_SECONDS = float(os.getenv("OCR_ACTION_REACTION_LLM_MIN_INTERVAL_SECONDS", "1.2"))
+# 运营 JS 执行时延控制：降低跨 frame 执行卡顿导致的单步 10s 阻塞
+OPS_RUN_JS_TIMEOUT_SECONDS = float(os.getenv("OPS_RUN_JS_TIMEOUT_SECONDS", "1.2"))
+OPS_RUN_JS_FALLBACK_TIMEOUT_SECONDS = float(os.getenv("OPS_RUN_JS_FALLBACK_TIMEOUT_SECONDS", "0.45"))
+OPS_RUN_JS_MAX_CONTEXTS = int(os.getenv("OPS_RUN_JS_MAX_CONTEXTS", "3"))
+OPS_RUN_JS_INCLUDE_FRAMES = os.getenv("OPS_RUN_JS_INCLUDE_FRAMES", "false").lower() in ("1", "true", "yes", "on")
+# 真实页执行前，允许从 tiktok.com/live/dashboard 自动跳转到可操作的 Shop 控制台页
+ACTION_PAGE_SHOP_DASHBOARD_URLS = _split_csv_env(
+    "ACTION_PAGE_SHOP_DASHBOARD_URLS",
+    "https://shop.tiktok.com/streamer/live/product/dashboard",
+)
 OS_KEYBOARD_INPUT_FALLBACK_ENABLED = os.getenv("OS_KEYBOARD_INPUT_FALLBACK_ENABLED", "false").lower() in ("1", "true", "yes", "on")
 OS_KEYBOARD_TYPING_MIN_INTERVAL_SECONDS = float(os.getenv("OS_KEYBOARD_TYPING_MIN_INTERVAL_SECONDS", "0.018"))
 OS_KEYBOARD_TYPING_MAX_INTERVAL_SECONDS = float(os.getenv("OS_KEYBOARD_TYPING_MAX_INTERVAL_SECONDS", "0.055"))
@@ -252,6 +262,15 @@ OPS_LLM_PLAN_REPLAY_PATH = os.getenv(
     "OPS_LLM_PLAN_REPLAY_PATH",
     "data/reports/operation_plan_replay.jsonl",
 ).strip()
+# 运营动作 LLM 导航兜底（规则链未命中时启用）
+OPS_LLM_NAVIGATION_ENABLED = os.getenv("OPS_LLM_NAVIGATION_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+OPS_LLM_NAVIGATION_UNKNOWN_PAGE_ENABLED = os.getenv("OPS_LLM_NAVIGATION_UNKNOWN_PAGE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+OPS_LLM_NAVIGATION_MIN_CONFIDENCE = float(os.getenv("OPS_LLM_NAVIGATION_MIN_CONFIDENCE", "0.58"))
+OPS_LLM_NAVIGATION_MAX_SCROLL_ROUNDS = int(os.getenv("OPS_LLM_NAVIGATION_MAX_SCROLL_ROUNDS", "6"))
+OPS_LLM_NAVIGATION_MAX_LLM_CALLS = int(os.getenv("OPS_LLM_NAVIGATION_MAX_LLM_CALLS", "3"))
+OPS_LLM_NAVIGATION_MIN_INTERVAL_SECONDS = float(os.getenv("OPS_LLM_NAVIGATION_MIN_INTERVAL_SECONDS", "0.9"))
+OPS_LLM_NAVIGATION_SCROLL_COOLDOWN_SECONDS = float(os.getenv("OPS_LLM_NAVIGATION_SCROLL_COOLDOWN_SECONDS", "0.32"))
+OPS_LLM_NAVIGATION_SCROLL_PIXELS = int(os.getenv("OPS_LLM_NAVIGATION_SCROLL_PIXELS", "520"))
 
 # 网页信息读取模式：
 # - dom: 主要依赖 DOM 信息读取
@@ -279,9 +298,11 @@ VOICE_COMMAND_FALLBACK_LANGUAGES = _split_csv_env("VOICE_COMMAND_FALLBACK_LANGUA
 VOICE_COMMAND_CROSS_LANGUAGE_ENABLED = os.getenv("VOICE_COMMAND_CROSS_LANGUAGE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 VOICE_COMMAND_CROSS_LANGUAGE_ORDER = _split_csv_env("VOICE_COMMAND_CROSS_LANGUAGE_ORDER", "zh-CN,en-US")
 VOICE_COMMAND_MAX_LANGS = int(os.getenv("VOICE_COMMAND_MAX_LANGS", "2"))
-# provider: whisper_local / auto / dashscope_funasr / google / sphinx
+# provider: whisper_local / dashscope_funasr / hybrid_local_cloud / auto / google / sphinx
 VOICE_PYTHON_ASR_PROVIDER = os.getenv("VOICE_PYTHON_ASR_PROVIDER", "whisper_local").strip().lower()
 VOICE_ASR_ALLOW_GOOGLE_FALLBACK = os.getenv("VOICE_ASR_ALLOW_GOOGLE_FALLBACK", "false").lower() in ("1", "true", "yes", "on")
+VOICE_ASR_AUTO_SWITCH_ON_TIMEOUT = os.getenv("VOICE_ASR_AUTO_SWITCH_ON_TIMEOUT", "false").lower() in ("1", "true", "yes", "on")
+# 兼容旧配置：已不再用于自动注入 DashScope 备用链路（改为通过 VOICE_PYTHON_ASR_PROVIDER 显式选择）
 VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK = os.getenv("VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK", "false").lower() in ("1", "true", "yes", "on")
 VOICE_PYTHON_ASR_QUEUE_MAX = int(os.getenv("VOICE_PYTHON_ASR_QUEUE_MAX", "200"))
 VOICE_PYTHON_LISTEN_TIMEOUT_SECONDS = float(os.getenv("VOICE_PYTHON_LISTEN_TIMEOUT_SECONDS", "2.5"))

@@ -48,6 +48,13 @@ class VoiceCommandAgent:
         self._local_last_audio_rms = 0
         self._local_no_text_count = 0
         self._provider_chain_logged = ""
+        self._last_provider_base = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local")
+        self._last_provider_chain = []
+        self._last_provider_attempt = None
+        self._last_provider_selected = None
+        self._last_provider_error = None
+        self._last_provider_at = None
+        self._loopback_fallback_warned = False
         if self._local_capture_mode == "loopback":
             self._preferred_mic_device_index = int(getattr(settings, "VOICE_LOOPBACK_DEVICE_INDEX", -1))
             self._preferred_mic_name_hint = str(getattr(settings, "VOICE_LOOPBACK_DEVICE_NAME_HINT", "") or "").strip()
@@ -101,6 +108,14 @@ class VoiceCommandAgent:
         self._local_mic_state["status"] = status
         self._local_mic_state["error"] = error
         self._local_mic_state["updatedAt"] = int(time.time() * 1000)
+
+    def _provider_runtime_kind(self, provider_name):
+        name = str(provider_name or "").strip().lower()
+        if name in {"whisper_local", "sphinx"}:
+            return "local"
+        if name in {"google", "dashscope_funasr"}:
+            return "cloud"
+        return "unknown"
 
     def _should_report_no_text_error(self):
         """仅在输入音量达到阈值时上报 no_text，避免安静环境误报。"""
@@ -385,9 +400,27 @@ class VoiceCommandAgent:
                 except Exception:
                     continue
 
+        if self._is_loopback_asr_mode():
+            # loopback 模式尽量避免回退到实体麦克风，优先选择“非麦克风命名”的设备。
+            mic_like_tokens = ["microphone", "mic", "麦克风", "内建", "built-in", "builtin", "array"]
+            for idx, name in enumerate(names):
+                n = str(name or "").lower()
+                if any(tok in n for tok in mic_like_tokens):
+                    continue
+                try:
+                    return sr.Microphone(device_index=idx), idx
+                except Exception:
+                    continue
+
         # 最后兜底：第一个可用设备
         for idx in range(len(names)):
             try:
+                if self._is_loopback_asr_mode() and not self._loopback_fallback_warned:
+                    self._loopback_fallback_warned = True
+                    logger.warning(
+                        "loopback 模式未找到明显回采设备，已回退到首个可用输入设备。"
+                        "建议在设置中指定 VOICE_LOOPBACK_DEVICE_INDEX/NAME_HINT。"
+                    )
                 return sr.Microphone(device_index=idx), idx
             except Exception:
                 continue
@@ -607,7 +640,38 @@ class VoiceCommandAgent:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fp:
                 fp.write(wav_data)
                 tmp_path = fp.name
-            recognition = Recognition(**recognition_kwargs)
+
+            class _NoopRecognitionCallback:
+                def on_open(self):
+                    return None
+
+                def on_complete(self):
+                    return None
+
+                def on_error(self, result):
+                    return None
+
+                def on_close(self):
+                    return None
+
+                def on_event(self, result):
+                    return None
+
+            # 兼容不同 dashscope SDK：
+            # - 新版要求 constructor 传 callback
+            # - 旧版可能不接受 callback
+            try:
+                recognition = Recognition(
+                    callback=_NoopRecognitionCallback(),
+                    **recognition_kwargs,
+                )
+            except TypeError as e:
+                msg = str(e or "")
+                if "unexpected keyword argument" in msg and "callback" in msg:
+                    recognition = Recognition(**recognition_kwargs)
+                else:
+                    raise RuntimeError(f"dashscope_init_error:{msg}") from e
+
             result = recognition.call(tmp_path, **call_kwargs)
         finally:
             if tmp_path:
@@ -639,39 +703,38 @@ class VoiceCommandAgent:
             "dashscope": "dashscope_funasr",
             "aliyun_funasr": "dashscope_funasr",
             "funasr": "dashscope_funasr",
+            "hybrid": "hybrid_local_cloud",
+            "local_cloud": "hybrid_local_cloud",
+            "cloud_local": "hybrid_local_cloud",
         }
         provider = provider_aliases.get(provider_raw, provider_raw)
         primary_lang = str((langs or [""])[0] or "").lower()
         allow_google_fallback = bool(getattr(settings, "VOICE_ASR_ALLOW_GOOGLE_FALLBACK", False))
-        allow_dashscope_fallback = bool(getattr(settings, "VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK", False))
         dashscope_available = bool(self._get_dashscope_api_key())
-        include_dashscope_fallback = bool(allow_dashscope_fallback and dashscope_available)
-        # 统一 provider 链路：
-        # - auto: 默认本地优先；LOCAL_FIRST_MODE=false 时英文优先 google（更快但依赖网络）
-        # - google: 遇到超时等网络错误时回退 whisper/sphinx
+        self._last_provider_base = provider
+        self._last_provider_chain = []
+        self._last_provider_attempt = None
+        self._last_provider_selected = None
+        self._last_provider_error = None
+        self._last_provider_at = int(time.time() * 1000)
+        # 统一 provider 链路（显式选择制）：
+        # - 不再自动把 dashscope 当“备用链路”混入。
+        # - 你选择哪个 provider，就按该链路执行。
         providers = [provider]
         if provider == "auto":
             local_first = bool(getattr(settings, "LOCAL_FIRST_MODE", False))
             if primary_lang.startswith("zh"):
                 providers = ["whisper_local", "sphinx"]
-                if include_dashscope_fallback:
-                    providers.insert(1, "dashscope_funasr")
                 if allow_google_fallback:
                     providers.insert(1, "google")
             else:
                 providers = ["whisper_local", "sphinx"] if local_first else ["google", "whisper_local", "sphinx"]
-                if include_dashscope_fallback:
-                    providers.insert(1, "dashscope_funasr")
                 if allow_google_fallback and "google" not in providers:
                     providers.append("google")
         elif provider == "google":
             providers = ["google", "whisper_local", "sphinx"] if allow_google_fallback else ["google"]
-            if include_dashscope_fallback and "dashscope_funasr" not in providers:
-                providers.insert(1, "dashscope_funasr")
         elif provider == "whisper_local":
             providers = ["whisper_local", "sphinx"] if allow_google_fallback else ["whisper_local"]
-            if include_dashscope_fallback and "dashscope_funasr" not in providers:
-                providers.insert(1, "dashscope_funasr")
             if allow_google_fallback and "google" not in providers:
                 providers.insert(1, "google")
         elif provider == "dashscope_funasr":
@@ -679,12 +742,16 @@ class VoiceCommandAgent:
                 providers = ["dashscope_funasr", "google", "whisper_local", "sphinx"]
             else:
                 providers = ["dashscope_funasr"]
+        elif provider == "hybrid_local_cloud":
+            providers = ["whisper_local", "dashscope_funasr", "sphinx"]
+            if allow_google_fallback:
+                providers.insert(2, "google")
         elif provider == "sphinx":
             providers = ["sphinx"]
         else:
             providers = ["whisper_local", "sphinx"] if primary_lang.startswith("zh") else ["google", "whisper_local", "sphinx"]
-            if include_dashscope_fallback and "dashscope_funasr" not in providers:
-                providers.insert(1, "dashscope_funasr")
+        if (not dashscope_available) and provider != "dashscope_funasr":
+            providers = [p for p in providers if p != "dashscope_funasr"]
 
         deduped = []
         seen = set()
@@ -694,14 +761,15 @@ class VoiceCommandAgent:
             seen.add(item)
             deduped.append(item)
         providers = deduped
+        self._last_provider_chain = list(providers)
 
-        # Google 通道网络波动时，短时间内跳过，避免每轮都被 timeout 拖慢。
-        if time.time() < float(self._google_backoff_until or 0.0):
+        # Google 通道网络波动时：仅在非显式 google 模式下临时跳过，避免拖慢链路。
+        if provider != "google" and time.time() < float(self._google_backoff_until or 0.0):
             providers = [p for p in providers if p != "google"]
             if not providers:
                 providers = ["whisper_local", "sphinx"]
-        # DashScope 通道网络波动时短暂退避，避免频繁阻塞。
-        if time.time() < float(self._dashscope_backoff_until or 0.0):
+        # DashScope 通道网络波动时：仅在非显式 dashscope 模式下临时跳过。
+        if provider != "dashscope_funasr" and time.time() < float(self._dashscope_backoff_until or 0.0):
             providers = [p for p in providers if p != "dashscope_funasr"]
             if not providers:
                 providers = ["whisper_local", "sphinx"]
@@ -782,6 +850,8 @@ class VoiceCommandAgent:
         provider_errors = []
         fallback_candidates = []
         for p in providers:
+            self._last_provider_attempt = p
+            self._last_provider_at = int(time.time() * 1000)
             if p == "sphinx":
                 if not _allow_sphinx_for_langs(langs):
                     continue
@@ -794,12 +864,17 @@ class VoiceCommandAgent:
                         score = _command_score(text)
                         fallback_candidates.append((score, text, "en-US", p))
                         if score >= 3.0:
+                            self._last_provider_selected = p
+                            self._last_provider_error = None
+                            self._last_provider_at = int(time.time() * 1000)
                             return text, "en-US", None
                 except Exception as e:
                     msg = str(e)
                     if "UnknownValueError" in type(e).__name__:
                         continue
                     provider_errors.append(f"sphinx:{msg}")
+                    self._last_provider_error = f"sphinx:{msg}"
+                    self._last_provider_at = int(time.time() * 1000)
                     last_err = msg
                 continue
 
@@ -846,6 +921,8 @@ class VoiceCommandAgent:
                         cooldown = min(180, 20 * self._google_error_count)
                         self._google_backoff_until = time.time() + cooldown
                         provider_errors.append(f"google_network_error:{msg}")
+                        self._last_provider_error = f"google_network_error:{msg}"
+                        self._last_provider_at = int(time.time() * 1000)
                         last_err = f"google_network_error:{msg}"
                         break
                     if p == "dashscope_funasr" and _is_dashscope_network_error(msg):
@@ -853,6 +930,8 @@ class VoiceCommandAgent:
                         cooldown = min(180, 20 * self._dashscope_error_count)
                         self._dashscope_backoff_until = time.time() + cooldown
                         provider_errors.append(f"dashscope_network_error:{msg}")
+                        self._last_provider_error = f"dashscope_network_error:{msg}"
+                        self._last_provider_at = int(time.time() * 1000)
                         last_err = f"dashscope_network_error:{msg}"
                         break
                     if p == "whisper_local" and (
@@ -861,6 +940,8 @@ class VoiceCommandAgent:
                         # 可选能力缺失，不视为当前轮次失败
                         continue
                     provider_errors.append(f"{p}:{msg}")
+                    self._last_provider_error = f"{p}:{msg}"
+                    self._last_provider_at = int(time.time() * 1000)
                     last_err = msg
                     continue
             if (not recognized) and p == "whisper_local":
@@ -881,12 +962,22 @@ class VoiceCommandAgent:
                 fallback_candidates.append((best_score, best_text, best_lang, p))
                 # 命令分足够高时立即返回，降低执行延迟；否则继续尝试下一个 provider。
                 if best_score >= 3.0:
+                    self._last_provider_selected = p
+                    self._last_provider_error = None
+                    self._last_provider_at = int(time.time() * 1000)
                     return best_text, best_lang, None
         if fallback_candidates:
-            _, best_text, best_lang, _ = max(fallback_candidates, key=lambda x: x[0])
+            _, best_text, best_lang, best_provider = max(fallback_candidates, key=lambda x: x[0])
+            self._last_provider_selected = best_provider
+            self._last_provider_error = None
+            self._last_provider_at = int(time.time() * 1000)
             return best_text, best_lang, None
         if provider_errors:
+            self._last_provider_selected = None
+            self._last_provider_at = int(time.time() * 1000)
             return None, None, provider_errors[0]
+        self._last_provider_selected = None
+        self._last_provider_at = int(time.time() * 1000)
         return None, None, locals().get("last_err")
 
     def _start_python_asr_worker(self, langs):
@@ -910,6 +1001,7 @@ class VoiceCommandAgent:
         phrase_s = max(0.6, float(getattr(settings, "VOICE_PYTHON_PHRASE_TIME_LIMIT_SECONDS", 4.0)))
         ambient_s = max(0.0, float(getattr(settings, "VOICE_PYTHON_AMBIENT_ADJUST_SECONDS", 0.25)))
         provider_now = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").lower()
+        self._local_mic_state["provider"] = provider_now
         dyn_energy = bool(getattr(settings, "VOICE_PYTHON_DYNAMIC_ENERGY", True))
         energy_threshold = int(getattr(settings, "VOICE_PYTHON_ENERGY_THRESHOLD", 280))
         # whisper_local 更依赖“稳定收音”，动态阈值在噪声环境下容易漂移过高导致漏检。
@@ -1373,8 +1465,14 @@ class VoiceCommandAgent:
         """确保语音识别已开启且语言配置正确。"""
         if self._is_python_asr_mode():
             expected_langs = self._dedupe_langs(language, fallback_languages)
-            if self._local_running and expected_langs == self.last_langs:
+            expected_provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").strip().lower()
+            current_provider = str(self._local_mic_state.get("provider") or "").strip().lower()
+            provider_changed = bool(current_provider and current_provider != expected_provider)
+            if self._local_running and expected_langs == self.last_langs and not provider_changed:
                 return True
+            if self._local_running:
+                self.stop()
+                time.sleep(0.08)
             return self.start(
                 language=language,
                 fallback_languages=fallback_languages,
@@ -1416,6 +1514,14 @@ class VoiceCommandAgent:
 
     def get_state(self):
         if self._is_python_asr_mode():
+            configured_provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local")
+            runtime_provider = self._last_provider_selected or self._last_provider_attempt or configured_provider
+            device_name = str(self._local_mic_state.get("deviceName") or "")
+            loopback_likely_mic = bool(
+                self._is_loopback_asr_mode()
+                and device_name
+                and any(tok in device_name.lower() for tok in ["microphone", "mic", "麦克风", "built-in", "array"])
+            )
             return {
                 "supported": True,
                 "running": bool(self._local_running),
@@ -1428,7 +1534,14 @@ class VoiceCommandAgent:
                 "lastTextLang": self._local_last_text_lang,
                 "ctx": "python_asr",
                 "mode": self.input_mode,
-                "provider": settings.VOICE_PYTHON_ASR_PROVIDER,
+                "provider": configured_provider,
+                "runtimeProvider": runtime_provider,
+                "runtimeProviderType": self._provider_runtime_kind(runtime_provider),
+                "runtimeProviderChain": list(self._last_provider_chain or []),
+                "runtimeProviderError": self._last_provider_error,
+                "runtimeProviderAt": self._last_provider_at,
+                "usingCloudAsr": self._provider_runtime_kind(runtime_provider) == "cloud",
+                "loopbackLikelyMic": loopback_likely_mic,
                 "deviceIndex": self._local_mic_state.get("deviceIndex"),
                 "deviceName": self._local_mic_state.get("deviceName"),
                 "captureMode": self._local_capture_mode,
