@@ -42,10 +42,20 @@ jobs:
             dist/AI_Live_Assistant/logs/**
           if-no-files-found: warn
 
+      - name: Pack distributable zip
+        if: success()
+        shell: pwsh
+        run: |
+          $zipPath = "dist/AI_Live_Assistant_win_${{ github.sha }}.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path "dist/AI_Live_Assistant/*" -DestinationPath $zipPath -Force
+          if (!(Test-Path $zipPath)) { throw "zip packaging failed: $zipPath" }
+          Write-Host "Packaged zip: $zipPath"
+
       - name: Upload artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: AI_Live_Assistant_win_${{ github.sha }}
-          path: dist/AI_Live_Assistant/**
+          name: AI_Live_Assistant_win_${{ github.sha }}.zip
+          path: dist/AI_Live_Assistant_win_${{ github.sha }}.zip
           if-no-files-found: error
