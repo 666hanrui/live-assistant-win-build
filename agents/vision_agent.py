@@ -682,6 +682,16 @@ class VisionAgent:
         except Exception:
             return False
 
+    def _browser_page_alive(self):
+        if not self.page:
+            return False
+        try:
+            _ = self.page.url
+            _ = self.page.run_js("return 1")
+            return True
+        except Exception:
+            return False
+
     def _is_disconnect_error(self, err):
         msg = str(err or "").lower()
         return (
@@ -797,6 +807,42 @@ class VisionAgent:
         except Exception as e:
             logger.error(f"连接浏览器失败: {e}")
             raise
+
+    def ensure_browser_page_connection(self, force=False):
+        """
+        仅确保可执行 JS 的浏览器 page 上下文可用。
+        与 info_source_mode 无关：即使在 screen_ocr 模式也会尝试连接浏览器页。
+        """
+        now = time.time()
+        if (not force) and self._browser_page_alive():
+            return True
+        if (not force) and (now - self.last_reconnect_at < self.reconnect_cooldown):
+            return False
+
+        self.last_reconnect_at = now
+        try:
+            co = ChromiumOptions().set_local_port(self.port)
+            browser = ChromiumPage(co)
+            tabs = browser.get_tabs() or []
+            if not tabs:
+                self.page = browser
+                alive = self._browser_page_alive()
+                self.last_alive_probe_ok = alive
+                self.last_alive_probe_at = time.time()
+                return alive
+
+            strict_tabs = [t for t in tabs if self._is_target_live_room(getattr(t, "title", ""), getattr(t, "url", ""))]
+            candidates = [(self._score_tab(tab), tab) for tab in (strict_tabs or tabs)]
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            self.page = candidates[0][1]
+            alive = self._browser_page_alive()
+            self.last_alive_probe_ok = alive
+            self.last_alive_probe_at = time.time()
+            return alive
+        except Exception as e:
+            logger.warning(f"ensure_browser_page_connection 失败: {e}")
+            self.last_alive_probe_ok = False
+            return False
 
     def get_new_danmu(self):
         """

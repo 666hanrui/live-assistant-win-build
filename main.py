@@ -84,6 +84,13 @@ class LiveAssistant:
         self.last_start_detail = ""
         self.last_start_at = 0.0
         self._last_browser_rebind_attempt_at = 0.0
+        self.cloud_asr_test_enabled = False
+        self.cloud_asr_test_url = "https://www.bilibili.com/"
+        self._cloud_asr_test_prev_provider = ""
+        self._cloud_asr_test_prev_input_mode = ""
+        self._cloud_asr_test_prev_mic_index = None
+        self._cloud_asr_test_prev_mic_hint = ""
+        self.cloud_asr_test_log = deque(maxlen=240)
         self._load_runtime_state()
 
     def _get_active_language(self):
@@ -218,6 +225,7 @@ class LiveAssistant:
             voice_enabled = data.get("voice_command_enabled")
             voice_mic_index = data.get("voice_mic_device_index")
             voice_mic_name_hint = data.get("voice_mic_name_hint")
+            voice_input_mode = str(data.get("voice_input_mode") or "").strip().lower()
             voice_asr_provider = str(data.get("voice_asr_provider") or "").strip().lower()
             provider_aliases = {
                 "dashscope": "dashscope_funasr",
@@ -249,6 +257,27 @@ class LiveAssistant:
                         name_hint=voice_mic_name_hint,
                         restart_if_running=False,
                     )
+            mode_aliases = {
+                "tab_media": "tab_audio_asr",
+                "tab_media_asr": "tab_audio_asr",
+                "system_audio": "system_audio_asr",
+            }
+            voice_input_mode = mode_aliases.get(voice_input_mode, voice_input_mode)
+            if voice_input_mode in {
+                "python_asr",
+                "local_python_asr",
+                "python_local",
+                "local",
+                "system_loopback_asr",
+                "loopback_asr",
+                "system_audio_asr",
+                "tab_audio_asr",
+                "loopback",
+                "web_speech",
+            }:
+                self.voice.input_mode = voice_input_mode
+                if hasattr(self.voice, "_sync_capture_mode"):
+                    self.voice._sync_capture_mode()
             if voice_asr_provider in {"google", "auto", "sphinx", "whisper_local", "dashscope_funasr", "hybrid_local_cloud"}:
                 settings.VOICE_PYTHON_ASR_PROVIDER = voice_asr_provider
             if operation_execution_mode:
@@ -280,6 +309,7 @@ class LiveAssistant:
             "reply_enabled": bool(self.reply_enabled),
             "proactive_enabled": bool(self.proactive_enabled),
             "voice_command_enabled": bool(self.voice_command_enabled),
+            "voice_input_mode": str(getattr(self.voice, "input_mode", getattr(settings, "VOICE_COMMAND_INPUT_MODE", "python_asr")) or "python_asr"),
             "operation_execution_mode": self.get_operation_execution_mode(),
             "web_info_source_mode": self.get_web_info_source_mode(),
             "human_like_settings": self.get_human_like_settings(),
@@ -515,6 +545,42 @@ class LiveAssistant:
                 pass
         self._save_runtime_state()
         return True
+
+    def set_voice_input_mode(self, mode):
+        target = str(mode or "").strip().lower()
+        aliases = {
+            "tab_media": "tab_audio_asr",
+            "tab_media_asr": "tab_audio_asr",
+            "system_audio": "system_audio_asr",
+        }
+        target = aliases.get(target, target)
+        allowed = {
+            "python_asr",
+            "local_python_asr",
+            "python_local",
+            "local",
+            "system_loopback_asr",
+            "loopback_asr",
+            "system_audio_asr",
+            "tab_audio_asr",
+            "loopback",
+            "web_speech",
+        }
+        if target not in allowed:
+            return False
+        try:
+            self.voice.input_mode = target
+            if hasattr(self.voice, "_sync_capture_mode"):
+                self.voice._sync_capture_mode()
+            if bool(getattr(self.voice, "_local_running", False)) or bool(getattr(self.voice, "_tab_audio_running", False)):
+                self.voice.stop()
+                active_language = self._get_active_language()
+                fallback_languages = self._get_voice_fallback_languages(active_language)
+                self.voice.start(language=active_language, fallback_languages=fallback_languages)
+            self._save_runtime_state()
+            return True
+        except Exception:
+            return False
 
     def _normalize_text(self, text):
         text = (text or "").strip().lower()
@@ -1427,6 +1493,9 @@ class LiveAssistant:
         """轮询语音识别结果并触发运营动作。"""
         if not self.voice_command_enabled:
             return
+        # ASR 对比测试时只保留测试通道，避免与命令轮询争抢同一批转写结果。
+        if self.cloud_asr_test_enabled:
+            return
         if self.voice.requires_browser_page() and not self.vision.page:
             return
 
@@ -1539,7 +1608,8 @@ class LiveAssistant:
                 continue
             source = item.get("source") or "voice"
             lang = item.get("lang") or ""
-            if not self._is_voice_language_match(text, lang, active_language):
+            command = self._parse_operation_command_text(text)
+            if (not self._is_voice_language_match(text, lang, active_language)) and (not command):
                 logger.debug(
                     f"语音文本语言不匹配已丢弃: expected={active_language}, got_lang={lang}, text={text}"
                 )
@@ -1553,7 +1623,6 @@ class LiveAssistant:
                 )
                 continue
             has_wake_word = self._pass_voice_wake_word(text)
-            command = self._parse_operation_command_text(text)
             self._append_voice_input_log(
                 source=source,
                 text=text,
@@ -1714,6 +1783,14 @@ class LiveAssistant:
 
     def _mock_shop_file_path(self):
         return (Path(__file__).resolve().parent / "stress" / "mock_shop" / "mock_tiktok_shop.html").resolve()
+
+    def _normalize_cloud_test_url(self, url):
+        raw = str(url or "").strip()
+        if not raw:
+            return "https://www.bilibili.com/"
+        if raw.startswith(("http://", "https://")):
+            return raw
+        return f"https://{raw}"
 
     def get_mock_shop_url(self, view=None):
         mock_file = self._mock_shop_file_path()
@@ -1995,6 +2072,208 @@ class LiveAssistant:
         except Exception as e:
             logger.debug(f"注入 mock URL 失败: {e}")
             return False
+
+    def _inject_bilibili_url_into_debug_browser(self, bilibili_url):
+        try:
+            co = ChromiumOptions().set_local_port(settings.BROWSER_PORT)
+            browser = ChromiumPage(co)
+            tabs = browser.get_tabs() or []
+            target_tab = None
+
+            for tab in tabs:
+                title = (getattr(tab, "title", "") or "").lower()
+                url = (getattr(tab, "url", "") or "").lower()
+                if ("bilibili.com" in url) or ("哔哩哔哩" in title) or ("b站" in title):
+                    self.vision.page = tab
+                    return True
+                if target_tab is None and ("tiktok.com" in url or "shop.tiktok.com" in url):
+                    target_tab = tab
+
+            if target_tab is None:
+                target_tab = tabs[0] if tabs else browser
+
+            target_tab.get(bilibili_url)
+            time.sleep(0.35)
+            self.vision.page = target_tab
+            current_url = str(getattr(target_tab, "url", "") or "").lower()
+            current_title = str(getattr(target_tab, "title", "") or "").lower()
+            return ("bilibili.com" in current_url) or ("哔哩哔哩" in current_title) or ("b站" in current_title)
+        except Exception as e:
+            logger.debug(f"注入 bilibili URL 失败: {e}")
+            return False
+
+    def start_cloud_asr_bilibili_test(self, url=None, language=None, provider=None):
+        """
+        启用“流式 ASR 对比测试”：
+        - 打开 bilibili 页面用于播放测试音频
+        - 使用浏览器内媒体流抓取（不录屏、不录麦）
+        - 将媒体流音频送入当前 ASR Provider（本地/云端均可）
+        """
+        target_url = self._normalize_cloud_test_url(url)
+        active_language = str(language or self._get_active_language() or settings.DEFAULT_REPLY_LANGUAGE)
+        fallback_languages = self._get_voice_fallback_languages(active_language)
+        selected_provider = str(provider or "").strip().lower()
+
+        if not self._cloud_asr_test_prev_provider:
+            self._cloud_asr_test_prev_provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local")
+        if not self._cloud_asr_test_prev_input_mode:
+            self._cloud_asr_test_prev_input_mode = str(getattr(self.voice, "input_mode", "python_asr") or "python_asr")
+        if self._cloud_asr_test_prev_mic_index is None:
+            try:
+                mic_cfg = self.voice.get_preferred_microphone() if hasattr(self.voice, "get_preferred_microphone") else {}
+                self._cloud_asr_test_prev_mic_index = (mic_cfg or {}).get("deviceIndex")
+                self._cloud_asr_test_prev_mic_hint = str((mic_cfg or {}).get("nameHint") or "")
+            except Exception:
+                self._cloud_asr_test_prev_mic_index = None
+                self._cloud_asr_test_prev_mic_hint = ""
+
+        self.cloud_asr_test_enabled = True
+        self.cloud_asr_test_url = target_url
+        self.cloud_asr_test_log.clear()
+
+        if selected_provider:
+            switched = self.set_voice_asr_provider(selected_provider)
+            if not switched:
+                self.cloud_asr_test_enabled = False
+                return {"ok": False, "error": "set_asr_provider_failed", "provider": selected_provider, "url": target_url}
+
+        bilibili_user_data = str((Path(settings.USER_DATA_PATH).expanduser().resolve() / "bilibili_cloud_asr_test"))
+        ready, ready_err = self._ensure_mock_debug_browser(target_url, bilibili_user_data)
+        if not ready:
+            self.cloud_asr_test_enabled = False
+            return {"ok": False, "error": ready_err or "debug_browser_not_ready", "url": target_url}
+
+        opened = self._inject_bilibili_url_into_debug_browser(target_url)
+        if not opened:
+            self.cloud_asr_test_enabled = False
+            return {"ok": False, "error": "bilibili_page_open_failed", "url": target_url}
+
+        try:
+            self.voice.stop()
+        except Exception:
+            pass
+        try:
+            self.voice.input_mode = "tab_audio_asr"
+            if hasattr(self.voice, "_sync_capture_mode"):
+                self.voice._sync_capture_mode()
+        except Exception:
+            pass
+
+        if hasattr(self.voice, "_start_tab_audio_stream_capture"):
+            started = bool(self.voice._start_tab_audio_stream_capture([active_language] + list(fallback_languages or [])))
+        else:
+            started = False
+        if not started:
+            info = self.voice.get_start_failure_info() if hasattr(self.voice, "get_start_failure_info") else {}
+            self.cloud_asr_test_enabled = False
+            return {
+                "ok": False,
+                "error": str((info or {}).get("reason") or "voice_start_failed"),
+                "detail": (info or {}).get("diag"),
+                "url": target_url,
+            }
+
+        self.last_start_error = ""
+        self.last_start_detail = f"cloud_asr_test_ready:{target_url}"
+        logger.info(f"播放器流 ASR 对比测试已启动: url={target_url}, lang={active_language}, provider={getattr(settings, 'VOICE_PYTHON_ASR_PROVIDER', '')}")
+        return {
+            "ok": True,
+            "url": target_url,
+            "provider": str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "")),
+            "mode": "tab_media_stream",
+            "language": active_language,
+            "fallback_languages": fallback_languages,
+        }
+
+    def stop_cloud_asr_bilibili_test(self, restore_previous=True):
+        self.cloud_asr_test_enabled = False
+        try:
+            if hasattr(self.voice, "_stop_tab_audio_stream_capture"):
+                self.voice._stop_tab_audio_stream_capture()
+            else:
+                self.voice.stop()
+        except Exception:
+            pass
+
+        restored_provider = None
+        restored_mode = None
+        if restore_previous:
+            prev_provider = str(self._cloud_asr_test_prev_provider or "").strip().lower()
+            prev_mode = str(self._cloud_asr_test_prev_input_mode or "").strip().lower()
+            if prev_provider:
+                self.set_voice_asr_provider(prev_provider)
+                restored_provider = prev_provider
+            if prev_mode:
+                try:
+                    self.voice.input_mode = prev_mode
+                    if hasattr(self.voice, "_sync_capture_mode"):
+                        self.voice._sync_capture_mode()
+                    restored_mode = prev_mode
+                except Exception:
+                    pass
+
+        self._cloud_asr_test_prev_provider = ""
+        self._cloud_asr_test_prev_input_mode = ""
+        self._cloud_asr_test_prev_mic_index = None
+        self._cloud_asr_test_prev_mic_hint = ""
+        return {
+            "ok": True,
+            "restored_provider": restored_provider,
+            "restored_mode": restored_mode,
+        }
+
+    def poll_cloud_asr_test_transcripts(self, limit=40):
+        if not self.cloud_asr_test_enabled:
+            return []
+        state = self.voice.get_tab_audio_stream_state() if hasattr(self.voice, "get_tab_audio_stream_state") else {}
+        runtime_provider = str((state or {}).get("provider") or getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "unknown") or "unknown")
+        runtime_type = str((state or {}).get("providerType") or "unknown")
+        if hasattr(self.voice, "poll_tab_audio_stream_transcripts"):
+            try:
+                items = self.voice.poll_tab_audio_stream_transcripts() or []
+            except Exception:
+                items = []
+        else:
+            items = []
+
+        for item in items:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            self.cloud_asr_test_log.appendleft(
+                {
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "text": text,
+                    "lang": str(item.get("lang") or ""),
+                    "source": str(item.get("source") or "python_loopback"),
+                    "provider": runtime_provider,
+                    "provider_type": runtime_type,
+                }
+            )
+
+        try:
+            n = max(1, int(limit or 40))
+        except Exception:
+            n = 40
+        return list(self.cloud_asr_test_log)[:n]
+
+    def get_cloud_asr_test_status(self):
+        if hasattr(self.voice, "get_tab_audio_stream_state"):
+            state = self.voice.get_tab_audio_stream_state() or {}
+        else:
+            state = self.voice.get_state() if hasattr(self.voice, "get_state") else {}
+        return {
+            "enabled": bool(self.cloud_asr_test_enabled),
+            "url": self.cloud_asr_test_url,
+            "running": bool((state or {}).get("running", False)),
+            "error": str((state or {}).get("error") or ""),
+            "capture_mode": "tab_media_stream",
+            "device_name": "browser_media_stream",
+            "provider": str((state or {}).get("provider") or "dashscope_funasr"),
+            "provider_type": str((state or {}).get("providerType") or "cloud"),
+            "provider_error": str((state or {}).get("providerError") or ""),
+            "last_text": str((state or {}).get("lastText") or ""),
+        }
 
     def connect_mock_shop(self, view=None):
         """

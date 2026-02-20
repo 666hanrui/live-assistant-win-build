@@ -126,6 +126,14 @@ if 'full_regression_result' not in st.session_state:
     st.session_state.full_regression_result = None
 if "show_user_guide" not in st.session_state:
     st.session_state.show_user_guide = False
+if "cloud_asr_bili_test_enabled_ui" not in st.session_state:
+    st.session_state.cloud_asr_bili_test_enabled_ui = False
+if "cloud_asr_bili_test_prev_ui" not in st.session_state:
+    st.session_state.cloud_asr_bili_test_prev_ui = False
+if "cloud_asr_bili_test_url_ui" not in st.session_state:
+    st.session_state.cloud_asr_bili_test_url_ui = "https://www.bilibili.com/"
+if "cloud_asr_bili_test_provider_ui" not in st.session_state:
+    st.session_state.cloud_asr_bili_test_provider_ui = "follow_current"
 
 # 兼容旧版会话对象（旧对象可能没有 get_unified_language 方法）
 def _get_unified_language(assistant):
@@ -208,7 +216,17 @@ def _is_local_voice_mode(mode):
         "loopback_asr",
         "system_audio_asr",
         "tab_audio_asr",
+        "tab_media_asr",
         "loopback",
+    }
+
+
+def _is_tab_media_voice_mode(mode):
+    value = str(mode or "").strip().lower()
+    return value in {
+        "system_audio_asr",
+        "tab_audio_asr",
+        "tab_media_asr",
     }
 
 
@@ -217,8 +235,6 @@ def _is_loopback_voice_mode(mode):
     return value in {
         "system_loopback_asr",
         "loopback_asr",
-        "system_audio_asr",
-        "tab_audio_asr",
         "loopback",
     }
 
@@ -623,6 +639,28 @@ def _get_mock_shop_url(assistant):
         pass
     mock_file = (_app_base_dir() / "stress" / "mock_shop" / "mock_tiktok_shop.html").resolve()
     return f"{mock_file.as_uri()}?mock_tiktok_shop=1&view=dashboard_live"
+
+
+def _get_cloud_asr_test_status(assistant):
+    try:
+        if hasattr(assistant, "get_cloud_asr_test_status"):
+            data = assistant.get_cloud_asr_test_status()
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {"enabled": False}
+
+
+def _poll_cloud_asr_test_transcripts(assistant, limit=20):
+    try:
+        if hasattr(assistant, "poll_cloud_asr_test_transcripts"):
+            data = assistant.poll_cloud_asr_test_transcripts(limit=limit)
+            if isinstance(data, list):
+                return data
+    except Exception:
+        pass
+    return []
 
 
 def _short_text(text, limit=220):
@@ -1111,42 +1149,47 @@ def _run_system_self_check(assistant):
 
     # 3.1) 语音输入链路诊断（尤其用于 VM 场景）
     if _is_local_voice_mode(voice_mode):
-        devices = _list_python_mic_devices(assistant)
-        device_count = len(devices)
-        device_preview = ",".join(f"{d.get('index')}:{d.get('name')}" for d in devices[:6]) if devices else "none"
-        vm_audio_hint = (
-            "若在 VMware/远程桌面：请在虚拟机设置启用声卡并透传麦克风，Windows 隐私里允许桌面应用访问麦克风。"
-            if os.name == "nt"
-            else "若在虚拟机：请确认宿主机麦克风已透传到来宾系统。"
-        )
-        devices_ok = device_count > 0
-        devices_detail = f"count={device_count}, devices={device_preview}"
-        if not devices_ok:
-            devices_detail += f" | hint={vm_audio_hint}"
-        add("Audio Input Devices", devices_ok, devices_detail)
-
-        perm = _request_mic_permission(assistant)
-        perm_status = str((perm or {}).get("status") or "").strip().lower() or "unknown"
-        perm_ok = perm_status == "granted"
-        perm_detail = f"status={perm_status}, err={(perm or {}).get('error') or 'none'}"
-        if not perm_ok:
-            perm_detail += f" | hint={vm_audio_hint}"
-        add("Voice Permission", perm_ok, perm_detail)
-
-        if perm_ok:
-            probe = _probe_python_mic(assistant, duration_seconds=2.0)
-            probe_ok = bool((probe or {}).get("ok"))
-            probe_detail = (
-                f"ok={probe_ok}, rms={(probe or {}).get('rms')}, "
-                f"text={str((probe or {}).get('text') or '')[:48]}, err={(probe or {}).get('error') or 'none'}"
+        capture_mode = str(voice_state.get("captureMode") or "").strip().lower()
+        source = str(voice_state.get("source") or "").strip().lower()
+        tab_mode = _is_tab_media_voice_mode(voice_mode) or capture_mode == "tab_media_stream"
+        if tab_mode:
+            tab_ok = capture_mode == "tab_media_stream" and source == "tab_audio_stream"
+            add("Tab Stream Route", tab_ok, f"mode={voice_mode}, capture={capture_mode or '-'}, source={source or '-'}")
+        else:
+            devices = _list_python_mic_devices(assistant)
+            device_count = len(devices)
+            device_preview = ",".join(f"{d.get('index')}:{d.get('name')}" for d in devices[:6]) if devices else "none"
+            vm_audio_hint = (
+                "若在 VMware/远程桌面：请在虚拟机设置启用声卡并透传麦克风，Windows 隐私里允许桌面应用访问麦克风。"
+                if os.name == "nt"
+                else "若在虚拟机：请确认宿主机麦克风已透传到来宾系统。"
             )
-            add("Voice Probe", probe_ok, probe_detail)
+            devices_ok = device_count > 0
+            devices_detail = f"count={device_count}, devices={device_preview}"
+            if not devices_ok:
+                devices_detail += f" | hint={vm_audio_hint}"
+            add("Audio Input Devices", devices_ok, devices_detail)
 
-        if _is_loopback_voice_mode(voice_mode) or str(voice_state.get("captureMode") or "").strip().lower() == "loopback":
-            capture_mode = str(voice_state.get("captureMode") or "").strip().lower()
-            source = str(voice_state.get("source") or "").strip().lower()
-            loopback_ok = capture_mode == "loopback" and source == "python_loopback"
-            add("Loopback Route", loopback_ok, f"mode={voice_mode}, capture={capture_mode or '-'}, source={source or '-'}")
+            perm = _request_mic_permission(assistant)
+            perm_status = str((perm or {}).get("status") or "").strip().lower() or "unknown"
+            perm_ok = perm_status == "granted"
+            perm_detail = f"status={perm_status}, err={(perm or {}).get('error') or 'none'}"
+            if not perm_ok:
+                perm_detail += f" | hint={vm_audio_hint}"
+            add("Voice Permission", perm_ok, perm_detail)
+
+            if perm_ok:
+                probe = _probe_python_mic(assistant, duration_seconds=2.0)
+                probe_ok = bool((probe or {}).get("ok"))
+                probe_detail = (
+                    f"ok={probe_ok}, rms={(probe or {}).get('rms')}, "
+                    f"text={str((probe or {}).get('text') or '')[:48]}, err={(probe or {}).get('error') or 'none'}"
+                )
+                add("Voice Probe", probe_ok, probe_detail)
+
+            if _is_loopback_voice_mode(voice_mode) or capture_mode == "loopback":
+                loopback_ok = capture_mode == "loopback" and source == "python_loopback"
+                add("Loopback Route", loopback_ok, f"mode={voice_mode}, capture={capture_mode or '-'}, source={source or '-'}")
     else:
         perm_state = _get_mic_permission_state(assistant)
         perm_status = str((perm_state or {}).get("status") or "").strip().lower() or "unknown"
@@ -1407,12 +1450,18 @@ def render_top_live_status_fragment():
     )
     live_voice_mode = _get_voice_mode(assistant)
     live_is_python_voice_mode = _is_local_voice_mode(live_voice_mode)
+    live_is_tab_media_voice_mode = _is_tab_media_voice_mode(live_voice_mode)
     live_is_loopback_voice_mode = _is_loopback_voice_mode(live_voice_mode)
-    live_effective_loopback = live_is_loopback_voice_mode or str(live_snapshot.get("voice_capture_mode") or "").strip().lower() == "loopback"
+    live_effective_loopback = (
+        (not live_is_tab_media_voice_mode)
+        and (live_is_loopback_voice_mode or str(live_snapshot.get("voice_capture_mode") or "").strip().lower() == "loopback")
+    )
     live_voice_diag = _get_voice_diag(assistant)
     live_browser_name = _infer_browser_name(voice_diag=live_voice_diag, launch_cmd=live_launch.get("primary", ""))
     if live_is_python_voice_mode:
-        if live_effective_loopback:
+        if live_is_tab_media_voice_mode:
+            live_mic_guide = "当前为播放器内部音频流识别（tab_media_stream）：不录屏、不录麦，直接识别页面播放器音频。"
+        elif live_effective_loopback:
             live_mic_guide = "当前为系统回采 ASR 模式：请将浏览器声音路由到回采输入设备（如 BlackHole/Stereo Mix/VB-CABLE）。"
         else:
             live_mic_guide = "当前为 Python 本地 ASR 模式：仅需系统麦克风权限，不依赖 TikTok 网页站点权限。"
@@ -1444,6 +1493,9 @@ def render_top_live_status_fragment():
         f"| ASR运行: {live_snapshot.get('voice_runtime_provider') or '-'}({live_snapshot.get('voice_runtime_provider_type') or 'unknown'}) "
         f"| 链路: {runtime_chain} | 识别语言链: {lang_chain}"
     )
+    runtime_err = str(live_snapshot.get("voice_runtime_error") or "").strip()
+    if runtime_err:
+        st.warning(f"ASR运行错误: {runtime_err}")
     st.caption(
         f"动作执行模式: {live_snapshot.get('operation_mode') or 'dom'} "
         f"| OCR可用: {'yes' if live_snapshot.get('operation_ocr_available') else 'no'} "
@@ -1529,6 +1581,27 @@ def render_top_live_status_fragment():
         f"| note={latest.get('note') or '-'} "
         f"| command={latest.get('command') or '-'}"
     )
+    cloud_test_status = _get_cloud_asr_test_status(assistant)
+    if cloud_test_status.get("enabled"):
+        st.markdown("**🎧 播放器流ASR(B站)实时转写对比**")
+        st.caption(
+            f"running={cloud_test_status.get('running')} "
+            f"| provider={cloud_test_status.get('provider') or '-'}({cloud_test_status.get('provider_type') or 'unknown'}) "
+            f"| capture={cloud_test_status.get('capture_mode') or '-'} "
+            f"| device={cloud_test_status.get('device_name') or '-'} "
+            f"| err={cloud_test_status.get('error') or 'none'} "
+            f"| asr_err={cloud_test_status.get('provider_error') or 'none'}"
+        )
+        test_rows = _poll_cloud_asr_test_transcripts(assistant, limit=8)
+        if test_rows:
+            text_lines = []
+            for row in test_rows:
+                text_lines.append(
+                    f"[{row.get('time')}] ({row.get('lang') or '-'}) {row.get('text') or ''}"
+                )
+            st.code("\n".join(text_lines), language="text")
+        else:
+            st.caption("暂无转写结果：请在 Bilibili 页面播放音频后等待 1-2 秒。")
 
     if not live_snapshot["browser_connected"]:
         if live_snapshot.get("web_info_mode") == "screen_ocr":
@@ -1550,6 +1623,9 @@ def render_top_live_status_fragment():
 
     if live_snapshot["voice_enabled"] and live_snapshot["voice_error"] not in ("none", ""):
         st.warning(f"语音通道异常：{live_snapshot['voice_error']}")
+        err = str(live_snapshot.get("voice_error") or "")
+        if "tab_audio_js_no_result" in err or "browser_page_context_unavailable" in err:
+            st.caption("未拿到可执行JS的浏览器页面上下文。请确认 Chrome 已用远程调试端口启动，并且当前会话已连接到 TikTok 直播标签页。")
         st.caption(live_mic_guide)
     elif live_snapshot["voice_enabled"] and live_snapshot["voice_running"] and not live_snapshot.get("voice_last_result_at"):
         st.info("语音监听已运行，但尚未捕获到有效语音文本。请靠近麦克风说出完整口令再观察“最近识别”。")
@@ -1627,12 +1703,18 @@ launch_info_mock = build_chrome_debug_commands(
 mic_perm = _get_mic_permission_state(st.session_state.assistant)
 voice_mode = _get_voice_mode(st.session_state.assistant)
 is_python_voice_mode = _is_local_voice_mode(voice_mode)
+is_tab_media_voice_mode = _is_tab_media_voice_mode(voice_mode)
 is_loopback_voice_mode = _is_loopback_voice_mode(voice_mode)
-effective_loopback_voice_mode = is_loopback_voice_mode or str(snapshot.get("voice_capture_mode") or "").strip().lower() == "loopback"
+effective_loopback_voice_mode = (
+    (not is_tab_media_voice_mode)
+    and (is_loopback_voice_mode or str(snapshot.get("voice_capture_mode") or "").strip().lower() == "loopback")
+)
 voice_diag = _get_voice_diag(st.session_state.assistant)
 browser_name = _infer_browser_name(voice_diag=voice_diag, launch_cmd=launch_info.get("primary", ""))
 if is_python_voice_mode:
-    if effective_loopback_voice_mode:
+    if is_tab_media_voice_mode:
+        mic_guide = "当前使用播放器内部音频流识别（tab_media_stream），不依赖系统麦克风/回采设备。"
+    elif effective_loopback_voice_mode:
         mic_guide = "当前为系统回采 ASR 模式：请将浏览器播放音频路由到回采输入设备。"
     else:
         mic_guide = "当前为 Python 本地 ASR 模式：仅需系统麦克风权限，不依赖 TikTok 网页站点权限。"
@@ -2014,6 +2096,85 @@ with st.sidebar:
                     st.caption(f"诊断信息：{detail}")
                 st.code(launch_info_mock["primary"], language="bash")
 
+        st.markdown("---")
+        st.caption("🎧 播放器流ASR测试（Bilibili）")
+        st.text_input(
+            "B站测试URL",
+            key="cloud_asr_bili_test_url_ui",
+            help="开启开关后会打开该页面；请在页面中播放视频/直播，系统将直接读取播放器内部音频流并做ASR。",
+        )
+        st.selectbox(
+            "测试ASR Provider",
+            options=["follow_current", "whisper_local", "dashscope_funasr", "hybrid_local_cloud", "auto", "google", "sphinx"],
+            key="cloud_asr_bili_test_provider_ui",
+            format_func=lambda x: "follow_current（跟随当前配置）" if x == "follow_current" else x,
+            help="本地/云端都走同一条播放器抓流链路，仅切换识别模型。",
+        )
+        st.toggle(
+            "开启播放器流ASR测试开关",
+            key="cloud_asr_bili_test_enabled_ui",
+            help="走浏览器内媒体流识别（不录屏、不录麦），用于本地/云端 ASR 对比测试。",
+        )
+        current_cloud_test = bool(st.session_state.cloud_asr_bili_test_enabled_ui)
+        prev_cloud_test = bool(st.session_state.cloud_asr_bili_test_prev_ui)
+        if current_cloud_test != prev_cloud_test:
+            need_rerun = False
+            if current_cloud_test:
+                if hasattr(st.session_state.assistant, "start_cloud_asr_bilibili_test"):
+                    selected_provider = st.session_state.cloud_asr_bili_test_provider_ui
+                    result = st.session_state.assistant.start_cloud_asr_bilibili_test(
+                        url=st.session_state.cloud_asr_bili_test_url_ui,
+                        provider=(None if selected_provider == "follow_current" else selected_provider),
+                    )
+                else:
+                    result = {"ok": False, "error": "assistant_method_missing"}
+                if result.get("ok"):
+                    st.success("播放器流ASR测试已开启：Bilibili 页面已打开，开始播放音频即可。")
+                    st.session_state.cloud_asr_bili_test_prev_ui = True
+                    need_rerun = True
+                else:
+                    st.session_state.cloud_asr_bili_test_enabled_ui = False
+                    st.session_state.cloud_asr_bili_test_prev_ui = False
+                    err = str(result.get("error") or "unknown")
+                    if any(k in err for k in ["capture_stream_unavailable", "media_element_not_found", "media_stream_no_audio_track"]):
+                        st.error("开启失败：未能从当前页面播放器抓到音频流。")
+                        st.caption("请确认 Bilibili 页面正在播放视频/直播（不是静止页），然后点击“重新打开B站测试页”再试。")
+                    else:
+                        st.error(f"开启播放器流ASR测试失败：{err}")
+            else:
+                if hasattr(st.session_state.assistant, "stop_cloud_asr_bilibili_test"):
+                    result = st.session_state.assistant.stop_cloud_asr_bilibili_test(restore_previous=True)
+                else:
+                    result = {"ok": True}
+                st.session_state.cloud_asr_bili_test_prev_ui = False
+                if result.get("ok"):
+                    st.info("播放器流ASR测试已关闭。")
+                    need_rerun = True
+                else:
+                    st.error(f"关闭播放器流ASR测试失败：{result.get('error') or 'unknown'}")
+            if need_rerun:
+                st.rerun()
+
+        if st.session_state.cloud_asr_bili_test_enabled_ui:
+            if st.button("🔄 重新打开B站测试页", key="btn_reopen_cloud_asr_bili", use_container_width=True):
+                if hasattr(st.session_state.assistant, "start_cloud_asr_bilibili_test"):
+                    selected_provider = st.session_state.cloud_asr_bili_test_provider_ui
+                    result = st.session_state.assistant.start_cloud_asr_bilibili_test(
+                        url=st.session_state.cloud_asr_bili_test_url_ui,
+                        provider=(None if selected_provider == "follow_current" else selected_provider),
+                    )
+                else:
+                    result = {"ok": False, "error": "assistant_method_missing"}
+                if result.get("ok"):
+                    st.success("已重新打开B站测试页。")
+                else:
+                    err = str(result.get("error") or "unknown")
+                    if any(k in err for k in ["capture_stream_unavailable", "media_element_not_found", "media_stream_no_audio_track"]):
+                        st.error("重开失败：页面播放器音频流不可用。")
+                        st.caption("请先在 Bilibili 页面点击播放，再重试。")
+                    else:
+                        st.error(f"重开失败：{err}")
+
         if st.button("🧪 运行系统自检", key="btn_self_test_sidebar", use_container_width=True):
             with st.spinner("正在执行自检..."):
                 st.session_state.self_test_results = _run_system_self_check(st.session_state.assistant)
@@ -2029,7 +2190,10 @@ with st.sidebar:
             if status == "requesting":
                 st.info("已触发权限申请，请在浏览器弹窗中点击允许。")
             elif status == "granted":
-                st.success("麦克风权限已允许。")
+                if is_tab_media_voice_mode:
+                    st.success("当前链路为播放器流识别：无需麦克风权限，页面播放器音频即可识别。")
+                else:
+                    st.success("麦克风权限已允许。")
             elif status == "wrong_page":
                 st.error("当前连接页面不是 TikTok 直播间页，请先切到 `https://www.tiktok.com/@xxx/live` 后再申请。")
                 page_title = result.get("page_title") or ""
@@ -2093,10 +2257,38 @@ with st.sidebar:
 
         if is_python_voice_mode:
             st.markdown("---")
-            if effective_loopback_voice_mode:
+            if is_tab_media_voice_mode:
+                st.caption("🎛️ 播放器内音频流调试（Tab Media ASR）")
+            elif effective_loopback_voice_mode:
                 st.caption("🎛️ 本地音频回采调试（Loopback ASR）")
             else:
                 st.caption("🎛️ 本地麦克风调试（Python ASR）")
+
+            mode_options = ["tab_audio_asr", "python_asr", "system_loopback_asr", "web_speech"]
+            mode_labels = {
+                "tab_audio_asr": "tab_audio_asr（推荐：播放器内部音频流）",
+                "python_asr": "python_asr（本地麦克风）",
+                "system_loopback_asr": "system_loopback_asr（系统回采设备）",
+                "web_speech": "web_speech（浏览器WebSpeech）",
+            }
+            if "voice_input_mode_ui" not in st.session_state:
+                st.session_state.voice_input_mode_ui = voice_mode if voice_mode in mode_options else "tab_audio_asr"
+            if st.session_state.voice_input_mode_ui not in mode_options:
+                st.session_state.voice_input_mode_ui = "tab_audio_asr"
+            st.selectbox(
+                "语音输入链路",
+                options=mode_options,
+                format_func=lambda x: mode_labels.get(x, x),
+                key="voice_input_mode_ui",
+                help="tab_audio_asr：直接读取页面播放器音频流（不录屏、不录麦）。",
+            )
+            if st.button("应用语音输入链路", key="btn_apply_voice_input_mode", use_container_width=True):
+                if hasattr(st.session_state.assistant, "set_voice_input_mode") and st.session_state.assistant.set_voice_input_mode(st.session_state.voice_input_mode_ui):
+                    st.success(f"语音输入链路已切换为 {st.session_state.voice_input_mode_ui}")
+                    st.rerun()
+                else:
+                    st.error("切换语音输入链路失败")
+
             provider_options = ["whisper_local", "dashscope_funasr", "hybrid_local_cloud", "auto", "google", "sphinx"]
             if "voice_asr_provider_ui" not in st.session_state:
                 st.session_state.voice_asr_provider_ui = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local")
@@ -2118,10 +2310,10 @@ with st.sidebar:
                 "ASR Provider",
                 options=provider_options,
                 key="voice_asr_provider_ui",
-                help="whisper_local: 本地识别；dashscope_funasr: 阿里云识别（可配置仅云上）；hybrid_local_cloud: 本地+阿里云混合链路；auto: 自动本地链路；google: 在线识别；sphinx: 离线识别(偏英文)。"
+                help="本地/云端 provider 都可配合 tab_audio_asr 使用（同样走播放器内部音频流）。"
             )
             dashscope_force_loopback = bool(getattr(settings, "VOICE_DASHSCOPE_FORCE_LOOPBACK", True))
-            if st.session_state.voice_asr_provider_ui == "dashscope_funasr" and dashscope_force_loopback:
+            if st.session_state.voice_asr_provider_ui == "dashscope_funasr" and dashscope_force_loopback and (not is_tab_media_voice_mode):
                 st.caption("已启用“仅云上 ASR”采集策略：使用系统回采（loopback），不走本地实体麦克风。")
             else:
                 st.caption("阿里云 Key 可在左侧「🎙️ 阿里云 ASR API 配置」里配置；云端不会再被自动当作备用链路注入。")
@@ -2133,7 +2325,9 @@ with st.sidebar:
                     st.error("切换 ASR Provider 失败")
 
             devices = _list_python_mic_devices(st.session_state.assistant)
-            if not devices:
+            if is_tab_media_voice_mode:
+                st.caption("当前链路不需要本地输入设备，识别源来自页面播放器内部音频流。")
+            elif not devices:
                 if effective_loopback_voice_mode:
                     st.warning("未检测到可用回采输入设备。请先确认 BlackHole/Stereo Mix/VB-CABLE 等系统回采设备可用。")
                 else:
@@ -2262,9 +2456,10 @@ with st.sidebar:
             err = voice_state.get("error") or "none"
             runtime_provider = voice_state.get("runtimeProvider") or voice_state.get("provider") or "-"
             runtime_type = voice_state.get("runtimeProviderType") or "unknown"
+            runtime_error = voice_state.get("runtimeProviderError") or "none"
             st.caption(
                 f"Voice State: {running} | err={err} | capture={voice_state.get('captureMode') or '-'} "
-                f"| asr={runtime_provider}({runtime_type})"
+                f"| asr={runtime_provider}({runtime_type}) | asr_err={runtime_error}"
             )
             if voice_state.get("deviceIndex") is not None:
                 st.caption(f"Voice Device(Runtime): {voice_state.get('deviceIndex')} | {voice_state.get('deviceName') or '-'}")

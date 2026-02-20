@@ -22,7 +22,7 @@ datas += add_path(".env.example")
 datas += add_path("README.md")
 datas += add_path("文档.txt")
 
-for folder in ("docs", "assets", "data", "app_config", "models"):
+for folder in ("docs", "assets", "data", "app_config", "models", "scripts", ".streamlit"):
     datas += add_path(folder, folder)
 
 datas += collect_data_files("streamlit")
@@ -35,11 +35,12 @@ hiddenimports = [
     "dashboard",
     "main",
     "app_config.settings",
+    "mss",
     "streamlit.web.cli",
     "streamlit.runtime",
 ]
 
-for pkg in ("streamlit", "altair", "pydeck", "pygments", "tiktoken", "watchdog"):
+for pkg in ("streamlit", "altair", "pydeck", "pygments", "tiktoken", "watchdog", "mss"):
     try:
         pkg_datas, pkg_bins, pkg_hidden = collect_all(pkg)
         datas += pkg_datas
@@ -61,6 +62,7 @@ for pkg in (
     "dashscope",
     "DrissionPage",
     "openpyxl",
+    "mss",
 ):
     try:
         hiddenimports.extend(collect_submodules(pkg))

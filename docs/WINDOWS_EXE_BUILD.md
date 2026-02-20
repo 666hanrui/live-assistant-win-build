@@ -47,9 +47,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 - `AI_Live_Assistant.exe`
 或
 - `启动助手.bat`
+或（无控制台窗口）
+- `run_assistant_silent.vbs`
 
 ## 首次上线配置
-1. 编辑 `dist/AI_Live_Assistant/.env`
+1. 编辑运行时 `.env`（程序会在首次启动时自动生成）
+   - 优先：`%LOCALAPPDATA%\AI_Live_Assistant\.env`（当 EXE 目录不可写时）
+   - 便携目录可写时：`dist/AI_Live_Assistant/.env`
 2. 至少填写：
    - `LLM_API_KEY`
    - `LLM_BASE_URL`
@@ -74,7 +78,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 - 若语音不可用，先检查：
   1) Windows 隐私设置中的麦克风/桌面应用音频权限
   2) 是否安装并正确路由回采设备（Stereo Mix / VB-CABLE / BlackHole 等）
-  3) `dist/AI_Live_Assistant/.env` 中 `VOICE_COMMAND_ENABLED=true`
+  3) 运行时 `.env` 中 `VOICE_COMMAND_ENABLED=true`
 
 ## 常见问题
 1. `unsupported / missing_speech_recognition`
@@ -87,7 +91,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 
 3. 启动后访问不到控制台
    - 检查端口占用：`8501`
-   - EXE 运行目录下没有 `scripts/dashboard_service.py`，请先关闭已运行的 `AI_Live_Assistant.exe` 后重启。
+   - 若双击无反应，先运行 `run_assistant_debug.bat` 查看日志。
    - 若是源码模式运行，再使用：
      - `python scripts/dashboard_service.py restart --force-port`
 

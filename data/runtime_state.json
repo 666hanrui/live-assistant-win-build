@@ -5,6 +5,7 @@
   "reply_enabled": true,
   "proactive_enabled": true,
   "voice_command_enabled": true,
+  "voice_input_mode": "tab_audio_asr",
   "operation_execution_mode": "ocr_vision",
   "web_info_source_mode": "screen_ocr",
   "human_like_settings": {

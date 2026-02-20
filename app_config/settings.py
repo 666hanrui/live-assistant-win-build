@@ -285,6 +285,7 @@ SCREEN_CAPTURE_MONITOR_INDEX = int(os.getenv("SCREEN_CAPTURE_MONITOR_INDEX", "1"
 # 模式：
 # - python_asr: 本地 Python 麦克风采集 + ASR（默认，依赖系统麦克风权限，不依赖 TikTok 网页权限）
 # - system_loopback_asr: 本机系统回采（浏览器播放音频）+ ASR（需配置回采设备，如 BlackHole/Stereo Mix/VB-CABLE）
+# - tab_audio_asr / system_audio_asr: 直接抓取当前页面播放器音频流（不录屏、不录麦）
 # - web_speech: 浏览器 Web Speech API（依赖 TikTok 网页权限）
 VOICE_COMMAND_INPUT_MODE = os.getenv("VOICE_COMMAND_INPUT_MODE", "python_asr").strip().lower()
 VOICE_COMMAND_ENABLED = os.getenv("VOICE_COMMAND_ENABLED", "false").lower() in ("1", "true", "yes", "on")
@@ -324,9 +325,19 @@ VOICE_DASHSCOPE_BASE_WEBSOCKET_API_URL = os.getenv("VOICE_DASHSCOPE_BASE_WEBSOCK
 VOICE_DASHSCOPE_LANGUAGE_HINTS = _split_csv_env("VOICE_DASHSCOPE_LANGUAGE_HINTS", "")
 VOICE_DASHSCOPE_ENABLE_PUNCTUATION = os.getenv("VOICE_DASHSCOPE_ENABLE_PUNCTUATION", "true").lower() in ("1", "true", "yes", "on")
 VOICE_DASHSCOPE_DISABLE_ITN = os.getenv("VOICE_DASHSCOPE_DISABLE_ITN", "false").lower() in ("1", "true", "yes", "on")
+VOICE_TAB_AUDIO_CHUNK_SECONDS = float(os.getenv("VOICE_TAB_AUDIO_CHUNK_SECONDS", "4.8"))
+VOICE_TAB_AUDIO_MAX_CHUNK_SECONDS = float(os.getenv("VOICE_TAB_AUDIO_MAX_CHUNK_SECONDS", "9.0"))
+VOICE_TAB_AUDIO_CHUNK_OVERLAP_SECONDS = float(os.getenv("VOICE_TAB_AUDIO_CHUNK_OVERLAP_SECONDS", "0.6"))
+VOICE_TAB_AUDIO_EMIT_IDLE_SECONDS = float(os.getenv("VOICE_TAB_AUDIO_EMIT_IDLE_SECONDS", "1.2"))
+VOICE_TAB_AUDIO_EMIT_MAX_WAIT_SECONDS = float(os.getenv("VOICE_TAB_AUDIO_EMIT_MAX_WAIT_SECONDS", "9.0"))
+VOICE_TAB_AUDIO_EMIT_MAX_CHARS = int(os.getenv("VOICE_TAB_AUDIO_EMIT_MAX_CHARS", "96"))
+VOICE_TAB_AUDIO_SILENCE_RMS = int(os.getenv("VOICE_TAB_AUDIO_SILENCE_RMS", "110"))
+VOICE_TAB_AUDIO_FILTER_LOW_QUALITY = os.getenv("VOICE_TAB_AUDIO_FILTER_LOW_QUALITY", "false").lower() in ("1", "true", "yes", "on")
+VOICE_TAB_AUDIO_WHISPER_NO_SPEECH_THRESHOLD = float(os.getenv("VOICE_TAB_AUDIO_WHISPER_NO_SPEECH_THRESHOLD", "0.35"))
 VOICE_WHISPER_MODEL = os.getenv("VOICE_WHISPER_MODEL", "tiny").strip()
 VOICE_WHISPER_DOWNLOAD_ROOT = os.getenv("VOICE_WHISPER_DOWNLOAD_ROOT", "data/whisper_cache").strip()
 VOICE_WHISPER_MAX_LANGS = int(os.getenv("VOICE_WHISPER_MAX_LANGS", "2"))
+VOICE_WHISPER_NO_SPEECH_THRESHOLD = float(os.getenv("VOICE_WHISPER_NO_SPEECH_THRESHOLD", "0.50"))
 VOICE_COMMAND_WAKE_WORDS = _split_csv_lower_env(
     "VOICE_COMMAND_WAKE_WORDS",
     "助播,主播助手,assistant,cohost,co-host,liveassistant,live assistant,streamassistant,stream assistant"

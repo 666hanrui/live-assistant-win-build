@@ -566,10 +566,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 
 - `dist/AI_Live_Assistant/AI_Live_Assistant.exe`
 - `dist/AI_Live_Assistant/启动助手.bat`
+- `dist/AI_Live_Assistant/run_assistant_silent.vbs`（无控制台窗口）
 
 打包脚本会优先复制根目录 `.env`（若不存在则复制 `.env.example`），并按配置自动带入模型目录。
 同时会在发布包内 `.env` 缺失时补齐语音回采默认项（`VOICE_COMMAND_INPUT_MODE=system_loopback_asr` 等），并补齐 FunASR 备用通道基础项（`VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK`/`VOICE_DASHSCOPE_MODEL`/`VOICE_DASHSCOPE_SAMPLE_RATE`）。
-首次上线需确认：`dist/AI_Live_Assistant/.env`
+首次上线需确认运行时 `.env`：
+- EXE 目录可写时：`dist/AI_Live_Assistant/.env`
+- EXE 目录不可写时：`%LOCALAPPDATA%\AI_Live_Assistant\.env`
 
 详细见：`docs/WINDOWS_EXE_BUILD.md`
 

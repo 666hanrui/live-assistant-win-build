@@ -8,6 +8,7 @@ import time
 import webbrowser
 import importlib.util
 import importlib
+import shutil
 import traceback
 from pathlib import Path
 
@@ -31,10 +32,42 @@ def _is_writable_dir(path: Path) -> bool:
 
 def _runtime_root() -> Path:
     candidates = []
-    if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).resolve().parent)
-    candidates.append(Path.cwd())
-    candidates.append(Path.home() / "AI_Live_Assistant")
+    seen = set()
+    frozen = bool(getattr(sys, "frozen", False))
+
+    def _push(candidate: Path | str) -> None:
+        try:
+            path = Path(candidate).expanduser()
+        except Exception:
+            return
+        key = str(path).strip().lower()
+        if (not key) or (key in seen):
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    override = os.getenv("LIVE_ASSISTANT_RUNTIME_ROOT", "").strip()
+    if override:
+        _push(override)
+
+    if frozen:
+        _push(Path(sys.executable).resolve().parent)
+
+    if frozen and os.name == "nt":
+        local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            _push(Path(local_app_data) / "AI_Live_Assistant")
+        app_data = os.getenv("APPDATA", "").strip()
+        if app_data:
+            _push(Path(app_data) / "AI_Live_Assistant")
+
+    if frozen:
+        _push(Path.home() / "AI_Live_Assistant")
+        _push(Path.cwd())
+    else:
+        _push(Path.cwd())
+        _push(Path.home() / "AI_Live_Assistant")
+
     for path in candidates:
         if _is_writable_dir(path):
             return path
@@ -135,6 +168,107 @@ def _is_truthy(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _bootstrap_windows_runtime(runtime_root: Path) -> None:
+    if os.name != "nt":
+        return
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        try:
+            kernel32.SetConsoleOutputCP(65001)
+            kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    dpi_mode = "none"
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        # Per-monitor v2 DPI awareness（Windows 10+）可以减小高分屏坐标偏移。
+        if hasattr(user32, "SetProcessDpiAwarenessContext"):
+            if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+                dpi_mode = "per_monitor_v2"
+        if dpi_mode == "none":
+            try:
+                shcore = ctypes.windll.shcore
+                rc = int(shcore.SetProcessDpiAwareness(2))
+                if rc in (0, 5):
+                    dpi_mode = "per_monitor"
+            except Exception:
+                pass
+        if dpi_mode == "none":
+            try:
+                if user32.SetProcessDPIAware():
+                    dpi_mode = "system"
+            except Exception:
+                pass
+    except Exception:
+        pass
+    _append_boot_log(runtime_root, f"windows_dpi_awareness={dpi_mode}")
+
+
+def _copy_if_missing(src: Path, dst: Path) -> bool:
+    if not src.exists() or not src.is_file() or dst.exists():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return True
+
+
+def _bootstrap_runtime_env(bundle_root: Path, runtime_root: Path) -> None:
+    target_env = runtime_root / ".env"
+    target_example = runtime_root / ".env.example"
+    env_hint = os.getenv("LIVE_ASSISTANT_ENV_TEMPLATE", "").strip()
+
+    source_envs = []
+    source_examples = []
+    if env_hint:
+        source_envs.append(Path(env_hint).expanduser())
+    exe_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else bundle_root
+    source_envs.extend(
+        [
+            bundle_root / ".env",
+            exe_dir / ".env",
+            bundle_root.parent / ".env",
+        ]
+    )
+    source_examples.extend(
+        [
+            bundle_root / ".env.example",
+            exe_dir / ".env.example",
+            bundle_root.parent / ".env.example",
+        ]
+    )
+
+    if not target_env.exists():
+        seeded = False
+        for src in source_envs + source_examples:
+            try:
+                if _copy_if_missing(src, target_env):
+                    _append_boot_log(runtime_root, f"seed_runtime_env_from={src}")
+                    seeded = True
+                    break
+            except Exception as e:
+                _append_boot_log(runtime_root, f"seed_runtime_env_skip={src}: {e}")
+        if not seeded:
+            target_env.write_text("", encoding="utf-8")
+            _append_boot_log(runtime_root, "seed_runtime_env_from=empty_template")
+
+    if not target_example.exists():
+        for src in source_examples:
+            try:
+                if _copy_if_missing(src, target_example):
+                    _append_boot_log(runtime_root, f"seed_runtime_env_example_from={src}")
+                    break
+            except Exception:
+                continue
+
+
 def _inject_bundle_site_packages(bundle_root: Path) -> list[str]:
     injected = []
     if not getattr(sys, "frozen", False):
@@ -210,6 +344,8 @@ def main() -> int:
     bundle_root = _bundle_root()
     runtime_root = _runtime_root()
     _ensure_runtime_dirs(runtime_root)
+    _bootstrap_windows_runtime(runtime_root)
+    _bootstrap_runtime_env(bundle_root=bundle_root, runtime_root=runtime_root)
     os.chdir(runtime_root)
     _append_boot_log(runtime_root, f"boot: bundle_root={bundle_root}")
     _append_boot_log(runtime_root, f"boot: runtime_root={runtime_root}")
@@ -219,6 +355,7 @@ def main() -> int:
 
     os.environ.setdefault("LIVE_ASSISTANT_ENV", str(runtime_root / ".env"))
     os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("USER_DATA_PATH", str(runtime_root / "user_data"))
     os.environ.setdefault("STREAMLIT_SUPPRESS_CONFIG_WARNINGS", "true")

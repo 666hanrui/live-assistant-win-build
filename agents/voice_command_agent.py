@@ -3,6 +3,10 @@ import time
 import re
 import math
 import struct
+import io
+import wave
+import audioop
+import base64
 import tempfile
 from http import HTTPStatus
 from pathlib import Path
@@ -75,6 +79,58 @@ class VoiceCommandAgent:
         self._whisper_model_name = None
         self._whisper_model = None
         self._whisper_prewarm_started = False
+        self._tab_audio_running = False
+        self._tab_audio_error = None
+        self._tab_audio_last_result_at = None
+        self._tab_audio_last_text = ""
+        self._tab_audio_last_text_lang = None
+        self._tab_audio_last_audio_at = None
+        self._tab_audio_last_audio_rms = 0
+        self._tab_audio_no_text_count = 0
+        self._tab_audio_langs = []
+        self._tab_audio_buffer = bytearray()
+        self._tab_audio_sample_rate = 16000
+        self._tab_audio_chunk_seconds = max(
+            2.0,
+            float(getattr(settings, "VOICE_TAB_AUDIO_CHUNK_SECONDS", 4.8) or 4.8),
+        )
+        self._tab_audio_max_chunk_seconds = max(
+            self._tab_audio_chunk_seconds,
+            float(getattr(settings, "VOICE_TAB_AUDIO_MAX_CHUNK_SECONDS", 9.0) or 9.0),
+        )
+        self._tab_audio_overlap_seconds = min(
+            1.5,
+            max(0.0, float(getattr(settings, "VOICE_TAB_AUDIO_CHUNK_OVERLAP_SECONDS", 0.6) or 0.6)),
+        )
+        self._tab_audio_emit_idle_ms = int(
+            max(600.0, float(getattr(settings, "VOICE_TAB_AUDIO_EMIT_IDLE_SECONDS", 1.2) or 1.2) * 1000.0)
+        )
+        self._tab_audio_emit_max_wait_ms = int(
+            max(2500.0, float(getattr(settings, "VOICE_TAB_AUDIO_EMIT_MAX_WAIT_SECONDS", 9.0) or 9.0) * 1000.0)
+        )
+        self._tab_audio_emit_max_chars = max(
+            24,
+            int(getattr(settings, "VOICE_TAB_AUDIO_EMIT_MAX_CHARS", 96) or 96),
+        )
+        self._tab_audio_silence_rms = max(
+            20,
+            int(getattr(settings, "VOICE_TAB_AUDIO_SILENCE_RMS", 110) or 110),
+        )
+        self._tab_audio_pending_text = ""
+        self._tab_audio_pending_lang = None
+        self._tab_audio_pending_started_at = None
+        self._tab_audio_pending_updated_at = None
+        self._tab_audio_last_chunk_at = None
+        self._tab_audio_last_restart_at = 0.0
+        self._tab_audio_stall_restart_seconds = max(
+            2.0,
+            float(getattr(settings, "VOICE_TAB_AUDIO_STALL_RESTART_SECONDS", 4.5) or 4.5),
+        )
+        self._tab_audio_restart_cooldown_seconds = max(
+            0.8,
+            float(getattr(settings, "VOICE_TAB_AUDIO_RESTART_COOLDOWN_SECONDS", 2.0) or 2.0),
+        )
+        self._tab_audio_recognizer = None
 
     def get_mode(self):
         return self.input_mode
@@ -101,14 +157,21 @@ class VoiceCommandAgent:
             return False
         return self._normalize_provider_name(provider) == "dashscope_funasr"
 
+    def _is_tab_media_asr_mode(self):
+        return self.input_mode in {
+            "system_audio_asr",
+            "tab_audio_asr",
+            "tab_media_asr",
+        }
+
     def _resolve_capture_mode(self, provider=None):
+        if self._is_tab_media_asr_mode():
+            return "tab_media_stream"
         if self._is_dashscope_force_loopback(provider):
             return "loopback"
         if self.input_mode in {
             "system_loopback_asr",
             "loopback_asr",
-            "system_audio_asr",
-            "tab_audio_asr",
             "loopback",
         }:
             return "loopback"
@@ -130,6 +193,7 @@ class VoiceCommandAgent:
             "loopback_asr",
             "system_audio_asr",
             "tab_audio_asr",
+            "tab_media_asr",
             "loopback",
         }
 
@@ -154,12 +218,50 @@ class VoiceCommandAgent:
 
     def _should_report_no_text_error(self):
         """仅在输入音量达到阈值时上报 no_text，避免安静环境误报。"""
+        runtime_provider = (
+            self._last_provider_selected
+            or self._last_provider_attempt
+            or self._normalize_provider_name()
+        )
+        # 云端 ASR 通道出现“持续无文本”时，需要明确反馈，避免看起来像“无响应”。
+        if self._provider_runtime_kind(runtime_provider) == "cloud":
+            return True
         try:
             rms = int(self._local_last_audio_rms or 0)
         except Exception:
             rms = 0
         threshold = max(0, int(getattr(settings, "VOICE_PYTHON_NO_TEXT_WARN_RMS", 120) or 120))
         return rms >= threshold
+
+    def _is_command_like_text(self, text):
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        lower = raw.lower()
+        command_markers = [
+            "置顶", "取消置顶", "秒杀", "上架", "链接", "商品", "橱窗",
+            "pin", "unpin", "top", "link", "item", "product", "number",
+            "flash", "sale", "promotion", "deal", "start", "launch",
+            "assistant", "cohost", "streamassistant", "liveassistant",
+        ]
+        has_marker = any(m in lower for m in command_markers)
+        has_index = bool(re.search(r"(?:\b\d+\b|[零一二两三四五六七八九十])", raw))
+        return bool(has_marker and (has_index or len(raw) <= 80))
+
+    def _is_noise_short_utterance(self, text):
+        raw = str(text or "").strip()
+        if not raw:
+            return True
+        if self._is_command_like_text(raw):
+            return False
+        compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", raw.lower()).strip()
+        tokens = [t for t in compact.split() if t]
+        if not tokens:
+            return True
+        # 过滤英文单词噪声（如 "you"/"uh"），避免长段语音退化成单词刷屏。
+        if len(tokens) == 1 and len(tokens[0]) <= 3 and not re.search(r"[\u4e00-\u9fff]", raw):
+            return True
+        return False
 
     def _is_low_quality_transcript(self, text, lang=None):
         """
@@ -176,13 +278,7 @@ class VoiceCommandAgent:
         token_count = len(tokens)
 
         # 明显是口令类文本，直接放行。
-        command_markers = [
-            "置顶", "取消置顶", "秒杀", "上架", "链接", "商品", "橱窗",
-            "pin", "unpin", "top", "link", "item", "product", "number", "no",
-            "flash", "sale", "promotion", "deal", "start", "launch",
-            "assistant", "cohost", "streamassistant", "liveassistant",
-        ]
-        has_command_marker = any(m in lower for m in command_markers)
+        has_command_marker = self._is_command_like_text(raw)
         has_index = bool(re.search(r"(?:\b\d+\b|[零一二两三四五六七八九十])", raw))
         if has_command_marker and (has_index or token_count <= 16):
             return False, ""
@@ -260,6 +356,23 @@ class VoiceCommandAgent:
         self._local_last_text = text
         self._local_last_text_lang = lang
 
+    def _queue_push_text(self, source, text, lang=None, confidence=None):
+        text = str(text or "").strip()
+        if not text:
+            return
+        item = {
+            "source": str(source or "voice"),
+            "text": text,
+            "confidence": confidence,
+            "lang": lang,
+            "ts": int(time.time() * 1000),
+        }
+        with self._local_lock:
+            self._local_queue.append(item)
+        self._local_last_result_at = item["ts"]
+        self._local_last_text = text
+        self._local_last_text_lang = lang
+
     def _import_speech_recognition(self):
         try:
             import speech_recognition as sr  # type: ignore
@@ -316,6 +429,8 @@ class VoiceCommandAgent:
         录制一段本地麦克风音频并返回探测结果（RMS + 识别文本）。
         用于快速定位“监听 running 但无文本”的输入层问题。
         """
+        if self._is_tab_media_asr_mode():
+            return {"ok": False, "error": "probe_not_supported_for_tab_media_stream"}
         if not self._is_python_asr_mode():
             return {"ok": False, "error": "not_python_asr_mode"}
         sr = self._import_speech_recognition()
@@ -387,6 +502,7 @@ class VoiceCommandAgent:
         self._sync_capture_mode(provider_now)
         cloud_force_loopback = self._is_dashscope_force_loopback(provider_now)
         mic_like_tokens = ["microphone", "mic", "麦克风", "内建", "built-in", "builtin", "array"]
+        output_like_tokens = ["speaker", "扬声器", "output", "耳机", "headphone", "hdmi", "display audio", "line out"]
         configured_idx = int(self._preferred_mic_device_index)
         if configured_idx < 0:
             if self._is_loopback_asr_mode():
@@ -408,7 +524,10 @@ class VoiceCommandAgent:
                 cloud_force_loopback
                 and isinstance(names, list)
                 and 0 <= configured_idx < len(names)
-                and any(tok in str(names[configured_idx] or "").lower() for tok in mic_like_tokens)
+                and (
+                    any(tok in str(names[configured_idx] or "").lower() for tok in mic_like_tokens)
+                    or any(tok in str(names[configured_idx] or "").lower() for tok in output_like_tokens)
+                )
             ):
                 configured_idx = -1
             else:
@@ -428,6 +547,9 @@ class VoiceCommandAgent:
 
         if name_hints:
             for idx, name in enumerate(names):
+                lowered = str(name or "").lower()
+                if cloud_force_loopback and any(tok in lowered for tok in output_like_tokens):
+                    continue
                 if any(h in name.lower() for h in name_hints):
                     return sr.Microphone(device_index=idx), idx
 
@@ -457,12 +579,17 @@ class VoiceCommandAgent:
                 n = str(name or "").lower()
                 if any(tok in n for tok in mic_like_tokens):
                     continue
+                if any(tok in n for tok in output_like_tokens):
+                    continue
                 try:
                     return sr.Microphone(device_index=idx), idx
                 except Exception:
                     continue
             if cloud_force_loopback:
                 raise RuntimeError("loopback_device_required_for_dashscope_cloud_asr")
+
+        if self._is_loopback_asr_mode() and cloud_force_loopback:
+            raise RuntimeError("loopback_device_required_for_dashscope_cloud_asr")
 
         # 最后兜底：第一个可用设备
         for idx in range(len(names)):
@@ -534,7 +661,52 @@ class VoiceCommandAgent:
         finally:
             self._whisper_prewarm_started = False
 
-    def _transcribe_with_local_whisper(self, audio, lang=None):
+    def _preprocess_pcm16_for_whisper(self, pcm_bytes, sample_rate=16000):
+        raw = bytes(pcm_bytes or b"")
+        if not raw:
+            return np.array([], dtype=np.float32)
+        src_rate = max(8000, int(sample_rate or 16000))
+        if src_rate != 16000:
+            try:
+                raw, _ = audioop.ratecv(raw, 2, 1, src_rate, 16000, None)
+            except Exception:
+                return np.array([], dtype=np.float32)
+        pcm = np.frombuffer(raw, dtype=np.int16)
+        if pcm.size == 0:
+            return np.array([], dtype=np.float32)
+
+        audio_np = (pcm.astype(np.float32) / 32768.0).flatten()
+        if audio_np.size < int(16000 * 0.20):
+            return np.array([], dtype=np.float32)
+
+        abs_np = np.abs(audio_np)
+        peak = float(np.max(abs_np)) if abs_np.size else 0.0
+        if peak < 1e-4:
+            return np.array([], dtype=np.float32)
+
+        # 去掉首尾静音，减少 whisper 抓到无效上下文导致只出单词。
+        gate = max(0.004, peak * 0.05)
+        voiced = np.where(abs_np >= gate)[0]
+        if voiced.size > 0:
+            pad = int(16000 * 0.12)
+            start = max(0, int(voiced[0]) - pad)
+            end = min(audio_np.size, int(voiced[-1]) + pad)
+            audio_np = audio_np[start:end]
+            abs_np = np.abs(audio_np)
+
+        rms = float(np.sqrt(np.mean(np.square(audio_np))) + 1e-8)
+        target_rms = 0.10
+        gain = target_rms / max(rms, 1e-8)
+        gain = min(6.0, max(0.85, gain))
+        audio_np = np.clip(audio_np * gain, -0.98, 0.98)
+
+        if audio_np.size < int(16000 * 0.20):
+            return np.array([], dtype=np.float32)
+        return audio_np.astype(np.float32, copy=False)
+
+    def _transcribe_audio_np_with_local_whisper(self, audio_np, lang=None, no_speech_threshold=None):
+        if audio_np is None or int(getattr(audio_np, "size", 0)) == 0:
+            return ""
         whisper_model = str(getattr(settings, "VOICE_WHISPER_MODEL", "tiny") or "tiny")
         whisper_root = str(
             Path(getattr(settings, "VOICE_WHISPER_DOWNLOAD_ROOT", "data/whisper_cache"))
@@ -543,33 +715,42 @@ class VoiceCommandAgent:
         )
         Path(whisper_root).mkdir(parents=True, exist_ok=True)
 
-        raw = audio.get_raw_data(convert_rate=16000, convert_width=2)
-        if not raw:
-            return ""
-        pcm = np.frombuffer(raw, dtype=np.int16)
-        if pcm.size == 0:
-            return ""
-        # 过短片段直接跳过，减少空转写。
-        if pcm.size < int(16000 * 0.25):
-            return ""
-        audio_np = (pcm.astype(np.float32) / 32768.0).flatten()
-
         model = self._load_whisper_model(whisper_model, whisper_root)
         lang_short = (str(lang or "").split("-")[0] or "").lower() or None
+        if no_speech_threshold is None:
+            no_speech_threshold = float(getattr(settings, "VOICE_WHISPER_NO_SPEECH_THRESHOLD", 0.50) or 0.50)
         kwargs = {
             "task": "transcribe",
             "fp16": False,
             "condition_on_previous_text": False,
             "temperature": 0.0,
-            "no_speech_threshold": 0.65,
+            "no_speech_threshold": float(no_speech_threshold),
             "logprob_threshold": -1.0,
             "compression_ratio_threshold": 2.4,
         }
         if lang_short:
             kwargs["language"] = lang_short
         result = model.transcribe(audio_np, **kwargs)
-        text = str((result or {}).get("text") or "").strip()
-        return text
+        return str((result or {}).get("text") or "").strip()
+
+    def _transcribe_pcm16_with_local_whisper(self, pcm_bytes, sample_rate=16000, lang=None, no_speech_threshold=None):
+        audio_np = self._preprocess_pcm16_for_whisper(pcm_bytes, sample_rate=sample_rate)
+        return self._transcribe_audio_np_with_local_whisper(
+            audio_np=audio_np,
+            lang=lang,
+            no_speech_threshold=no_speech_threshold,
+        )
+
+    def _transcribe_with_local_whisper(self, audio, lang=None):
+        raw = audio.get_raw_data(convert_rate=16000, convert_width=2)
+        if not raw:
+            return ""
+        return self._transcribe_pcm16_with_local_whisper(
+            pcm_bytes=raw,
+            sample_rate=16000,
+            lang=lang,
+            no_speech_threshold=float(getattr(settings, "VOICE_WHISPER_NO_SPEECH_THRESHOLD", 0.50) or 0.50),
+        )
 
     def _get_dashscope_api_key(self):
         return str(getattr(settings, "VOICE_DASHSCOPE_API_KEY", "") or "").strip()
@@ -649,7 +830,7 @@ class VoiceCommandAgent:
             return ""
         return max(texts, key=len)
 
-    def _transcribe_with_dashscope_funasr(self, audio, lang=None):
+    def _transcribe_wav_with_dashscope_funasr(self, wav_data, sample_rate=16000, lang=None):
         api_key = self._get_dashscope_api_key()
         if not api_key:
             raise RuntimeError("dashscope_api_key_missing")
@@ -659,8 +840,7 @@ class VoiceCommandAgent:
         except Exception as e:
             raise RuntimeError(f"dashscope_sdk_unavailable:{e}")
 
-        sample_rate = max(8000, int(getattr(settings, "VOICE_DASHSCOPE_SAMPLE_RATE", 16000) or 16000))
-        wav_data = audio.get_wav_data(convert_rate=sample_rate, convert_width=2)
+        sample_rate = max(8000, int(sample_rate or 16000))
         if not wav_data:
             return ""
         if len(wav_data) < int(sample_rate * 0.20 * 2) + 44:
@@ -709,20 +889,44 @@ class VoiceCommandAgent:
                 def on_event(self, result):
                     return None
 
-            # 兼容不同 dashscope SDK：
-            # - 新版要求 constructor 传 callback
-            # - 旧版可能不接受 callback
+            # 兼容不同 dashscope SDK 构造签名：
+            # 1) callback 关键字参数（常见）
+            # 2) callback 位置参数（部分版本）
+            # 3) 无 callback（历史版本）
+            callback_obj = _NoopRecognitionCallback()
+            init_errors = []
+            recognition = None
             try:
                 recognition = Recognition(
-                    callback=_NoopRecognitionCallback(),
+                    callback=callback_obj,
                     **recognition_kwargs,
                 )
-            except TypeError as e:
-                msg = str(e or "")
-                if "unexpected keyword argument" in msg and "callback" in msg:
-                    recognition = Recognition(**recognition_kwargs)
-                else:
-                    raise RuntimeError(f"dashscope_init_error:{msg}") from e
+            except TypeError as e_kw:
+                init_errors.append(str(e_kw or ""))
+                try:
+                    model = recognition_kwargs.get("model")
+                    fmt = recognition_kwargs.get("format")
+                    sample_rate = recognition_kwargs.get("sample_rate")
+                    extra_kwargs = {
+                        k: v
+                        for k, v in recognition_kwargs.items()
+                        if k not in {"model", "format", "sample_rate"}
+                    }
+                    recognition = Recognition(
+                        model,
+                        callback_obj,
+                        fmt,
+                        sample_rate,
+                        **extra_kwargs,
+                    )
+                except TypeError as e_pos:
+                    init_errors.append(str(e_pos or ""))
+                    try:
+                        recognition = Recognition(**recognition_kwargs)
+                    except TypeError as e_plain:
+                        init_errors.append(str(e_plain or ""))
+                        msg = " | ".join([m for m in init_errors if m]).strip() or "unknown"
+                        raise RuntimeError(f"dashscope_init_error:{msg}") from e_plain
 
             result = recognition.call(tmp_path, **call_kwargs)
         finally:
@@ -748,6 +952,611 @@ class VoiceCommandAgent:
                 raise RuntimeError(f"dashscope_http_{code}:{message or 'request_failed'}")
 
         return str(self._extract_text_from_dashscope_result(result) or "").strip()
+
+    def _transcribe_with_dashscope_funasr(self, audio, lang=None):
+        sample_rate = max(8000, int(getattr(settings, "VOICE_DASHSCOPE_SAMPLE_RATE", 16000) or 16000))
+        wav_data = audio.get_wav_data(convert_rate=sample_rate, convert_width=2)
+        return self._transcribe_wav_with_dashscope_funasr(
+            wav_data=wav_data,
+            sample_rate=sample_rate,
+            lang=lang,
+        )
+
+    def _build_wav_from_pcm16(self, pcm_bytes, sample_rate=16000, channels=1):
+        pcm_bytes = bytes(pcm_bytes or b"")
+        if not pcm_bytes:
+            return b""
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(max(1, int(channels or 1)))
+            wf.setsampwidth(2)
+            wf.setframerate(max(8000, int(sample_rate or 16000)))
+            wf.writeframes(pcm_bytes)
+        return buf.getvalue()
+
+    def _start_tab_audio_stream_capture(self, langs):
+        ensure_browser_page = getattr(self.vision_agent, "ensure_browser_page_connection", None)
+        if callable(ensure_browser_page):
+            browser_ready = bool(ensure_browser_page(force=False))
+        else:
+            browser_ready = bool(self.vision_agent.ensure_connection())
+        if not browser_ready:
+            self._tab_audio_running = False
+            self._tab_audio_error = "browser_not_connected"
+            return False
+
+        self._tab_audio_running = False
+        self._tab_audio_error = None
+        self._tab_audio_last_text = ""
+        self._tab_audio_last_text_lang = None
+        self._tab_audio_last_audio_at = None
+        self._tab_audio_last_audio_rms = 0
+        self._tab_audio_no_text_count = 0
+        self._tab_audio_langs = list(langs or ["zh-CN"])
+        self.last_langs = list(self._tab_audio_langs)
+        self.last_lang = (self.last_langs[0] if self.last_langs else self.last_lang)
+        self._tab_audio_buffer = bytearray()
+        self._tab_audio_pending_text = ""
+        self._tab_audio_pending_lang = None
+        self._tab_audio_pending_started_at = None
+        self._tab_audio_pending_updated_at = None
+        self._tab_audio_last_chunk_at = None
+
+        script = """
+        return ((cfg) => {
+          cfg = cfg || {};
+          const targetRate = Number(cfg.targetRate || 16000);
+          const state = (window.__liveAssistantTabAudioState = window.__liveAssistantTabAudioState || {});
+          const queue = (window.__liveAssistantTabAudioQueue = window.__liveAssistantTabAudioQueue || []);
+
+          const setErr = (e) => {
+            state.error = String(e || 'unknown');
+            state.running = false;
+            state.lastErrorAt = Date.now();
+            return { ok: false, reason: state.error };
+          };
+
+          try {
+            const prev = window.__liveAssistantTabAudioController;
+            if (prev && typeof prev.stop === 'function') {
+              try { prev.stop(); } catch (e) {}
+            }
+          } catch (e) {}
+
+          const medias = Array.from(document.querySelectorAll('video, audio'));
+          if (!medias.length) return setErr('media_element_not_found');
+          const sorted = medias
+            .map((m) => {
+              const score =
+                (m.paused ? 0 : 60) +
+                ((m.currentTime || 0) > 0 ? 20 : 0) +
+                ((m.readyState || 0) >= 2 ? 10 : 0) +
+                ((m.muted ? 0 : 1) * 10);
+              return { m, score };
+            })
+            .sort((a, b) => b.score - a.score);
+          const media = sorted[0].m;
+          if (!media) return setErr('media_element_not_found');
+
+          let stream = null;
+          try {
+            if (typeof media.captureStream === 'function') stream = media.captureStream();
+            else if (typeof media.mozCaptureStream === 'function') stream = media.mozCaptureStream();
+          } catch (e) {
+            return setErr('capture_stream_failed:' + String(e));
+          }
+          if (!stream) return setErr('capture_stream_unavailable');
+          if (!stream.getAudioTracks || !stream.getAudioTracks().length) return setErr('media_stream_no_audio_track');
+
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          if (!AudioCtx) return setErr('audio_context_unavailable');
+
+          const ctx = new AudioCtx({ sampleRate: targetRate });
+          const src = ctx.createMediaStreamSource(stream);
+          const proc = ctx.createScriptProcessor(4096, 2, 1);
+          const mute = ctx.createGain();
+          mute.gain.value = 0.0;
+
+          proc.onaudioprocess = (ev) => {
+            try {
+              const channels = Math.max(1, Number(ev.inputBuffer.numberOfChannels || 1));
+              const ch0 = ev.inputBuffer.getChannelData(0);
+              if (!ch0 || !ch0.length) return;
+              const len = ch0.length;
+              let rmsAcc = 0;
+              const out = new Int16Array(len);
+              for (let i = 0; i < len; i++) {
+                let s = 0;
+                for (let c = 0; c < channels; c++) {
+                  try {
+                    const ch = ev.inputBuffer.getChannelData(c);
+                    s += (ch && i < ch.length) ? ch[i] : 0;
+                  } catch (e) {}
+                }
+                s = s / channels;
+                if (s > 1) s = 1;
+                if (s < -1) s = -1;
+                out[i] = s < 0 ? s * 32768 : s * 32767;
+                rmsAcc += s * s;
+              }
+              let bin = '';
+              const bytes = new Uint8Array(out.buffer);
+              const chunk = 0x8000;
+              for (let i = 0; i < bytes.length; i += chunk) {
+                bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+              }
+              const b64 = btoa(bin);
+              const rms = Math.sqrt(rmsAcc / Math.max(1, len)) * 32768;
+              queue.push({
+                ts: Date.now(),
+                sampleRate: Number(ev.inputBuffer.sampleRate || targetRate || 16000),
+                channels: Number(ev.inputBuffer.numberOfChannels || 1),
+                rms: Math.round(rms),
+                pcmB64: b64,
+              });
+              if (queue.length > 120) queue.splice(0, queue.length - 120);
+              state.lastAudioAt = Date.now();
+              state.lastAudioRms = Math.round(rms);
+            } catch (e) {
+              state.error = 'processor_error:' + String(e);
+              state.lastErrorAt = Date.now();
+            }
+          };
+
+          src.connect(proc);
+          proc.connect(mute);
+          mute.connect(ctx.destination);
+          if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+            ctx.resume().catch(() => {});
+          }
+          const keepAliveTimer = setInterval(() => {
+            try {
+              if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+                ctx.resume().catch(() => {});
+              }
+            } catch (e) {}
+          }, 1500);
+
+          const controller = {
+            media,
+            stream,
+            ctx,
+            src,
+            proc,
+            mute,
+            keepAliveTimer,
+            stop: () => {
+              try { clearInterval(keepAliveTimer); } catch (e) {}
+              try { proc.disconnect(); } catch (e) {}
+              try { src.disconnect(); } catch (e) {}
+              try { mute.disconnect(); } catch (e) {}
+              try { stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+              try { ctx.close(); } catch (e) {}
+            },
+          };
+          window.__liveAssistantTabAudioController = controller;
+          state.running = true;
+          state.error = null;
+          state.startedAt = Date.now();
+          state.lastErrorAt = null;
+          state.mediaTag = (media.tagName || '').toLowerCase();
+          state.mediaSrc = media.currentSrc || media.src || '';
+          return { ok: true, mediaTag: state.mediaTag, mediaSrc: state.mediaSrc };
+        })(arguments[0] || {});
+        """
+
+        ctx_name, result, errors = self._run_js_with_reconnect(
+            script,
+            {"targetRate": 16000},
+            prefer_ctx_name=self.active_ctx_name,
+        )
+        if result is None:
+            ensure_browser_page = getattr(self.vision_agent, "ensure_browser_page_connection", None)
+            if callable(ensure_browser_page):
+                try:
+                    ensure_browser_page(force=True)
+                except Exception:
+                    pass
+            ctx_name, result, errors2 = self._run_js_with_reconnect(
+                script,
+                {"targetRate": 16000},
+                prefer_ctx_name=self.active_ctx_name,
+            )
+            errors = list(errors or []) + list(errors2 or [])
+        ok = bool(isinstance(result, dict) and result.get("ok"))
+        if ok:
+            self.active_ctx_name = ctx_name or self.active_ctx_name
+            self._tab_audio_running = True
+            self._tab_audio_error = None
+            self._tab_audio_last_restart_at = time.time()
+            return True
+        self._tab_audio_running = False
+        if isinstance(result, dict):
+            reason = result.get("reason") or "tab_audio_start_failed"
+        else:
+            reason = "browser_page_context_unavailable" if not ctx_name else "tab_audio_js_no_result"
+        self._tab_audio_error = str(reason or "tab_audio_start_failed")
+        self.last_start_reason = self._tab_audio_error
+        self.last_start_errors = list(errors or [])[:5]
+        self.last_start_diag = {"ctx": ctx_name}
+        logger.warning(f"TabAudio ASR 启动失败: reason={self._tab_audio_error}, ctx={ctx_name}, errors={self.last_start_errors[:2]}")
+        return False
+
+    def _stop_tab_audio_stream_capture(self):
+        script = """
+        return (() => {
+          const st = window.__liveAssistantTabAudioState || (window.__liveAssistantTabAudioState = {});
+          const ctl = window.__liveAssistantTabAudioController;
+          try {
+            if (ctl && typeof ctl.stop === 'function') ctl.stop();
+          } catch (e) {}
+          window.__liveAssistantTabAudioController = null;
+          st.running = false;
+          return { ok: true };
+        })();
+        """
+        _, result = self._run_js_in_contexts(script, prefer_ctx_name=self.active_ctx_name)
+        self._tab_audio_running = False
+        self._tab_audio_buffer = bytearray()
+        self._tab_audio_pending_text = ""
+        self._tab_audio_pending_lang = None
+        self._tab_audio_pending_started_at = None
+        self._tab_audio_pending_updated_at = None
+        self._tab_audio_last_chunk_at = None
+        return bool(isinstance(result, dict) and result.get("ok"))
+
+    def _poll_tab_audio_chunks(self, max_items=40):
+        script = """
+        return ((limit) => {
+          const queue = window.__liveAssistantTabAudioQueue || [];
+          const st = window.__liveAssistantTabAudioState || {};
+          const n = Math.max(1, Number(limit || 40));
+          const items = queue.splice(0, Math.min(n, queue.length));
+          return { items, state: st };
+        })(arguments[0] || 40);
+        """
+        _, result = self._run_js_in_contexts(
+            script,
+            int(max(1, max_items)),
+            prefer_ctx_name=self.active_ctx_name,
+        )
+        if not isinstance(result, dict):
+            return [], {}
+        return list(result.get("items") or []), dict(result.get("state") or {})
+
+    def _maybe_restart_tab_audio_stream_capture(self, reason=""):
+        now = time.time()
+        if now - float(self._tab_audio_last_restart_at or 0.0) < self._tab_audio_restart_cooldown_seconds:
+            return False
+        self._tab_audio_last_restart_at = now
+        langs = list(self._tab_audio_langs or self.last_langs or ["zh-CN"])
+        ok = self._start_tab_audio_stream_capture(langs)
+        if ok:
+            logger.info(f"TabAudio ASR 已自动重启: reason={reason or 'unknown'}")
+        else:
+            logger.warning(f"TabAudio ASR 自动重启失败: reason={reason or 'unknown'}, err={self._tab_audio_error}")
+        return ok
+
+    def _transcribe_tab_audio_pcm_with_provider(self, pcm_bytes, sample_rate, langs=None):
+        pcm_bytes = bytes(pcm_bytes or b"")
+        if not pcm_bytes:
+            return None, None, None
+        lang_candidates = list(langs or self._tab_audio_langs or ["zh-CN"])
+        provider = self._normalize_provider_name()
+        if provider == "whisper_local":
+            try:
+                threshold = float(getattr(settings, "VOICE_TAB_AUDIO_WHISPER_NO_SPEECH_THRESHOLD", 0.35) or 0.35)
+                text_candidates = []
+                max_langs = max(1, int(getattr(settings, "VOICE_WHISPER_MAX_LANGS", 1) or 1))
+                for lang in lang_candidates[:max_langs]:
+                    text = self._transcribe_pcm16_with_local_whisper(
+                        pcm_bytes=pcm_bytes,
+                        sample_rate=sample_rate,
+                        lang=lang,
+                        no_speech_threshold=threshold,
+                    )
+                    if not text:
+                        continue
+                    if not self._is_text_lang_compatible(text, expected_lang=lang, detected_lang=lang):
+                        continue
+                    score = (3.0 if self._is_command_like_text(text) else 0.0) + min(len(text), 120) / 120.0
+                    text_candidates.append((score, text, lang))
+                if not text_candidates:
+                    auto_text = self._transcribe_pcm16_with_local_whisper(
+                        pcm_bytes=pcm_bytes,
+                        sample_rate=sample_rate,
+                        lang=None,
+                        no_speech_threshold=threshold,
+                    )
+                    if auto_text:
+                        expected_lang = (lang_candidates[0] if lang_candidates else None)
+                        if self._is_text_lang_compatible(auto_text, expected_lang=expected_lang, detected_lang=None):
+                            score = (3.0 if self._is_command_like_text(auto_text) else 0.0) + min(len(auto_text), 120) / 120.0
+                            text_candidates.append((score, auto_text, expected_lang))
+                if text_candidates:
+                    _, text, lang = max(text_candidates, key=lambda x: x[0])
+                    self._last_provider_selected = "whisper_local"
+                    self._last_provider_error = None
+                    self._last_provider_at = int(time.time() * 1000)
+                    return text, (lang or (lang_candidates[0] if lang_candidates else None)), None
+                self._last_provider_selected = "whisper_local"
+                self._last_provider_error = None
+                self._last_provider_at = int(time.time() * 1000)
+                return None, (lang_candidates[0] if lang_candidates else None), None
+            except Exception as e:
+                self._last_provider_selected = None
+                self._last_provider_error = str(e)
+                self._last_provider_at = int(time.time() * 1000)
+                return None, None, str(e)
+
+        sr = self._import_speech_recognition()
+        if sr is None:
+            if provider != "dashscope_funasr":
+                return None, None, "speech_recognition_unavailable_for_selected_provider"
+            try:
+                wav_data = self._build_wav_from_pcm16(
+                    pcm_bytes=pcm_bytes,
+                    sample_rate=sample_rate,
+                    channels=1,
+                )
+                text = self._transcribe_wav_with_dashscope_funasr(
+                    wav_data=wav_data,
+                    sample_rate=sample_rate,
+                    lang=(lang_candidates[0] if lang_candidates else None),
+                )
+                self._last_provider_selected = "dashscope_funasr"
+                self._last_provider_error = None
+                self._last_provider_at = int(time.time() * 1000)
+                return text, (lang_candidates[0] if lang_candidates else None), None
+            except Exception as e:
+                self._last_provider_selected = None
+                self._last_provider_error = str(e)
+                self._last_provider_at = int(time.time() * 1000)
+                return None, None, str(e)
+
+        try:
+            if self._tab_audio_recognizer is None:
+                self._tab_audio_recognizer = sr.Recognizer()
+            audio = sr.AudioData(pcm_bytes, int(sample_rate), 2)
+            text, lang, err = self._recognize_with_provider(
+                self._tab_audio_recognizer,
+                audio,
+                lang_candidates,
+            )
+            return text, (lang or (lang_candidates[0] if lang_candidates else None)), err
+        except Exception as e:
+            return None, None, str(e)
+
+    def _merge_tab_audio_text(self, base_text, new_text):
+        base = str(base_text or "").strip()
+        incoming = str(new_text or "").strip()
+        if not base:
+            return incoming
+        if not incoming:
+            return base
+        if incoming in base:
+            return base
+        if base in incoming:
+            return incoming
+
+        base_lower = base.lower()
+        incoming_lower = incoming.lower()
+        max_overlap = min(len(base_lower), len(incoming_lower), 64)
+        overlap = 0
+        for n in range(max_overlap, 2, -1):
+            if base_lower[-n:] == incoming_lower[:n]:
+                overlap = n
+                break
+
+        if overlap > 0:
+            merged = base + incoming[overlap:]
+        else:
+            need_space = bool(
+                re.search(r"[a-z0-9]$", base, re.IGNORECASE)
+                and re.search(r"^[a-z0-9]", incoming, re.IGNORECASE)
+            )
+            merged = f"{base}{' ' if need_space else ''}{incoming}"
+        return re.sub(r"\s+", " ", merged).strip()
+
+    def _append_tab_audio_fragment(self, text, lang=None):
+        frag = str(text or "").strip()
+        if not frag:
+            return
+        now_ms = int(time.time() * 1000)
+        self._tab_audio_pending_text = self._merge_tab_audio_text(self._tab_audio_pending_text, frag)
+        if not self._tab_audio_pending_lang:
+            self._tab_audio_pending_lang = lang
+        if self._tab_audio_pending_started_at is None:
+            self._tab_audio_pending_started_at = now_ms
+        self._tab_audio_pending_updated_at = now_ms
+
+    def _should_flush_tab_audio_pending_text(self, now_ms):
+        text = str(self._tab_audio_pending_text or "").strip()
+        if not text:
+            return False
+        if re.search(r"[。！？!?；;…]$", text):
+            return True
+        if len(text) >= self._tab_audio_emit_max_chars:
+            return True
+
+        started_at = int(self._tab_audio_pending_started_at or now_ms)
+        if now_ms - started_at >= self._tab_audio_emit_max_wait_ms:
+            return True
+
+        updated_at = int(self._tab_audio_pending_updated_at or started_at)
+        idle_ms = now_ms - updated_at
+        try:
+            rms = int(self._tab_audio_last_audio_rms or 0)
+        except Exception:
+            rms = 0
+        if idle_ms >= self._tab_audio_emit_idle_ms and rms <= self._tab_audio_silence_rms:
+            return True
+        return False
+
+    def _flush_tab_audio_pending_text(self):
+        text = str(self._tab_audio_pending_text or "").strip()
+        if not text:
+            self._tab_audio_pending_lang = None
+            self._tab_audio_pending_started_at = None
+            self._tab_audio_pending_updated_at = None
+            return None
+        if len(text) < 3:
+            self._tab_audio_pending_text = ""
+            self._tab_audio_pending_lang = None
+            self._tab_audio_pending_started_at = None
+            self._tab_audio_pending_updated_at = None
+            return None
+        if self._is_noise_short_utterance(text):
+            self._tab_audio_pending_text = ""
+            self._tab_audio_pending_lang = None
+            self._tab_audio_pending_started_at = None
+            self._tab_audio_pending_updated_at = None
+            return None
+
+        lang = self._tab_audio_pending_lang or (self._tab_audio_langs[0] if self._tab_audio_langs else None)
+        ts = int(time.time() * 1000)
+        self._queue_push_text(source="tab_audio_stream", text=text, lang=lang)
+        self._tab_audio_last_result_at = ts
+        self._tab_audio_last_text = text
+        self._tab_audio_last_text_lang = lang
+        item = {
+            "source": "tab_audio_stream",
+            "text": text,
+            "lang": lang,
+            "confidence": None,
+            "ts": ts,
+        }
+        self._tab_audio_pending_text = ""
+        self._tab_audio_pending_lang = None
+        self._tab_audio_pending_started_at = None
+        self._tab_audio_pending_updated_at = None
+        return item
+
+    def poll_tab_audio_stream_transcripts(self):
+        if (not self._tab_audio_running) and (not self._tab_audio_pending_text):
+            self._maybe_restart_tab_audio_stream_capture(reason="not_running")
+            if (not self._tab_audio_running) and (not self._tab_audio_pending_text):
+                return []
+
+        chunks, js_state = self._poll_tab_audio_chunks(max_items=60)
+        if isinstance(js_state, dict):
+            self._tab_audio_error = str(js_state.get("error") or self._tab_audio_error or "")
+            self._tab_audio_last_audio_at = js_state.get("lastAudioAt") or self._tab_audio_last_audio_at
+            try:
+                self._tab_audio_last_audio_rms = int(js_state.get("lastAudioRms") or self._tab_audio_last_audio_rms or 0)
+            except Exception:
+                pass
+            self._tab_audio_running = bool(js_state.get("running", self._tab_audio_running))
+
+        if chunks:
+            self._tab_audio_last_chunk_at = int(time.time() * 1000)
+
+        for ch in chunks:
+            if not isinstance(ch, dict):
+                continue
+            pcm_b64 = str(ch.get("pcmB64") or "")
+            if not pcm_b64:
+                continue
+            try:
+                pcm = base64.b64decode(pcm_b64.encode("ascii"), validate=False)
+            except Exception:
+                continue
+            if not pcm:
+                continue
+            self._tab_audio_buffer.extend(pcm)
+            try:
+                self._tab_audio_sample_rate = max(8000, int(ch.get("sampleRate") or self._tab_audio_sample_rate or 16000))
+            except Exception:
+                self._tab_audio_sample_rate = 16000
+            self._tab_audio_last_audio_at = int(ch.get("ts") or int(time.time() * 1000))
+            try:
+                self._tab_audio_last_audio_rms = int(ch.get("rms") or self._tab_audio_last_audio_rms or 0)
+            except Exception:
+                pass
+
+        out_items = []
+        min_bytes = max(3200, int(self._tab_audio_sample_rate * self._tab_audio_chunk_seconds * 2))
+        max_bytes = max(min_bytes, int(self._tab_audio_sample_rate * self._tab_audio_max_chunk_seconds * 2))
+        overlap_bytes = max(0, int(self._tab_audio_sample_rate * self._tab_audio_overlap_seconds * 2))
+        filter_low_quality = bool(getattr(settings, "VOICE_TAB_AUDIO_FILTER_LOW_QUALITY", False))
+        asr_calls = 0
+        while len(self._tab_audio_buffer) >= min_bytes and asr_calls < 2:
+            asr_calls += 1
+            consume = min(len(self._tab_audio_buffer), max_bytes)
+            pcm_bytes = bytes(self._tab_audio_buffer[:consume])
+            self._tab_audio_buffer = bytearray(self._tab_audio_buffer[consume:])
+            if overlap_bytes > 0 and len(pcm_bytes) > overlap_bytes:
+                # 保留少量尾音作为下一轮上下文，降低“截断词”概率。
+                self._tab_audio_buffer = bytearray(pcm_bytes[-overlap_bytes:]) + self._tab_audio_buffer
+            try:
+                text, lang, err = self._transcribe_tab_audio_pcm_with_provider(
+                    pcm_bytes=pcm_bytes,
+                    sample_rate=self._tab_audio_sample_rate,
+                    langs=self._tab_audio_langs,
+                )
+                if text:
+                    if filter_low_quality:
+                        bad, reason = self._is_low_quality_transcript(text, lang=lang)
+                        if bad:
+                            self._tab_audio_no_text_count += 1
+                            continue
+                    self._append_tab_audio_fragment(text=text, lang=lang)
+                    self._tab_audio_no_text_count = 0
+                    self._tab_audio_error = None
+                else:
+                    if err:
+                        self._tab_audio_error = f"asr_error: {err}"
+                        self._last_provider_error = str(err)
+                        self._last_provider_at = int(time.time() * 1000)
+                    self._tab_audio_no_text_count += 1
+            except Exception as e:
+                self._tab_audio_error = f"asr_error: {e}"
+                self._last_provider_selected = None
+                self._last_provider_error = str(e)
+                self._last_provider_at = int(time.time() * 1000)
+                self._tab_audio_no_text_count += 1
+
+        now_ms = int(time.time() * 1000)
+        last_audio_at = int(self._tab_audio_last_audio_at or 0)
+        last_chunk_at = int(self._tab_audio_last_chunk_at or 0)
+        stall_ms = int(self._tab_audio_stall_restart_seconds * 1000.0)
+        stalled = False
+        if self._tab_audio_running:
+            if last_chunk_at > 0 and (now_ms - last_chunk_at) > stall_ms:
+                stalled = True
+            elif last_audio_at > 0 and (now_ms - last_audio_at) > max(stall_ms, 6000):
+                stalled = True
+        if stalled:
+            self._tab_audio_running = False
+            self._tab_audio_error = "tab_audio_stalled"
+            self._maybe_restart_tab_audio_stream_capture(reason="stalled")
+
+        if self._should_flush_tab_audio_pending_text(now_ms):
+            merged_item = self._flush_tab_audio_pending_text()
+            if merged_item:
+                out_items.append(merged_item)
+        if (not self._tab_audio_running) and self._tab_audio_pending_text:
+            merged_item = self._flush_tab_audio_pending_text()
+            if merged_item:
+                out_items.append(merged_item)
+        return out_items
+
+    def get_tab_audio_stream_state(self):
+        return {
+            "running": bool(self._tab_audio_running),
+            "error": self._tab_audio_error,
+            "lastResultAt": self._tab_audio_last_result_at,
+            "lastText": self._tab_audio_last_text,
+            "lastTextLang": self._tab_audio_last_text_lang,
+            "lastAudioAt": self._tab_audio_last_audio_at,
+            "lastAudioRms": self._tab_audio_last_audio_rms,
+            "noTextCount": self._tab_audio_no_text_count,
+            "sampleRate": self._tab_audio_sample_rate,
+            "pendingText": str(self._tab_audio_pending_text or ""),
+            "provider": str(self._last_provider_selected or self._normalize_provider_name()),
+            "providerType": str(self._provider_runtime_kind(self._last_provider_selected or self._normalize_provider_name())),
+            "providerError": self._last_provider_error,
+        }
 
     def _recognize_with_provider(self, recognizer, audio, langs):
         provider = self._normalize_provider_name()
@@ -1061,82 +1870,88 @@ class VoiceCommandAgent:
                 recognizer.energy_threshold = energy_threshold
 
             try:
-                mic, selected_idx = self._select_local_microphone(sr)
-                with mic as source:
-                    if ambient_s > 0:
-                        try:
-                            recognizer.adjust_for_ambient_noise(source, duration=ambient_s)
-                        except Exception:
-                            pass
-                    logger.info(
-                        "Python ASR recorder params: "
-                        f"capture_mode={self._local_capture_mode}, provider={provider_now}, "
-                        f"dyn_energy={recognizer.dynamic_energy_threshold}, "
-                        f"energy_threshold={recognizer.energy_threshold}, timeout={timeout_s}, "
-                        f"phrase_time_limit={phrase_s}, forced_record={forced_record_seconds}"
-                    )
-                    self._local_running = True
-                    self._local_last_start_at = int(time.time() * 1000)
-                    self._set_local_mic_state("granted", None)
-                    self._local_mic_state["deviceIndex"] = selected_idx
-                    names = self._list_local_microphones(sr)
-                    self._local_mic_state["deviceName"] = (
-                        names[selected_idx] if (selected_idx is not None and 0 <= selected_idx < len(names)) else None
-                    )
-                    self._local_mic_state["captureMode"] = self._local_capture_mode
-                    while not self._local_stop_event.is_set():
-                        try:
-                            # 连续无文本时，改为固定窗口录音，避免只抓到噪声片段。
-                            if self._local_no_text_count >= 3:
-                                audio = recognizer.record(source, duration=forced_record_seconds)
-                            else:
-                                audio = recognizer.listen(
-                                    source,
-                                    timeout=timeout_s,
-                                    phrase_time_limit=phrase_s,
-                                )
-                            self._local_last_audio_at = int(time.time() * 1000)
-                            self._local_last_audio_rms = self._compute_audio_rms(audio)
-                        except sr.WaitTimeoutError:
-                            continue
-                        except Exception as e:
-                            self._local_error = f"listen_error: {e}"
-                            time.sleep(0.15)
-                            continue
+                self._local_running = True
+                self._local_last_start_at = int(time.time() * 1000)
+                while not self._local_stop_event.is_set():
+                    mic, selected_idx = self._select_local_microphone(sr)
+                    with mic as source:
+                        if ambient_s > 0:
+                            try:
+                                recognizer.adjust_for_ambient_noise(source, duration=ambient_s)
+                            except Exception:
+                                pass
+                        logger.info(
+                            "Python ASR recorder params: "
+                            f"capture_mode={self._local_capture_mode}, provider={provider_now}, "
+                            f"dyn_energy={recognizer.dynamic_energy_threshold}, "
+                            f"energy_threshold={recognizer.energy_threshold}, timeout={timeout_s}, "
+                            f"phrase_time_limit={phrase_s}, forced_record={forced_record_seconds}"
+                        )
+                        self._set_local_mic_state("granted", None)
+                        self._local_mic_state["deviceIndex"] = selected_idx
+                        names = self._list_local_microphones(sr)
+                        self._local_mic_state["deviceName"] = (
+                            names[selected_idx] if (selected_idx is not None and 0 <= selected_idx < len(names)) else None
+                        )
+                        self._local_mic_state["captureMode"] = self._local_capture_mode
+                        while not self._local_stop_event.is_set():
+                            try:
+                                # 连续无文本时，改为固定窗口录音，避免只抓到噪声片段。
+                                if self._local_no_text_count >= 3:
+                                    audio = recognizer.record(source, duration=forced_record_seconds)
+                                else:
+                                    audio = recognizer.listen(
+                                        source,
+                                        timeout=timeout_s,
+                                        phrase_time_limit=phrase_s,
+                                    )
+                                self._local_last_audio_at = int(time.time() * 1000)
+                                self._local_last_audio_rms = self._compute_audio_rms(audio)
+                            except sr.WaitTimeoutError:
+                                continue
+                            except Exception as e:
+                                msg = str(e or "")
+                                self._local_error = f"listen_error: {msg}"
+                                if "audio source must be entered before listening" in msg.lower():
+                                    logger.warning("检测到音频源上下文失效，正在重建输入流。")
+                                    time.sleep(0.2)
+                                    break
+                                time.sleep(0.15)
+                                continue
 
-                        text, lang, err = self._recognize_with_provider(recognizer, audio, langs)
-                        if text:
-                            bad, reason = self._is_low_quality_transcript(text, lang=lang)
-                            if bad:
+                            text, lang, err = self._recognize_with_provider(recognizer, audio, langs)
+                            if text:
+                                bad, reason = self._is_low_quality_transcript(text, lang=lang)
+                                if bad:
+                                    self._local_no_text_count += 1
+                                    if self._local_no_text_count >= 3:
+                                        if self._should_report_no_text_error():
+                                            self._local_error = (
+                                                f"no_text:rms={self._local_last_audio_rms},provider="
+                                                f"{getattr(settings, 'VOICE_PYTHON_ASR_PROVIDER', 'unknown')},"
+                                                f"filtered={reason}"
+                                            )
+                                        else:
+                                            self._local_error = None
+                                    logger.debug(f"Python ASR filtered low-quality text: reason={reason}, text={text[:120]}")
+                                    continue
+                                self._local_push_text(text, lang=lang)
+                                self._local_error = None
+                                self._local_no_text_count = 0
+                            elif err:
+                                self._local_error = f"asr_error: {err}"
+                                self._local_no_text_count += 1
+                            else:
+                                # 避免静默失败：持续有音频但无文本时，显式标记 no_text。
                                 self._local_no_text_count += 1
                                 if self._local_no_text_count >= 3:
                                     if self._should_report_no_text_error():
                                         self._local_error = (
                                             f"no_text:rms={self._local_last_audio_rms},provider="
-                                            f"{getattr(settings, 'VOICE_PYTHON_ASR_PROVIDER', 'unknown')},"
-                                            f"filtered={reason}"
+                                            f"{getattr(settings, 'VOICE_PYTHON_ASR_PROVIDER', 'unknown')}"
                                         )
                                     else:
                                         self._local_error = None
-                                logger.debug(f"Python ASR filtered low-quality text: reason={reason}, text={text[:120]}")
-                                continue
-                            self._local_push_text(text, lang=lang)
-                            self._local_error = None
-                            self._local_no_text_count = 0
-                        elif err:
-                            self._local_error = f"asr_error: {err}"
-                            self._local_no_text_count += 1
-                        else:
-                            # 避免静默失败：持续有音频但无文本时，显式标记 no_text。
-                            self._local_no_text_count += 1
-                            if self._local_no_text_count >= 3:
-                                if self._should_report_no_text_error():
-                                    self._local_error = (
-                                        f"no_text:rms={self._local_last_audio_rms},provider="
-                                        f"{getattr(settings, 'VOICE_PYTHON_ASR_PROVIDER', 'unknown')}"
-                                    )
-                                else:
-                                    self._local_error = None
             except Exception as e:
                 msg = str(e)
                 self._local_error = f"mic_error: {msg}"
@@ -1273,6 +2088,8 @@ class VoiceCommandAgent:
         """在当前页面注入并启动语音识别。"""
         self.last_start_attempt_at = time.time()
         langs = self._dedupe_langs(language, fallback_languages)
+        if self._is_tab_media_asr_mode():
+            return self._start_tab_audio_stream_capture(langs)
         if self._is_python_asr_mode():
             return self._start_python_asr_worker(langs)
 
@@ -1480,6 +2297,15 @@ class VoiceCommandAgent:
 
     def stop(self):
         """停止页面内语音识别。"""
+        if self._tab_audio_running:
+            self._stop_tab_audio_stream_capture()
+            self._tab_audio_running = False
+            self._tab_audio_buffer = bytearray()
+            self._tab_audio_pending_text = ""
+            self._tab_audio_pending_lang = None
+            self._tab_audio_pending_started_at = None
+            self._tab_audio_pending_updated_at = None
+            return True
         if self._is_python_asr_mode():
             self._local_stop_event.set()
             if self._local_thread and self._local_thread.is_alive():
@@ -1507,9 +2333,22 @@ class VoiceCommandAgent:
 
     def ensure_started(self, language="zh-CN", fallback_languages=None, silence_restart_seconds=18):
         """确保语音识别已开启且语言配置正确。"""
+        if self._is_tab_media_asr_mode():
+            expected_langs = self._dedupe_langs(language, fallback_languages)
+            if self._tab_audio_running and expected_langs == self.last_langs:
+                return True
+            return self.start(
+                language=language,
+                fallback_languages=fallback_languages,
+                silence_restart_seconds=silence_restart_seconds,
+            )
         if self._is_python_asr_mode():
             expected_langs = self._dedupe_langs(language, fallback_languages)
             expected_provider = self._normalize_provider_name()
+            if self._tab_audio_running:
+                self.last_lang = expected_langs[0] if expected_langs else language
+                self.last_langs = expected_langs
+                return True
             current_provider = str(self._local_mic_state.get("provider") or "").strip().lower()
             provider_changed = bool(current_provider and current_provider != expected_provider)
             if self._local_running and expected_langs == self.last_langs and not provider_changed:
@@ -1560,42 +2399,57 @@ class VoiceCommandAgent:
         if self._is_python_asr_mode():
             configured_provider = self._normalize_provider_name()
             self._sync_capture_mode(configured_provider)
+            tab_active = bool(self._tab_audio_running)
+            if self._is_tab_media_asr_mode():
+                tab_active = True
             runtime_provider = self._last_provider_selected or self._last_provider_attempt or configured_provider
-            cloud_only = self._is_dashscope_force_loopback(configured_provider)
-            device_name = str(self._local_mic_state.get("deviceName") or "")
+            cloud_only = bool(tab_active) or self._is_dashscope_force_loopback(configured_provider)
+            device_name = (
+                "browser_media_stream"
+                if tab_active
+                else str(self._local_mic_state.get("deviceName") or "")
+            )
             loopback_likely_mic = bool(
-                self._is_loopback_asr_mode()
+                (not tab_active)
+                and self._is_loopback_asr_mode()
                 and device_name
                 and any(tok in device_name.lower() for tok in ["microphone", "mic", "麦克风", "built-in", "array"])
             )
+            last_result_at = self._tab_audio_last_result_at if tab_active else self._local_last_result_at
+            last_text = self._tab_audio_last_text if tab_active else self._local_last_text
+            last_text_lang = self._tab_audio_last_text_lang if tab_active else self._local_last_text_lang
+            last_audio_at = self._tab_audio_last_audio_at if tab_active else self._local_last_audio_at
+            last_audio_rms = self._tab_audio_last_audio_rms if tab_active else self._local_last_audio_rms
+            no_text_count = self._tab_audio_no_text_count if tab_active else self._local_no_text_count
+            runtime_error = self._last_provider_error or (self._tab_audio_error if tab_active else self._local_error)
             return {
                 "supported": True,
-                "running": bool(self._local_running),
-                "error": self._local_error,
+                "running": bool(self._local_running or tab_active),
+                "error": runtime_error,
                 "lang": (self.last_langs[0] if self.last_langs else self.last_lang),
                 "langs": list(self.last_langs or []),
-                "lastResultAt": self._local_last_result_at,
-                "lastErrorAt": int(time.time() * 1000) if self._local_error else None,
-                "lastText": self._local_last_text,
-                "lastTextLang": self._local_last_text_lang,
+                "lastResultAt": last_result_at,
+                "lastErrorAt": int(time.time() * 1000) if runtime_error else None,
+                "lastText": last_text,
+                "lastTextLang": last_text_lang,
                 "ctx": "python_asr",
                 "mode": self.input_mode,
                 "provider": configured_provider,
                 "runtimeProvider": runtime_provider,
                 "runtimeProviderType": self._provider_runtime_kind(runtime_provider),
                 "runtimeProviderChain": list(self._last_provider_chain or []),
-                "runtimeProviderError": self._last_provider_error,
+                "runtimeProviderError": runtime_error,
                 "runtimeProviderAt": self._last_provider_at,
                 "usingCloudAsr": self._provider_runtime_kind(runtime_provider) == "cloud",
                 "cloudOnly": bool(cloud_only),
                 "loopbackLikelyMic": loopback_likely_mic,
                 "deviceIndex": self._local_mic_state.get("deviceIndex"),
-                "deviceName": self._local_mic_state.get("deviceName"),
-                "captureMode": self._local_capture_mode,
-                "source": ("python_loopback" if self._is_loopback_asr_mode() else "python_mic"),
-                "lastAudioAt": self._local_last_audio_at,
-                "lastAudioRms": self._local_last_audio_rms,
-                "noTextCount": self._local_no_text_count,
+                "deviceName": device_name,
+                "captureMode": ("tab_media_stream" if tab_active else self._local_capture_mode),
+                "source": ("tab_audio_stream" if tab_active else ("python_loopback" if self._is_loopback_asr_mode() else "python_mic")),
+                "lastAudioAt": last_audio_at,
+                "lastAudioRms": last_audio_rms,
+                "noTextCount": no_text_count,
             }
 
         script = """
@@ -1762,11 +2616,33 @@ class VoiceCommandAgent:
 
     def collect_command_candidates(self, include_subtitle=True):
         items = []
+        if self._tab_audio_running:
+            items.extend(self.poll_tab_audio_stream_transcripts())
         items.extend(self.poll_transcripts())
         if include_subtitle and (not self._is_python_asr_mode()):
             items.extend(self.poll_subtitle_transcripts())
         items.sort(key=lambda x: x.get("ts") or 0)
-        return items
+        deduped = []
+        last_key = ""
+        last_ts = 0
+        for item in items:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            source = str(item.get("source") or "")
+            lang = str(item.get("lang") or "")
+            try:
+                ts = int(item.get("ts") or 0)
+            except Exception:
+                ts = 0
+            norm = self._normalize(text)
+            key = f"{source}|{lang}|{norm}"
+            if key and key == last_key and (ts - last_ts) <= 1200:
+                continue
+            deduped.append(item)
+            last_key = key
+            last_ts = ts
+        return deduped
 
     def get_start_failure_info(self):
         return {
@@ -1776,6 +2652,62 @@ class VoiceCommandAgent:
         }
 
     def diagnose_voice_capability(self):
+        if self._is_tab_media_asr_mode():
+            if not self.vision_agent.ensure_connection():
+                return {
+                    "ctx": "tab_media_asr",
+                    "mode": self.input_mode,
+                    "provider": self._normalize_provider_name(),
+                    "captureMode": "tab_media_stream",
+                    "secureContext": False,
+                    "title": "",
+                    "url": "",
+                    "mediaElements": 0,
+                    "audioTrackReady": False,
+                    "error": "browser_not_connected",
+                }
+            script = """
+            return (() => {
+              const medias = Array.from(document.querySelectorAll('video,audio'));
+              let audioTrackReady = false;
+              for (const m of medias) {
+                try {
+                  let s = null;
+                  if (typeof m.captureStream === 'function') s = m.captureStream();
+                  else if (typeof m.mozCaptureStream === 'function') s = m.mozCaptureStream();
+                  if (s && s.getAudioTracks && s.getAudioTracks().length > 0) {
+                    audioTrackReady = true;
+                    break;
+                  }
+                } catch (e) {}
+              }
+              return {
+                title: document.title || '',
+                url: location.href || '',
+                secureContext: !!window.isSecureContext,
+                mediaElements: medias.length,
+                audioTrackReady,
+              };
+            })();
+            """
+            ctx_name, data = self._run_js_in_contexts(
+                script,
+                prefer_ctx_name=self.active_ctx_name,
+            )
+            if ctx_name:
+                self.active_ctx_name = ctx_name
+            if not isinstance(data, dict):
+                data = {}
+            data.update(
+                {
+                    "ctx": ctx_name or "tab_media_asr",
+                    "mode": self.input_mode,
+                    "provider": self._normalize_provider_name(),
+                    "captureMode": "tab_media_stream",
+                    "cloudOnly": False,
+                }
+            )
+            return data
         if self._is_python_asr_mode():
             provider_now = self._normalize_provider_name()
             self._sync_capture_mode(provider_now)
@@ -1826,6 +2758,26 @@ class VoiceCommandAgent:
         触发浏览器麦克风权限申请（会弹出授权窗口）。
         返回当前状态：requesting/granted/denied/unsupported。
         """
+        if self._is_tab_media_asr_mode():
+            if not self.vision_agent.ensure_connection():
+                return {"status": "no_page", "error": "browser_not_connected", "mode": self.input_mode}
+            diag = self.diagnose_voice_capability() or {}
+            if not self._is_valid_voice_page(diag):
+                return {
+                    "status": "wrong_page",
+                    "error": "not_in_tiktok_live_room",
+                    "mode": self.input_mode,
+                    "page_title": diag.get("title"),
+                    "page_url": diag.get("url"),
+                }
+            return {
+                "status": "granted",
+                "error": None,
+                "mode": self.input_mode,
+                "provider": self._normalize_provider_name(),
+                "captureMode": "tab_media_stream",
+                "cloudOnly": False,
+            }
         if self._is_python_asr_mode():
             provider_now = self._normalize_provider_name()
             self._sync_capture_mode(provider_now)
@@ -2042,6 +2994,19 @@ class VoiceCommandAgent:
 
     def get_microphone_permission_state(self):
         """读取最近一次麦克风权限申请状态。"""
+        if self._is_tab_media_asr_mode():
+            diag = self.diagnose_voice_capability() or {}
+            return {
+                "status": "granted" if self._is_valid_voice_page(diag) else "wrong_page",
+                "error": None if self._is_valid_voice_page(diag) else "not_in_tiktok_live_room",
+                "mode": self.input_mode,
+                "provider": self._normalize_provider_name(),
+                "captureMode": "tab_media_stream",
+                "cloudOnly": False,
+                "page_title": diag.get("title"),
+                "page_url": diag.get("url"),
+                "updatedAt": int(time.time() * 1000),
+            }
         if self._is_python_asr_mode():
             provider_now = self._normalize_provider_name()
             self._sync_capture_mode(provider_now)

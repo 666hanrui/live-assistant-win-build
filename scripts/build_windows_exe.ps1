@@ -515,6 +515,15 @@ pause
 "@
 Set-Content -Path $RunBatDebug -Value $RunBatDebugContent -Encoding ASCII
 
+$RunVbs = Join-Path $BundleDir "run_assistant_silent.vbs"
+$RunVbsContent = @"
+Set shell = CreateObject("WScript.Shell")
+baseDir = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
+shell.CurrentDirectory = baseDir
+shell.Run Chr(34) & baseDir & "\AI_Live_Assistant.exe" & Chr(34), 0, False
+"@
+Set-Content -Path $RunVbs -Value $RunVbsContent -Encoding ASCII
+
 $BuildInfoFile = Join-Path $BundleDir "build_info.txt"
 $BuildCommit = ""
 try {
@@ -556,4 +565,6 @@ Write-Host "EXE: $BundleDir\AI_Live_Assistant.exe"
 Write-Host "Run: $RunBat"
 Write-Host "Run (ASCII): $RunBatAscii"
 Write-Host "Run (Debug): $RunBatDebug"
+Write-Host "Run (Silent/VBS): $RunVbs"
+Write-Host "Runtime data dir (Windows preferred): %LOCALAPPDATA%\AI_Live_Assistant"
 Write-Host "Build info: $BuildInfoFile"
