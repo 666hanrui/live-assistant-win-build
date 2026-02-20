@@ -5,8 +5,8 @@ import re
 import json
 from collections import deque
 from pathlib import Path
-from config.settings import REPLY_INTERVAL, SEND_MESSAGE_MAX_CHARS, OPERATION_EXECUTION_MODE
-import config.settings as settings
+from app_config.settings import REPLY_INTERVAL, SEND_MESSAGE_MAX_CHARS, OPERATION_EXECUTION_MODE
+import app_config.settings as settings
 from utils.mouse_utils import (
     human_click,
     human_pause,

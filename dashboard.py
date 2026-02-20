@@ -5,7 +5,7 @@ import subprocess
 import sys
 import pandas as pd
 from main import LiveAssistant
-import config.settings as settings
+import app_config.settings as settings
 import os
 import shutil
 from pathlib import Path

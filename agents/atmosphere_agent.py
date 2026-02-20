@@ -1,5 +1,5 @@
 from utils.logger import logger
-from config.settings import KEYWORD_REPLIES, DEFAULT_REPLY_LANGUAGE
+from app_config.settings import KEYWORD_REPLIES, DEFAULT_REPLY_LANGUAGE
 
 class AtmosphereAgent:
     def __init__(self):

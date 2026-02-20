@@ -7,7 +7,7 @@ from pathlib import Path
 from collections import deque
 import numpy as np
 from utils.logger import logger
-import config.settings as settings
+import app_config.settings as settings
 
 
 class VoiceCommandAgent:

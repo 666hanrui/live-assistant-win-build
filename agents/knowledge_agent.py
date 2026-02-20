@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.documents import Document
 from utils.logger import logger
 from utils.hash_embeddings import HashEmbeddings
-import config.settings as settings
+import app_config.settings as settings
 import os
 import json
 import re

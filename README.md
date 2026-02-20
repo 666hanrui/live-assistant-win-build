@@ -75,7 +75,7 @@ flowchart LR
 ├── main.py                       # 主流程编排（LiveAssistant）
 ├── dashboard.py                  # Streamlit 控制台
 ├── app_launcher.py               # EXE 入口（运行时目录与自动打开控制台）
-├── config/
+├── app_config/
 │   └── settings.py               # 全量配置（含 .env 轻量加载）
 ├── agents/
 │   ├── vision_agent.py           # 浏览器连接、标签页评分、弹幕抓取

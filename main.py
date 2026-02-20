@@ -21,7 +21,7 @@ from agents.voice_command_agent import VoiceCommandAgent
 from agents.analytics_agent import AnalyticsAgent
 from utils.logger import logger
 from utils.platform_utils import build_chrome_debug_commands, build_chrome_debug_launch_args
-import config.settings as settings
+import app_config.settings as settings
 
 class LiveAssistant:
     def __init__(self):

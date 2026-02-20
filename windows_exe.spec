@@ -22,7 +22,7 @@ datas += add_path(".env.example")
 datas += add_path("README.md")
 datas += add_path("文档.txt")
 
-for folder in ("docs", "assets", "data", "config", "models"):
+for folder in ("docs", "assets", "data", "app_config", "models"):
     datas += add_path(folder, folder)
 
 datas += collect_data_files("streamlit")
@@ -34,7 +34,7 @@ datas += collect_data_files("tiktoken")
 hiddenimports = [
     "dashboard",
     "main",
-    "config.settings",
+    "app_config.settings",
     "streamlit.web.cli",
     "streamlit.runtime",
 ]
@@ -51,7 +51,7 @@ for pkg in ("streamlit", "altair", "pydeck", "pygments", "tiktoken", "watchdog")
 for pkg in (
     "agents",
     "utils",
-    "config",
+    "app_config",
     "streamlit",
     "langchain",
     "langchain_community",

@@ -2,7 +2,7 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 from utils.logger import logger
 from utils.page_ocr_reader import PageOCRReader
 from utils.screen_capture import ScreenCapture
-import config.settings as settings
+import app_config.settings as settings
 import time
 import re
 

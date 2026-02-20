@@ -316,7 +316,7 @@ if ([string]::IsNullOrWhiteSpace($BundleDir) -or !(Test-Path $BundleDir -PathTyp
   }
 }
 
-Write-Host "[6/6] Copying config and model files..."
+Write-Host "[6/6] Copying app_config and model files..."
 $DashboardSource = Join-Path $Root "dashboard.py"
 $DashboardInBundle = @(
   (Join-Path $BundleDir "_internal\dashboard.py"),
