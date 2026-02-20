@@ -300,6 +300,8 @@ VOICE_COMMAND_CROSS_LANGUAGE_ORDER = _split_csv_env("VOICE_COMMAND_CROSS_LANGUAG
 VOICE_COMMAND_MAX_LANGS = int(os.getenv("VOICE_COMMAND_MAX_LANGS", "2"))
 # provider: whisper_local / dashscope_funasr / hybrid_local_cloud / auto / google / sphinx
 VOICE_PYTHON_ASR_PROVIDER = os.getenv("VOICE_PYTHON_ASR_PROVIDER", "whisper_local").strip().lower()
+# dashscope_funasr 仅云上模式时，强制走系统回采（loopback），不走本地实体麦克风。
+VOICE_DASHSCOPE_FORCE_LOOPBACK = os.getenv("VOICE_DASHSCOPE_FORCE_LOOPBACK", "true").lower() in ("1", "true", "yes", "on")
 VOICE_ASR_ALLOW_GOOGLE_FALLBACK = os.getenv("VOICE_ASR_ALLOW_GOOGLE_FALLBACK", "false").lower() in ("1", "true", "yes", "on")
 VOICE_ASR_AUTO_SWITCH_ON_TIMEOUT = os.getenv("VOICE_ASR_AUTO_SWITCH_ON_TIMEOUT", "false").lower() in ("1", "true", "yes", "on")
 # 兼容旧配置：已不再用于自动注入 DashScope 备用链路（改为通过 VOICE_PYTHON_ASR_PROVIDER 显式选择）

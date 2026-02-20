@@ -22,7 +22,7 @@ class VoiceCommandAgent:
     def __init__(self, vision_agent):
         self.vision_agent = vision_agent
         self.input_mode = str(getattr(settings, "VOICE_COMMAND_INPUT_MODE", "web_speech") or "web_speech").strip().lower()
-        self._local_capture_mode = "loopback" if self._is_loopback_asr_mode() else "mic"
+        self._local_capture_mode = self._resolve_capture_mode()
         self.last_lang = None
         self.last_langs = []
         self.enabled_in_page = False
@@ -79,6 +79,47 @@ class VoiceCommandAgent:
     def get_mode(self):
         return self.input_mode
 
+    def _normalize_provider_name(self, provider=None):
+        raw = str(
+            provider
+            if provider is not None
+            else getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local")
+            or "whisper_local"
+        ).strip().lower()
+        aliases = {
+            "dashscope": "dashscope_funasr",
+            "aliyun_funasr": "dashscope_funasr",
+            "funasr": "dashscope_funasr",
+            "hybrid": "hybrid_local_cloud",
+            "local_cloud": "hybrid_local_cloud",
+            "cloud_local": "hybrid_local_cloud",
+        }
+        return aliases.get(raw, raw)
+
+    def _is_dashscope_force_loopback(self, provider=None):
+        if not bool(getattr(settings, "VOICE_DASHSCOPE_FORCE_LOOPBACK", True)):
+            return False
+        return self._normalize_provider_name(provider) == "dashscope_funasr"
+
+    def _resolve_capture_mode(self, provider=None):
+        if self._is_dashscope_force_loopback(provider):
+            return "loopback"
+        if self.input_mode in {
+            "system_loopback_asr",
+            "loopback_asr",
+            "system_audio_asr",
+            "tab_audio_asr",
+            "loopback",
+        }:
+            return "loopback"
+        return "mic"
+
+    def _sync_capture_mode(self, provider=None):
+        mode = self._resolve_capture_mode(provider)
+        self._local_capture_mode = mode
+        self._local_mic_state["captureMode"] = mode
+        return mode
+
     def _is_python_asr_mode(self):
         return self.input_mode in {
             "python_asr",
@@ -93,13 +134,7 @@ class VoiceCommandAgent:
         }
 
     def _is_loopback_asr_mode(self):
-        return self.input_mode in {
-            "system_loopback_asr",
-            "loopback_asr",
-            "system_audio_asr",
-            "tab_audio_asr",
-            "loopback",
-        }
+        return self._resolve_capture_mode() == "loopback"
 
     def requires_browser_page(self):
         return not self._is_python_asr_mode()
@@ -256,6 +291,7 @@ class VoiceCommandAgent:
         }
 
     def set_preferred_microphone(self, device_index=None, name_hint=None, restart_if_running=False):
+        self._sync_capture_mode()
         if device_index is None:
             self._preferred_mic_device_index = -1
         else:
@@ -293,6 +329,7 @@ class VoiceCommandAgent:
             time.sleep(0.2)
 
         try:
+            self._sync_capture_mode()
             recognizer = sr.Recognizer()
             recognizer.dynamic_energy_threshold = True
             timeout_s = max(1.2, float(duration_seconds))
@@ -346,6 +383,10 @@ class VoiceCommandAgent:
         2) 再尝试默认设备
         3) 默认失败时，按名称 hint 或第一个可用设备兜底
         """
+        provider_now = self._normalize_provider_name()
+        self._sync_capture_mode(provider_now)
+        cloud_force_loopback = self._is_dashscope_force_loopback(provider_now)
+        mic_like_tokens = ["microphone", "mic", "麦克风", "内建", "built-in", "builtin", "array"]
         configured_idx = int(self._preferred_mic_device_index)
         if configured_idx < 0:
             if self._is_loopback_asr_mode():
@@ -363,13 +404,23 @@ class VoiceCommandAgent:
         names = self._list_local_microphones(sr)
 
         if configured_idx >= 0:
-            try:
-                return sr.Microphone(device_index=configured_idx), configured_idx
-            except Exception:
-                pass
+            if (
+                cloud_force_loopback
+                and isinstance(names, list)
+                and 0 <= configured_idx < len(names)
+                and any(tok in str(names[configured_idx] or "").lower() for tok in mic_like_tokens)
+            ):
+                configured_idx = -1
+            else:
+                try:
+                    return sr.Microphone(device_index=configured_idx), configured_idx
+                except Exception:
+                    pass
 
         if not names:
             # 没有枚举到设备时再尝试系统默认设备。
+            if self._is_loopback_asr_mode() and cloud_force_loopback:
+                raise RuntimeError("loopback_device_required_for_dashscope_cloud_asr")
             try:
                 return sr.Microphone(), None
             except Exception:
@@ -402,7 +453,6 @@ class VoiceCommandAgent:
 
         if self._is_loopback_asr_mode():
             # loopback 模式尽量避免回退到实体麦克风，优先选择“非麦克风命名”的设备。
-            mic_like_tokens = ["microphone", "mic", "麦克风", "内建", "built-in", "builtin", "array"]
             for idx, name in enumerate(names):
                 n = str(name or "").lower()
                 if any(tok in n for tok in mic_like_tokens):
@@ -411,6 +461,8 @@ class VoiceCommandAgent:
                     return sr.Microphone(device_index=idx), idx
                 except Exception:
                     continue
+            if cloud_force_loopback:
+                raise RuntimeError("loopback_device_required_for_dashscope_cloud_asr")
 
         # 最后兜底：第一个可用设备
         for idx in range(len(names)):
@@ -457,7 +509,7 @@ class VoiceCommandAgent:
         """
         预热本地 ASR 模型，减少首次识别延迟。
         """
-        provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").lower()
+        provider = self._normalize_provider_name()
         if not force and provider not in {"whisper_local", "auto"}:
             return {"ok": True, "skipped": "provider_no_whisper"}
         if self._whisper_model is not None and not force:
@@ -698,16 +750,7 @@ class VoiceCommandAgent:
         return str(self._extract_text_from_dashscope_result(result) or "").strip()
 
     def _recognize_with_provider(self, recognizer, audio, langs):
-        provider_raw = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").lower()
-        provider_aliases = {
-            "dashscope": "dashscope_funasr",
-            "aliyun_funasr": "dashscope_funasr",
-            "funasr": "dashscope_funasr",
-            "hybrid": "hybrid_local_cloud",
-            "local_cloud": "hybrid_local_cloud",
-            "cloud_local": "hybrid_local_cloud",
-        }
-        provider = provider_aliases.get(provider_raw, provider_raw)
+        provider = self._normalize_provider_name()
         primary_lang = str((langs or [""])[0] or "").lower()
         allow_google_fallback = bool(getattr(settings, "VOICE_ASR_ALLOW_GOOGLE_FALLBACK", False))
         dashscope_available = bool(self._get_dashscope_api_key())
@@ -1000,7 +1043,8 @@ class VoiceCommandAgent:
         timeout_s = max(0.5, float(getattr(settings, "VOICE_PYTHON_LISTEN_TIMEOUT_SECONDS", 2.5)))
         phrase_s = max(0.6, float(getattr(settings, "VOICE_PYTHON_PHRASE_TIME_LIMIT_SECONDS", 4.0)))
         ambient_s = max(0.0, float(getattr(settings, "VOICE_PYTHON_AMBIENT_ADJUST_SECONDS", 0.25)))
-        provider_now = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").lower()
+        provider_now = self._normalize_provider_name()
+        self._sync_capture_mode(provider_now)
         self._local_mic_state["provider"] = provider_now
         dyn_energy = bool(getattr(settings, "VOICE_PYTHON_DYNAMIC_ENERGY", True))
         energy_threshold = int(getattr(settings, "VOICE_PYTHON_ENERGY_THRESHOLD", 280))
@@ -1123,13 +1167,13 @@ class VoiceCommandAgent:
             self.last_start_errors = []
             self.last_start_diag = {
                 "mode": self.input_mode,
-                "provider": settings.VOICE_PYTHON_ASR_PROVIDER,
+                "provider": provider_now,
                 "captureMode": self._local_capture_mode,
             }
             self.last_start_success_at = time.time()
             logger.info(
                 "Python ASR 语音监听已启动: "
-                f"capture_mode={self._local_capture_mode}, provider={settings.VOICE_PYTHON_ASR_PROVIDER}, langs={langs}"
+                f"capture_mode={self._local_capture_mode}, provider={provider_now}, langs={langs}"
             )
             return True
         self.last_start_reason = self._local_error or "python_asr_start_failed"
@@ -1465,7 +1509,7 @@ class VoiceCommandAgent:
         """确保语音识别已开启且语言配置正确。"""
         if self._is_python_asr_mode():
             expected_langs = self._dedupe_langs(language, fallback_languages)
-            expected_provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").strip().lower()
+            expected_provider = self._normalize_provider_name()
             current_provider = str(self._local_mic_state.get("provider") or "").strip().lower()
             provider_changed = bool(current_provider and current_provider != expected_provider)
             if self._local_running and expected_langs == self.last_langs and not provider_changed:
@@ -1514,8 +1558,10 @@ class VoiceCommandAgent:
 
     def get_state(self):
         if self._is_python_asr_mode():
-            configured_provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local")
+            configured_provider = self._normalize_provider_name()
+            self._sync_capture_mode(configured_provider)
             runtime_provider = self._last_provider_selected or self._last_provider_attempt or configured_provider
+            cloud_only = self._is_dashscope_force_loopback(configured_provider)
             device_name = str(self._local_mic_state.get("deviceName") or "")
             loopback_likely_mic = bool(
                 self._is_loopback_asr_mode()
@@ -1541,6 +1587,7 @@ class VoiceCommandAgent:
                 "runtimeProviderError": self._last_provider_error,
                 "runtimeProviderAt": self._last_provider_at,
                 "usingCloudAsr": self._provider_runtime_kind(runtime_provider) == "cloud",
+                "cloudOnly": bool(cloud_only),
                 "loopbackLikelyMic": loopback_likely_mic,
                 "deviceIndex": self._local_mic_state.get("deviceIndex"),
                 "deviceName": self._local_mic_state.get("deviceName"),
@@ -1730,12 +1777,15 @@ class VoiceCommandAgent:
 
     def diagnose_voice_capability(self):
         if self._is_python_asr_mode():
+            provider_now = self._normalize_provider_name()
+            self._sync_capture_mode(provider_now)
             sr = self._import_speech_recognition()
             return {
                 "ctx": "python_asr",
                 "mode": self.input_mode,
-                "provider": settings.VOICE_PYTHON_ASR_PROVIDER,
+                "provider": provider_now,
                 "captureMode": self._local_capture_mode,
+                "cloudOnly": bool(self._is_dashscope_force_loopback(provider_now)),
                 "speechRecognition": bool(sr),
                 "mediaDevices": bool(sr),
                 "secureContext": True,
@@ -1777,6 +1827,8 @@ class VoiceCommandAgent:
         返回当前状态：requesting/granted/denied/unsupported。
         """
         if self._is_python_asr_mode():
+            provider_now = self._normalize_provider_name()
+            self._sync_capture_mode(provider_now)
             sr = self._import_speech_recognition()
             if sr is None:
                 self._set_local_mic_state("unsupported", "missing_speech_recognition")
@@ -1805,8 +1857,9 @@ class VoiceCommandAgent:
                     "status": "granted",
                     "error": None,
                     "mode": self.input_mode,
-                    "provider": settings.VOICE_PYTHON_ASR_PROVIDER,
+                    "provider": provider_now,
                     "captureMode": self._local_capture_mode,
+                    "cloudOnly": bool(self._is_dashscope_force_loopback(provider_now)),
                     "deviceIndex": selected_idx,
                     "deviceName": device_name,
                 }
@@ -1990,10 +2043,13 @@ class VoiceCommandAgent:
     def get_microphone_permission_state(self):
         """读取最近一次麦克风权限申请状态。"""
         if self._is_python_asr_mode():
+            provider_now = self._normalize_provider_name()
+            self._sync_capture_mode(provider_now)
             state = dict(self._local_mic_state)
             state.setdefault("mode", self.input_mode)
-            state.setdefault("provider", settings.VOICE_PYTHON_ASR_PROVIDER)
+            state.setdefault("provider", provider_now)
             state.setdefault("captureMode", self._local_capture_mode)
+            state.setdefault("cloudOnly", bool(self._is_dashscope_force_loopback(provider_now)))
             if self._local_running:
                 state["status"] = "granted"
                 state["error"] = None

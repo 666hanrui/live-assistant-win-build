@@ -1142,7 +1142,7 @@ def _run_system_self_check(assistant):
             )
             add("Voice Probe", probe_ok, probe_detail)
 
-        if _is_loopback_voice_mode(voice_mode):
+        if _is_loopback_voice_mode(voice_mode) or str(voice_state.get("captureMode") or "").strip().lower() == "loopback":
             capture_mode = str(voice_state.get("captureMode") or "").strip().lower()
             source = str(voice_state.get("source") or "").strip().lower()
             loopback_ok = capture_mode == "loopback" and source == "python_loopback"
@@ -1408,10 +1408,11 @@ def render_top_live_status_fragment():
     live_voice_mode = _get_voice_mode(assistant)
     live_is_python_voice_mode = _is_local_voice_mode(live_voice_mode)
     live_is_loopback_voice_mode = _is_loopback_voice_mode(live_voice_mode)
+    live_effective_loopback = live_is_loopback_voice_mode or str(live_snapshot.get("voice_capture_mode") or "").strip().lower() == "loopback"
     live_voice_diag = _get_voice_diag(assistant)
     live_browser_name = _infer_browser_name(voice_diag=live_voice_diag, launch_cmd=live_launch.get("primary", ""))
     if live_is_python_voice_mode:
-        if live_is_loopback_voice_mode:
+        if live_effective_loopback:
             live_mic_guide = "当前为系统回采 ASR 模式：请将浏览器声音路由到回采输入设备（如 BlackHole/Stereo Mix/VB-CABLE）。"
         else:
             live_mic_guide = "当前为 Python 本地 ASR 模式：仅需系统麦克风权限，不依赖 TikTok 网页站点权限。"
@@ -1627,10 +1628,11 @@ mic_perm = _get_mic_permission_state(st.session_state.assistant)
 voice_mode = _get_voice_mode(st.session_state.assistant)
 is_python_voice_mode = _is_local_voice_mode(voice_mode)
 is_loopback_voice_mode = _is_loopback_voice_mode(voice_mode)
+effective_loopback_voice_mode = is_loopback_voice_mode or str(snapshot.get("voice_capture_mode") or "").strip().lower() == "loopback"
 voice_diag = _get_voice_diag(st.session_state.assistant)
 browser_name = _infer_browser_name(voice_diag=voice_diag, launch_cmd=launch_info.get("primary", ""))
 if is_python_voice_mode:
-    if is_loopback_voice_mode:
+    if effective_loopback_voice_mode:
         mic_guide = "当前为系统回采 ASR 模式：请将浏览器播放音频路由到回采输入设备。"
     else:
         mic_guide = "当前为 Python 本地 ASR 模式：仅需系统麦克风权限，不依赖 TikTok 网页站点权限。"
@@ -2043,7 +2045,7 @@ with st.sidebar:
                 if perm_state:
                     st.caption(f"浏览器站点权限状态: {perm_state}")
                 if is_python_voice_mode:
-                    if is_loopback_voice_mode:
+                    if effective_loopback_voice_mode:
                         st.caption("请在系统音频设置中确认“浏览器输出 -> 回采输入设备”链路已建立，然后重试。")
                     else:
                         st.caption("请在系统设置中允许当前运行程序访问麦克风，然后重新点击“申请音频输入权限”。")
@@ -2069,8 +2071,12 @@ with st.sidebar:
                     for cmd in get_python_asr_install_guide():
                         st.code(cmd, language="bash")
             elif status == "error" and is_python_voice_mode:
-                st.error(f"本地音频输入初始化失败：{result.get('error') or 'unknown'}")
-                if is_loopback_voice_mode:
+                err_msg = str(result.get("error") or "unknown")
+                if "loopback_device_required_for_dashscope_cloud_asr" in err_msg:
+                    st.error("DashScope 仅云上模式需要系统回采设备：未检测到可用回采输入。")
+                else:
+                    st.error(f"本地音频输入初始化失败：{err_msg}")
+                if effective_loopback_voice_mode:
                     st.caption("请检查系统是否存在可用回采输入设备（BlackHole/Stereo Mix/VB-CABLE）。")
                     st.caption("也可在 .env 指定设备：VOICE_LOOPBACK_DEVICE_INDEX=0（按设备列表调整）")
                 else:
@@ -2087,7 +2093,7 @@ with st.sidebar:
 
         if is_python_voice_mode:
             st.markdown("---")
-            if is_loopback_voice_mode:
+            if effective_loopback_voice_mode:
                 st.caption("🎛️ 本地音频回采调试（Loopback ASR）")
             else:
                 st.caption("🎛️ 本地麦克风调试（Python ASR）")
@@ -2112,9 +2118,13 @@ with st.sidebar:
                 "ASR Provider",
                 options=provider_options,
                 key="voice_asr_provider_ui",
-                help="whisper_local: 本地识别；dashscope_funasr: 阿里云识别；hybrid_local_cloud: 本地+阿里云混合链路；auto: 自动本地链路；google: 在线识别；sphinx: 离线识别(偏英文)。"
+                help="whisper_local: 本地识别；dashscope_funasr: 阿里云识别（可配置仅云上）；hybrid_local_cloud: 本地+阿里云混合链路；auto: 自动本地链路；google: 在线识别；sphinx: 离线识别(偏英文)。"
             )
-            st.caption("阿里云 Key 可在左侧「🎙️ 阿里云 ASR API 配置」里配置；云端不会再被自动当作备用链路注入。")
+            dashscope_force_loopback = bool(getattr(settings, "VOICE_DASHSCOPE_FORCE_LOOPBACK", True))
+            if st.session_state.voice_asr_provider_ui == "dashscope_funasr" and dashscope_force_loopback:
+                st.caption("已启用“仅云上 ASR”采集策略：使用系统回采（loopback），不走本地实体麦克风。")
+            else:
+                st.caption("阿里云 Key 可在左侧「🎙️ 阿里云 ASR API 配置」里配置；云端不会再被自动当作备用链路注入。")
             if st.button("应用 ASR Provider", key="btn_apply_asr_provider", use_container_width=True):
                 if hasattr(st.session_state.assistant, "set_voice_asr_provider") and st.session_state.assistant.set_voice_asr_provider(st.session_state.voice_asr_provider_ui):
                     st.success(f"ASR Provider 已切换为 {st.session_state.voice_asr_provider_ui}")
@@ -2124,7 +2134,10 @@ with st.sidebar:
 
             devices = _list_python_mic_devices(st.session_state.assistant)
             if not devices:
-                st.warning("未检测到可用输入设备。请先在系统设置确认麦克风可用。")
+                if effective_loopback_voice_mode:
+                    st.warning("未检测到可用回采输入设备。请先确认 BlackHole/Stereo Mix/VB-CABLE 等系统回采设备可用。")
+                else:
+                    st.warning("未检测到可用输入设备。请先在系统设置确认麦克风可用。")
             else:
                 options = [-1] + [int(d.get("index", -1)) for d in devices]
                 labels = {-1: "系统默认设备"}
@@ -2329,7 +2342,7 @@ with tab0:
             elif status == "wrong_page":
                 st.error("请先切到 TikTok 直播间页（@xxx/live）再申请音频输入权限。")
             elif status == "denied" and is_python_voice_mode:
-                if is_loopback_voice_mode:
+                if effective_loopback_voice_mode:
                     st.error("系统回采输入不可用或被拒绝，请检查回采设备权限与音频路由后重试。")
                 else:
                     st.error("系统麦克风权限被拒绝，请在系统设置中允许当前运行程序后重试。")
