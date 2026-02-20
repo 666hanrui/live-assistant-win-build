@@ -1186,7 +1186,9 @@ LOG_FILE = "logs/app.log"
 def load_logs():
     """读取最新的日志"""
     if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r") as f:
+        # EXE 在 Windows 中文系统下默认文本编码常为 gbk，
+        # 日志文件可能是 UTF-8；这里固定 UTF-8 并容错，避免解码崩溃。
+        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
             # 读取最后 50 行
             lines = f.readlines()[-50:]
             return "".join(lines)
@@ -1280,7 +1282,10 @@ def render_monitor_body():
 @st.fragment(run_every="1s")
 def render_monitor_fragment():
     """仅局部刷新监控区，避免整页闪烁。"""
-    render_monitor_body()
+    try:
+        render_monitor_body()
+    except Exception as e:
+        st.error(f"运行监控渲染异常：{e}")
 
 
 @st.fragment(run_every="1s")
@@ -1537,8 +1542,8 @@ if not snapshot["llm_online"]:
     st.info("LLM 当前离线，主功能仍可运行（关键词回复/运营动作/暖场）。")
 
 # 侧边栏：状态与控制
-    with st.sidebar:
-        st.title("控制中心")
+with st.sidebar:
+    st.title("控制中心")
 
     st.subheader("系统状态")
     col1, col2 = st.columns(2)
@@ -2162,7 +2167,7 @@ if not snapshot["llm_online"]:
 if st.session_state.get("show_user_guide"):
     with st.expander("📘 使用说明书（点击收起）", expanded=True):
         st.markdown(_load_user_guide_markdown())
-
+    
 # 主界面：选项卡
 tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     ["🚀 主功能面板", "📊 运行监控", "🧠 知识库调试", "👁️ 视觉调试", "💬 场控调试", "📈 数据报表", "✅ 系统自检"]
