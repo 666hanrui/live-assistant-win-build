@@ -978,9 +978,10 @@ class VoiceCommandAgent:
         ensure_browser_page = getattr(self.vision_agent, "ensure_browser_page_connection", None)
         if callable(ensure_browser_page):
             try:
-                browser_ready = bool(ensure_browser_page(force=False, prefer_media_tab=True))
+                # 显式启动播放器流 ASR 时强制探活，避免被直播页重连冷却阻断。
+                browser_ready = bool(ensure_browser_page(force=True, prefer_media_tab=True))
             except TypeError:
-                browser_ready = bool(ensure_browser_page(force=False))
+                browser_ready = bool(ensure_browser_page(force=True))
         else:
             browser_ready = bool(self.vision_agent.ensure_connection())
         if not browser_ready:

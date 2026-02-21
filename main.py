@@ -184,11 +184,11 @@ class LiveAssistant:
             "last_start_at": self.last_start_at or 0.0,
         }
 
-    def get_browser_connected(self):
+    def get_browser_connected(self, allow_rebind=True):
         """
         连接状态自愈判断：
         - 优先复用当前 page
-        - page 丢失时，若 DevTools 端口仍在线，则尝试轻量重挂接
+        - page 丢失时，若 DevTools 端口仍在线，可按需尝试轻量重挂接
         """
         if self.get_web_info_source_mode() == "screen_ocr":
             try:
@@ -202,6 +202,9 @@ class LiveAssistant:
                 return True
         except Exception:
             pass
+
+        if not allow_rebind:
+            return False
 
         try:
             if self._is_devtools_endpoint_ready(settings.BROWSER_PORT):
@@ -1741,6 +1744,57 @@ class LiveAssistant:
                     command=command,
                 )
 
+    def poll_voice_inputs_when_stopped(self, limit=20):
+        """
+        主监听停止时的轻量语音轮询（仅识别，不执行动作）。
+        用于 ASR 调试时脱离 TikTok 主链路观察识别结果。
+        """
+        if self.is_running:
+            return []
+        if not self.voice_command_enabled:
+            return []
+        if self.cloud_asr_test_enabled:
+            return []
+
+        now = time.time()
+        if now - self.last_voice_poll_at < settings.VOICE_COMMAND_POLL_INTERVAL_SECONDS:
+            return []
+        self.last_voice_poll_at = now
+
+        active_language = self._get_active_language()
+        fallback_languages = self._get_voice_fallback_languages(active_language)
+        started = self.voice.ensure_started(
+            language=active_language,
+            fallback_languages=fallback_languages,
+            silence_restart_seconds=settings.VOICE_COMMAND_SILENCE_RESTART_SECONDS,
+        )
+        if not started:
+            return []
+
+        try:
+            n = max(1, int(limit or 20))
+        except Exception:
+            n = 20
+
+        transcripts = self.voice.collect_command_candidates(include_subtitle=True) or []
+        out = []
+        for item in transcripts[:n]:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            source = str(item.get("source") or "voice")
+            lang = str(item.get("lang") or "")
+            self._append_voice_input_log(
+                source=source,
+                text=text,
+                lang=lang,
+                status="captured",
+                note="standalone_asr",
+                command=None,
+            )
+            out.append({"source": source, "text": text, "lang": lang, "ts": item.get("ts")})
+        return out
+
     def _maybe_send_proactive_message(self):
         """在直播间空窗期主动暖场。"""
         if not self.proactive_enabled or not self.is_running:
@@ -2510,6 +2564,33 @@ class LiveAssistant:
                 time.sleep(interval)
         return False
 
+    def _ensure_browser_page_context_connected(self, prefer_media_tab=False):
+        """
+        仅确保可执行 JS 的浏览器上下文可用（不要求 TikTok 直播页）。
+        用于 ASR 对比测试等“非直播监听”场景。
+        """
+        ensure_browser_page = getattr(self.vision, "ensure_browser_page_connection", None)
+        if not callable(ensure_browser_page):
+            self.last_start_error = "browser_page_context_api_missing"
+            self.last_start_detail = "vision.ensure_browser_page_connection"
+            return False
+        try:
+            try:
+                ok = bool(ensure_browser_page(force=True, prefer_media_tab=bool(prefer_media_tab)))
+            except TypeError:
+                ok = bool(ensure_browser_page(force=True))
+        except Exception as e:
+            self.last_start_error = f"browser_page_context_unavailable:{e}"
+            self.last_start_detail = ""
+            return False
+        if ok:
+            self.last_start_error = ""
+            self.last_start_detail = "browser_page_context_ready"
+            return True
+        self.last_start_error = "browser_page_context_unavailable"
+        self.last_start_detail = ""
+        return False
+
     def handle_message(self, msg, allow_llm=True):
         """处理单条弹幕消息"""
         started_at = time.time()
@@ -2702,19 +2783,35 @@ class LiveAssistant:
             self.last_start_detail = ""
             self.last_start_at = time.time()
             try:
-                if not self._ensure_browser_connected():
-                    self.last_start_error = self.last_start_error or "browser_not_connected"
-                    logger.error("浏览器连接失败，未启动监听")
-                    return False
+                if self.cloud_asr_test_enabled:
+                    # ASR 测试模式只需要浏览器可执行 JS 上下文，不强制 TikTok 直播页。
+                    if not self._ensure_browser_page_context_connected(prefer_media_tab=True):
+                        self.last_start_error = self.last_start_error or "browser_page_context_unavailable"
+                        logger.error("ASR 测试模式浏览器上下文不可用，未启动监听")
+                        return False
+                else:
+                    if not self._ensure_browser_connected():
+                        self.last_start_error = self.last_start_error or "browser_not_connected"
+                        logger.error("浏览器连接失败，未启动监听")
+                        return False
 
                 self._stop_event.clear()
                 self.is_running = True
                 self._thread = threading.Thread(target=self._run_loop, daemon=True)
                 self._thread.start()
 
-                wait_s = max(0.0, settings.STARTUP_THREAD_READY_TIMEOUT_SECONDS)
-                if wait_s > 0:
-                    time.sleep(wait_s)
+                wait_s = max(0.0, float(settings.STARTUP_THREAD_READY_TIMEOUT_SECONDS))
+                # 启动确认采用短轮询，避免因配置过大导致 UI 长时间停留在“未运行”。
+                wait_cap = 2.0
+                if wait_s > wait_cap:
+                    logger.warning(
+                        f"STARTUP_THREAD_READY_TIMEOUT_SECONDS={wait_s} 过大，已按 {wait_cap}s 上限执行快速确认"
+                    )
+                wait_deadline = time.time() + min(wait_s, wait_cap)
+                while time.time() < wait_deadline:
+                    if self._thread and self._thread.is_alive():
+                        break
+                    time.sleep(0.03)
                 if not self._thread.is_alive():
                     raise RuntimeError("listener_thread_not_alive")
 

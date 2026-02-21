@@ -233,7 +233,7 @@ OCR_ACTION_REACTION_LLM_ENABLED = os.getenv("OCR_ACTION_REACTION_LLM_ENABLED", "
 OCR_ACTION_REACTION_LLM_MAX_CHECKS = int(os.getenv("OCR_ACTION_REACTION_LLM_MAX_CHECKS", "4"))
 OCR_ACTION_REACTION_LLM_MIN_INTERVAL_SECONDS = float(os.getenv("OCR_ACTION_REACTION_LLM_MIN_INTERVAL_SECONDS", "1.2"))
 # OCR 点击测试模式（pin/unpin）：
-# 将点击点固定为“相对每个链接行”的位置，并可在点击前弹窗给测试人员确认。
+# 将点击点固定为“相对每个链接行”的位置，并在点击后展示结果提示（成功/超时失败）。
 OCR_PIN_FIXED_ROW_CLICK_ENABLED = os.getenv("OCR_PIN_FIXED_ROW_CLICK_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 # pin/unpin 统一执行策略：默认强制只走“固定行相对点击”。
 PIN_UNPIN_FORCE_FIXED_ROW_CLICK = os.getenv("PIN_UNPIN_FORCE_FIXED_ROW_CLICK", "true").lower() in ("1", "true", "yes", "on")
@@ -248,6 +248,7 @@ OCR_PIN_FIXED_ROW_CLICK_OFFSET_X_RATIO = float(os.getenv("OCR_PIN_FIXED_ROW_CLIC
 OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_PX = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_PX", "0"))
 OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_RATIO = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_RATIO", "0"))
 OCR_PIN_CLICK_TEST_CONFIRM_POPUP = os.getenv("OCR_PIN_CLICK_TEST_CONFIRM_POPUP", "false").lower() in ("1", "true", "yes", "on")
+OCR_PIN_CLICK_TEST_MAX_WAIT_SECONDS = float(os.getenv("OCR_PIN_CLICK_TEST_MAX_WAIT_SECONDS", "3.8"))
 OCR_PIN_FIXED_ROW_CALIBRATION_LOG_ENABLED = os.getenv("OCR_PIN_FIXED_ROW_CALIBRATION_LOG_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 OCR_PIN_FIXED_ROW_CALIBRATION_LOG_PATH = os.getenv(
     "OCR_PIN_FIXED_ROW_CALIBRATION_LOG_PATH",

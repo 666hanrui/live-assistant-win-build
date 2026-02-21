@@ -11,7 +11,6 @@ from app_config.settings import REPLY_INTERVAL, SEND_MESSAGE_MAX_CHARS, OPERATIO
 import app_config.settings as settings
 from utils.mouse_utils import (
     human_click,
-    human_move_to,
     human_pause,
     human_paste,
     human_press,
@@ -82,6 +81,9 @@ class OperationsAgent:
             getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_RATIO", 0.0) or 0.0
         )
         self._ocr_pin_click_test_confirm_popup = bool(getattr(settings, "OCR_PIN_CLICK_TEST_CONFIRM_POPUP", False))
+        self._ocr_pin_click_test_max_wait_seconds = max(
+            0.5, float(getattr(settings, "OCR_PIN_CLICK_TEST_MAX_WAIT_SECONDS", 3.8) or 3.8)
+        )
         self._ocr_pin_fixed_row_calibration_log_enabled = bool(
             getattr(settings, "OCR_PIN_FIXED_ROW_CALIBRATION_LOG_ENABLED", True)
         )
@@ -301,6 +303,7 @@ class OperationsAgent:
             "message_keyboard_input_mode": str(self._message_keyboard_input_mode),
             "ocr_vision_allow_dom_fallback": bool(self._ocr_vision_allow_dom_fallback),
             "force_full_physical_chain": bool(self._force_full_physical_chain),
+            "pin_click_test_confirm_popup": bool(self._ocr_pin_click_test_confirm_popup),
         }
 
     def set_human_like_settings(self, **kwargs):
@@ -332,6 +335,8 @@ class OperationsAgent:
             self._ocr_vision_allow_dom_fallback = bool(kwargs.get("ocr_vision_allow_dom_fallback"))
         if "force_full_physical_chain" in kwargs:
             self._force_full_physical_chain = bool(kwargs.get("force_full_physical_chain"))
+        if "pin_click_test_confirm_popup" in kwargs:
+            self._ocr_pin_click_test_confirm_popup = bool(kwargs.get("pin_click_test_confirm_popup"))
         if self._force_full_physical_chain:
             self.execution_mode = "ocr_vision"
             self._ocr_physical_click_enabled = True
@@ -1217,38 +1222,81 @@ class OperationsAgent:
             },
         }
 
-    def _show_click_test_popup(self, message, timeout_seconds=120.0):
-        """点击测试弹窗（阻塞等待测试人员确认）。"""
+    def _show_click_test_popup(self, message, level="info", duration_ms=1800):
+        """点击测试提示：使用小尺寸页面 toast，避免阻塞执行链路。"""
         msg = str(message or "").strip()
         if not msg:
             return True, {"skipped": True}
+        tone = str(level or "info").strip().lower()
+        if tone not in {"info", "success", "error"}:
+            tone = "info"
+        ttl = max(800, min(12000, int(duration_ms or 1800)))
         contexts = self._ordered_contexts()
         if not contexts:
             return False, {"reason": "no_page_context"}
-        script = "alert(String(arguments[0] || '')); return true;"
+        script = """
+        const msg = String(arguments[0] || '');
+        const level = String(arguments[1] || 'info');
+        const ttl = Math.max(800, Math.min(12000, Number(arguments[2] || 1800)));
+        try {
+          const old = document.getElementById('__ocr_click_test_toast__');
+          if (old && old.parentNode) old.parentNode.removeChild(old);
+          const palette = {
+            info: { bg: 'rgba(17,24,39,0.92)', fg: '#f8fafc' },
+            success: { bg: 'rgba(21,128,61,0.95)', fg: '#f0fdf4' },
+            error: { bg: 'rgba(185,28,28,0.95)', fg: '#fef2f2' },
+          };
+          const c = palette[level] || palette.info;
+          const box = document.createElement('div');
+          box.id = '__ocr_click_test_toast__';
+          box.textContent = msg;
+          box.style.position = 'fixed';
+          box.style.right = '14px';
+          box.style.bottom = '14px';
+          box.style.maxWidth = '260px';
+          box.style.padding = '8px 10px';
+          box.style.borderRadius = '8px';
+          box.style.background = c.bg;
+          box.style.color = c.fg;
+          box.style.font = '12px/1.35 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif';
+          box.style.boxShadow = '0 6px 16px rgba(0,0,0,.22)';
+          box.style.zIndex = '2147483647';
+          box.style.opacity = '1';
+          box.style.transform = 'translateY(0)';
+          box.style.transition = 'opacity .18s ease, transform .18s ease';
+          (document.body || document.documentElement).appendChild(box);
+          setTimeout(() => {
+            box.style.opacity = '0';
+            box.style.transform = 'translateY(6px)';
+          }, Math.max(300, ttl - 220));
+          setTimeout(() => {
+            if (box && box.parentNode) box.parentNode.removeChild(box);
+          }, ttl);
+          return {ok:true};
+        } catch (e) {
+          return {ok:false, reason:String(e)};
+        }
+        """
         last_err = ""
         for ctx_name, ctx in contexts[:3]:
             try:
-                _ = ctx.run_js(script, msg, timeout=max(10.0, float(timeout_seconds or 120.0)))
-                return True, {"ctx": str(ctx_name or "page")}
+                result = ctx.run_js(script, msg, tone, int(ttl), timeout=1.2)
+                if isinstance(result, dict) and not bool(result.get("ok")):
+                    last_err = str(result.get("reason") or "toast_inject_failed")
+                    continue
+                return True, {"ctx": str(ctx_name or "page"), "level": tone}
             except Exception as e:
                 last_err = str(e)
                 continue
-        return False, {"reason": last_err or "popup_failed"}
+        return False, {"reason": last_err or "popup_failed", "level": tone}
 
-    def _build_click_test_notice(self, action, link_index, candidate):
-        meta = dict((candidate or {}).get("fixed_meta") or {})
-        row_center = dict(meta.get("row_center") or {})
-        target_point = dict(meta.get("target_ocr_point") or {})
-        return (
-            "[OCR点击测试确认]\n"
-            f"action={str(action or '')}\n"
-            f"link_index={int(link_index or 0)}\n"
-            f"viewport=({int((candidate or {}).get('vx') or 0)},{int((candidate or {}).get('vy') or 0)})\n"
-            f"row_center=({int(row_center.get('x') or 0)},{int(row_center.get('y') or 0)})\n"
-            f"target_ocr=({int(target_point.get('x') or 0)},{int(target_point.get('y') or 0)})\n"
-            "请确认该点位后点击“确定”继续执行点击。"
-        )
+    def _build_click_test_notice(self, clicked_ok, elapsed_ms=0, max_wait_ms=0, reason=""):
+        if clicked_ok:
+            return "已点击该位置"
+        base_reason = str(reason or "unknown")
+        if int(max_wait_ms or 0) > 0 and int(elapsed_ms or 0) > 0:
+            return f"点击失败：耗时{int(elapsed_ms)}ms超过{int(max_wait_ms)}ms，原因：{base_reason}"
+        return f"点击失败：{base_reason}"
 
     def _compact_rect(self, rect):
         if not isinstance(rect, dict):
@@ -1434,7 +1482,7 @@ class OperationsAgent:
             meta["error"] = str(e)
         return int(round(mx)), int(round(my)), meta
 
-    def _click_viewport_point(self, vx, vy, ocr=None, pre_click_notice=""):
+    def _click_viewport_point(self, vx, vy, ocr=None):
         if self._is_screen_ocr_info_mode():
             try:
                 tx, ty, map_meta = self._normalize_screen_click_point(vx, vy, ocr=ocr)
@@ -1478,28 +1526,8 @@ class OperationsAgent:
                     f"scaled={bool(map_meta.get('scaled'))}, clamped={bool(map_meta.get('clamped'))}, "
                     f"capture={map_meta.get('capture_rect')}, screen={map_meta.get('mouse_screen')}"
                 )
-                popup_result = {}
-                if pre_click_notice:
-                    human_move_to(int(tx), int(ty), jitter_px=max(0.6, min(self._human_click_jitter, 1.2)), overshoot=False)
-                    popup_ok, popup_result = self._show_click_test_popup(pre_click_notice)
-                    if not popup_ok:
-                        reason = str((popup_result or {}).get("reason") or "test_click_popup_failed")
-                        self._remember_click_result("test_popup_failed", {"x": int(tx), "y": int(ty)}, reason)
-                        return {
-                            "ok": False,
-                            "ctx": "screen",
-                            "driver": "test_popup_failed",
-                            "reason": reason,
-                            "point": {"x": int(tx), "y": int(ty)},
-                            "input_point": {"x": int(vx), "y": int(vy)},
-                            "map_meta": map_meta,
-                            "popup": popup_result,
-                        }
                 self._human_action_delay("screen_click_pre")
-                if pre_click_notice:
-                    human_click(jitter_px=self._human_click_jitter)
-                else:
-                    human_click(int(tx), int(ty), jitter_px=self._human_click_jitter)
+                human_click(int(tx), int(ty), jitter_px=self._human_click_jitter)
                 self._human_action_post_delay("screen_click_post")
                 self._remember_click_result("physical_screen", {"x": int(tx), "y": int(ty)})
                 return {
@@ -1509,7 +1537,6 @@ class OperationsAgent:
                     "point": {"x": int(tx), "y": int(ty)},
                     "input_point": {"x": int(vx), "y": int(vy)},
                     "map_meta": map_meta,
-                    "popup": popup_result,
                 }
             except Exception as e:
                 self._remember_click_result("physical_screen_failed", {"x": int(vx), "y": int(vy)}, str(e))
@@ -1526,27 +1553,8 @@ class OperationsAgent:
             if screen_point:
                 sx, sy = screen_point
                 try:
-                    popup_result = {}
-                    if pre_click_notice:
-                        human_move_to(int(sx), int(sy), jitter_px=max(0.6, min(self._human_click_jitter, 1.2)), overshoot=False)
-                        popup_ok, popup_result = self._show_click_test_popup(pre_click_notice)
-                        if not popup_ok:
-                            reason = str((popup_result or {}).get("reason") or "test_click_popup_failed")
-                            self._remember_click_result("test_popup_failed", {"x": int(sx), "y": int(sy)}, reason)
-                            return {
-                                "ok": False,
-                                "ctx": "screen_from_viewport",
-                                "driver": "test_popup_failed",
-                                "reason": reason,
-                                "point": {"x": int(sx), "y": int(sy)},
-                                "viewport_point": {"x": int(vx), "y": int(vy)},
-                                "popup": popup_result,
-                            }
                     self._human_action_delay("ocr_physical_click_pre")
-                    if pre_click_notice:
-                        human_click(jitter_px=self._human_click_jitter)
-                    else:
-                        human_click(int(sx), int(sy), jitter_px=self._human_click_jitter)
+                    human_click(int(sx), int(sy), jitter_px=self._human_click_jitter)
                     self._human_action_post_delay("ocr_physical_click_post")
                     self._remember_click_result("physical_viewport", {"x": int(sx), "y": int(sy)})
                     return {
@@ -1555,7 +1563,6 @@ class OperationsAgent:
                         "driver": "physical_viewport",
                         "point": {"x": int(sx), "y": int(sy)},
                         "viewport_point": {"x": int(vx), "y": int(vy)},
-                        "popup": popup_result,
                     }
                 except Exception as e:
                     logger.warning(f"OCR 物理鼠标点击失败，回退JS点击: {e}")
@@ -2423,10 +2430,34 @@ class OperationsAgent:
                 f"OCR点击尝试: action={action}, attempt={attempt_idx + 1}/{max_attempts}, "
                 f"label={p.get('label')}, point=({int(p['vx'])},{int(p['vy'])})"
             )
-            click_notice = ""
+            click_started_at = time.time()
+            click_res = self._click_viewport_point(p["vx"], p["vy"], ocr=ocr)
+            click_elapsed_ms = int(max(0.0, (time.time() - click_started_at) * 1000.0))
+            if isinstance(click_res, dict):
+                click_res.setdefault("elapsed_ms", int(click_elapsed_ms))
+
             if bool(p.get("fixed_mode")) and self._ocr_pin_click_test_confirm_popup:
-                click_notice = self._build_click_test_notice(action, link_idx if link_idx else link_index, p)
-            click_res = self._click_viewport_point(p["vx"], p["vy"], ocr=ocr, pre_click_notice=click_notice)
+                max_wait_ms = int(float(self._ocr_pin_click_test_max_wait_seconds or 0.0) * 1000.0)
+                if bool((click_res or {}).get("ok")) and click_elapsed_ms <= max_wait_ms:
+                    msg = self._build_click_test_notice(True)
+                    toast_ok, toast_meta = self._show_click_test_popup(msg, level="success", duration_ms=1200)
+                    if not toast_ok:
+                        logger.warning(f"点击测试提示展示失败: {toast_meta}")
+                elif click_elapsed_ms > max_wait_ms:
+                    if bool((click_res or {}).get("ok")):
+                        fail_reason = "click_ok_but_timeout"
+                    else:
+                        fail_reason = str((click_res or {}).get("reason") or (click_res or {}).get("driver") or "click_timeout")
+                    msg = self._build_click_test_notice(
+                        False,
+                        elapsed_ms=click_elapsed_ms,
+                        max_wait_ms=max_wait_ms,
+                        reason=fail_reason,
+                    )
+                    toast_ok, toast_meta = self._show_click_test_popup(msg, level="error", duration_ms=3200)
+                    if not toast_ok:
+                        logger.warning(f"点击测试提示展示失败: {toast_meta}")
+
             click_results.append({
                 "attempt": attempt_idx + 1,
                 "label": p.get("label"),
@@ -2601,6 +2632,7 @@ class OperationsAgent:
             "last_click_error": self._last_click_error or "",
             "ocr_pin_fixed_row_click_enabled": bool(self._ocr_pin_fixed_row_click_enabled),
             "ocr_pin_click_test_confirm_popup": bool(self._ocr_pin_click_test_confirm_popup),
+            "ocr_pin_click_test_max_wait_seconds": float(self._ocr_pin_click_test_max_wait_seconds),
             "pin_unpin_force_fixed_row_click": bool(self._pin_unpin_force_fixed_row_click),
             "pin_unpin_require_link_index": bool(self._pin_unpin_require_link_index),
             "ocr_pin_fixed_row_click_panel_x_ratio": float(self._ocr_pin_fixed_row_click_panel_x_ratio),

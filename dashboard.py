@@ -544,14 +544,24 @@ def _get_status_snapshot(assistant):
     if (not browser_connected) and web_mode != "screen_ocr":
         now = time.time()
         last_probe = float(st.session_state.get("_browser_rebind_probe_at", 0.0) or 0.0)
-        # 限流探测，避免每次 rerun 都触发重连开销。
-        if now - last_probe >= 2.5:
+        running_or_starting = bool(startup_state.get("is_running") or startup_state.get("is_starting"))
+        # 未启动时只做“静态探测”，不做主动重连，避免日志显示“已连接”却仍是“已停止”的错位感。
+        if hasattr(assistant, "get_browser_connected"):
+            try:
+                browser_connected = bool(assistant.get_browser_connected(allow_rebind=False))
+            except TypeError:
+                browser_connected = bool(assistant.get_browser_connected())
+            except Exception:
+                browser_connected = False
+        # 仅在运行中/启动中允许自愈重连，且做限流。
+        if (not browser_connected) and running_or_starting and (now - last_probe >= 2.5):
             st.session_state["_browser_rebind_probe_at"] = now
             try:
                 if hasattr(assistant, "get_browser_connected"):
-                    browser_connected = bool(assistant.get_browser_connected())
-                elif hasattr(assistant, "connect_browser"):
-                    browser_connected = bool(assistant.connect_browser())
+                    try:
+                        browser_connected = bool(assistant.get_browser_connected(allow_rebind=True))
+                    except TypeError:
+                        browser_connected = bool(assistant.get_browser_connected())
             except Exception:
                 browser_connected = False
     llm_online = bool(getattr(getattr(assistant, "knowledge", None), "has_llm", False))
@@ -851,6 +861,7 @@ def _build_human_like_payload_from_ui():
         "message_keyboard_only_enabled": True if force_full_physical_chain else bool(st.session_state.get("message_keyboard_only_enabled_ui", True)),
         "ocr_vision_allow_dom_fallback": False if force_full_physical_chain else bool(st.session_state.get("ocr_vision_allow_dom_fallback_ui", False)),
         "force_full_physical_chain": force_full_physical_chain,
+        "pin_click_test_confirm_popup": bool(st.session_state.get("pin_click_test_confirm_popup_ui", False)),
     }
 
 
@@ -1512,6 +1523,17 @@ def render_top_live_status_fragment():
     else:
         live_mic_guide = get_microphone_permission_guide(browser_name=live_browser_name)
 
+    cloud_test_status = _get_cloud_asr_test_status(assistant)
+    cloud_test_enabled = bool(cloud_test_status.get("enabled"))
+    # 主监听停止时，补一条“识别-only”轮询，保证 ASR 调试可独立观察结果。
+    if (not bool(live_snapshot.get("running"))) and (not cloud_test_enabled):
+        if hasattr(assistant, "poll_voice_inputs_when_stopped"):
+            try:
+                assistant.poll_voice_inputs_when_stopped(limit=8)
+            except Exception:
+                pass
+            live_snapshot = _get_status_snapshot(assistant)
+
     recent_voice_items = _get_recent_voice_inputs(assistant, limit=1)
     latest = recent_voice_items[0] if recent_voice_items else {
         "text": "-",
@@ -1649,8 +1671,7 @@ def render_top_live_status_fragment():
         f"| note={latest.get('note') or '-'} "
         f"| command={latest.get('command') or '-'}"
     )
-    cloud_test_status = _get_cloud_asr_test_status(assistant)
-    if cloud_test_status.get("enabled"):
+    if cloud_test_enabled:
         st.markdown("**🎧 播放器流ASR(B站)实时转写对比**")
         st.caption(
             f"running={cloud_test_status.get('running')} "
@@ -1679,7 +1700,11 @@ def render_top_live_status_fragment():
             st.code(live_launch["primary"], language="bash")
 
     if live_snapshot["voice_enabled"] and not live_snapshot["running"]:
-        if live_snapshot.get("voice_running"):
+        if cloud_test_enabled:
+            st.info("当前处于播放器流ASR测试模式：无需启动主监听，也不要求 TikTok 直播页。")
+        elif live_snapshot.get("browser_connected"):
+            st.info("浏览器已连接目标页，等待你点击“启动监听”进入运行中。")
+        elif live_snapshot.get("voice_running"):
             st.info("当前仅麦克风采集在运行（测试/预热模式），主监听未启动，语音口令不会执行页面动作。请点击“启动监听”。")
         else:
             st.warning("语音口令已启用，但主监听未启动。请点击“启动监听”，或点“🧪 打开模拟网页测试”（会自动启动监听）。")
@@ -2061,6 +2086,8 @@ with st.sidebar:
             st.session_state.message_keyboard_only_enabled_ui = bool(current_human_cfg.get("message_keyboard_only_enabled", True))
         if "force_full_physical_chain_ui" not in st.session_state:
             st.session_state.force_full_physical_chain_ui = bool(current_human_cfg.get("force_full_physical_chain", False))
+        if "pin_click_test_confirm_popup_ui" not in st.session_state:
+            st.session_state.pin_click_test_confirm_popup_ui = bool(current_human_cfg.get("pin_click_test_confirm_popup", False))
         if "os_keyboard_typing_min_ms_ui" not in st.session_state:
             st.session_state.os_keyboard_typing_min_ms_ui = int(float(current_human_cfg.get("typing_min_interval_seconds", 0.018) or 0.018) * 1000)
         if "os_keyboard_typing_max_ms_ui" not in st.session_state:
@@ -2117,6 +2144,11 @@ with st.sidebar:
                 help="默认关闭。关闭后未显式选择 DOM 时不会启用 DOM 回退链路。",
             )
             st.checkbox(
+                "置顶点击测试：点击后结果提示",
+                key="pin_click_test_confirm_popup_ui",
+                help="仅对 pin/unpin 固定点位点击生效。开启后，点击后显示小提示；若耗时超阈值会提示失败原因。",
+            )
+            st.checkbox(
                 "启用系统键盘输入兜底",
                 key="os_keyboard_fallback_enabled_ui",
                 help="仅在 DOM 输入失败时回退为系统逐字符输入；在极端页面抖动场景更稳。",
@@ -2159,6 +2191,25 @@ with st.sidebar:
             st.rerun()
 
     with st.expander("运行控制", expanded=True):
+        quick_cfg = _get_human_like_settings(st.session_state.assistant)
+        if "pin_click_test_confirm_popup_quick_ui" not in st.session_state:
+            st.session_state.pin_click_test_confirm_popup_quick_ui = bool(quick_cfg.get("pin_click_test_confirm_popup", False))
+        if "pin_click_test_confirm_popup_quick_prev_ui" not in st.session_state:
+            st.session_state.pin_click_test_confirm_popup_quick_prev_ui = bool(st.session_state.pin_click_test_confirm_popup_quick_ui)
+        st.toggle(
+            "🧪 置顶点击测试弹窗（即时）",
+            key="pin_click_test_confirm_popup_quick_ui",
+            help="开启后，pin/unpin 在点击后显示结果提示；若耗时超阈值会提示失败原因。该开关即时生效。",
+        )
+        quick_now = bool(st.session_state.pin_click_test_confirm_popup_quick_ui)
+        quick_prev = bool(st.session_state.pin_click_test_confirm_popup_quick_prev_ui)
+        if quick_now != quick_prev:
+            _set_human_like_settings(st.session_state.assistant, {"pin_click_test_confirm_popup": quick_now})
+            st.session_state.pin_click_test_confirm_popup_ui = quick_now
+            st.session_state.pin_click_test_confirm_popup_quick_prev_ui = quick_now
+            st.success(f"置顶点击测试弹窗已{'开启' if quick_now else '关闭'}")
+            st.rerun()
+
         if st.session_state.assistant.is_running:
             if st.button("停止监听", use_container_width=True):
                 st.session_state.assistant.stop()
@@ -2204,6 +2255,7 @@ with st.sidebar:
 
         st.markdown("---")
         st.caption("🎧 播放器流ASR测试（Bilibili）")
+        st.caption("该测试可独立运行：不依赖主监听，也不要求当前是 TikTok 页面。")
         # Streamlit 限制：widget key 在实例化后不可在同轮脚本内修改。
         # 若上一轮开启失败，这里在控件创建前执行重置。
         if st.session_state.get("cloud_asr_bili_test_force_reset_pending"):
