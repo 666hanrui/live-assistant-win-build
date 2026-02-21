@@ -36,16 +36,20 @@ class LiveAssistant:
             self.operations.set_action_planner(self.knowledge)
         if hasattr(self.operations, "set_operation_navigator"):
             self.operations.set_operation_navigator(self.knowledge)
-        self.operation_execution_mode = "dom"
+        self.operation_execution_mode = "ocr_vision"
+        self.dom_operation_mode_explicit = False
         if hasattr(self.operations, "set_execution_mode"):
             self.operation_execution_mode = self.operations.set_execution_mode(
-                getattr(settings, "OPERATION_EXECUTION_MODE", "dom")
+                getattr(settings, "OPERATION_EXECUTION_MODE", "ocr_vision")
             )
-        self.web_info_source_mode = "ocr_hybrid"
+        self.dom_operation_mode_explicit = self.operation_execution_mode == "dom"
+        self.web_info_source_mode = "ocr_only"
+        self.dom_web_info_mode_explicit = False
         if hasattr(self.vision, "set_info_source_mode"):
             self.web_info_source_mode = self.vision.set_info_source_mode(
-                getattr(settings, "WEB_INFO_SOURCE_MODE", "ocr_hybrid")
+                getattr(settings, "WEB_INFO_SOURCE_MODE", "ocr_only")
             )
+        self.dom_web_info_mode_explicit = self.web_info_source_mode == "dom"
         self.voice = VoiceCommandAgent(self.vision)
         self.analytics = AnalyticsAgent()
         self._thread = None
@@ -238,6 +242,12 @@ class LiveAssistant:
             voice_asr_provider = provider_aliases.get(voice_asr_provider, voice_asr_provider)
             operation_execution_mode = str(data.get("operation_execution_mode") or "").strip().lower()
             web_info_source_mode = str(data.get("web_info_source_mode") or "").strip().lower()
+            dom_operation_mode_explicit = data.get("dom_operation_mode_explicit")
+            if dom_operation_mode_explicit is None:
+                dom_operation_mode_explicit = data.get("dom_mode_opt_in")
+            dom_web_info_mode_explicit = data.get("dom_web_info_mode_explicit")
+            if dom_web_info_mode_explicit is None:
+                dom_web_info_mode_explicit = data.get("dom_info_mode_opt_in")
             human_like_settings = data.get("human_like_settings") or data.get("human_like") or {}
 
             if language in set(settings.REPLY_LANGUAGES.values()):
@@ -281,9 +291,19 @@ class LiveAssistant:
             if voice_asr_provider in {"google", "auto", "sphinx", "whisper_local", "dashscope_funasr", "hybrid_local_cloud"}:
                 settings.VOICE_PYTHON_ASR_PROVIDER = voice_asr_provider
             if operation_execution_mode:
-                self.set_operation_execution_mode(operation_execution_mode, persist=False)
+                op_mode = operation_execution_mode
+                explicit_dom_op = bool(dom_operation_mode_explicit) if isinstance(dom_operation_mode_explicit, bool) else False
+                if op_mode == "dom" and not explicit_dom_op:
+                    logger.info("运行态配置未显式授权 DOM 操作模式，自动降级为 ocr_vision。")
+                    op_mode = "ocr_vision"
+                self.set_operation_execution_mode(op_mode, persist=False, explicit=explicit_dom_op)
             if web_info_source_mode:
-                self.set_web_info_source_mode(web_info_source_mode, persist=False)
+                info_mode = web_info_source_mode
+                explicit_dom_info = bool(dom_web_info_mode_explicit) if isinstance(dom_web_info_mode_explicit, bool) else False
+                if info_mode == "dom" and not explicit_dom_info:
+                    logger.info("运行态配置未显式授权 DOM 信息源，自动降级为 ocr_only。")
+                    info_mode = "ocr_only"
+                self.set_web_info_source_mode(info_mode, persist=False, explicit=explicit_dom_info)
             if isinstance(human_like_settings, dict) and human_like_settings:
                 self.set_human_like_settings(human_like_settings, persist=False)
 
@@ -311,7 +331,9 @@ class LiveAssistant:
             "voice_command_enabled": bool(self.voice_command_enabled),
             "voice_input_mode": str(getattr(self.voice, "input_mode", getattr(settings, "VOICE_COMMAND_INPUT_MODE", "python_asr")) or "python_asr"),
             "operation_execution_mode": self.get_operation_execution_mode(),
+            "dom_operation_mode_explicit": bool(self.dom_operation_mode_explicit),
             "web_info_source_mode": self.get_web_info_source_mode(),
+            "dom_web_info_mode_explicit": bool(self.dom_web_info_mode_explicit),
             "human_like_settings": self.get_human_like_settings(),
         }
         if hasattr(self.voice, "get_preferred_microphone"):
@@ -383,21 +405,28 @@ class LiveAssistant:
                     self.operation_execution_mode = str(mode)
             except Exception:
                 pass
-        return str(self.operation_execution_mode or "dom")
+        return str(self.operation_execution_mode or "ocr_vision")
 
-    def set_operation_execution_mode(self, mode, persist=True):
+    def set_operation_execution_mode(self, mode, persist=True, explicit=None):
         target = str(mode or "").strip().lower()
         if hasattr(self.operations, "set_execution_mode"):
             try:
                 target = self.operations.set_execution_mode(target)
             except Exception:
-                target = "dom"
+                target = "ocr_vision"
         if target not in {"dom", "ocr_vision"}:
-            target = "dom"
+            target = "ocr_vision"
         self.operation_execution_mode = target
+        if explicit is None:
+            self.dom_operation_mode_explicit = target == "dom"
+        else:
+            self.dom_operation_mode_explicit = bool(explicit) and target == "dom"
         if persist:
             self._save_runtime_state()
-        logger.info(f"运营执行模式已更新: {target}")
+        logger.info(
+            f"运营执行模式已更新: {target}, "
+            f"dom_explicit={'on' if self.dom_operation_mode_explicit else 'off'}"
+        )
         return target
 
     def get_operation_mode_status(self):
@@ -449,21 +478,28 @@ class LiveAssistant:
                     self.web_info_source_mode = str(mode)
             except Exception:
                 pass
-        return str(self.web_info_source_mode or "ocr_hybrid")
+        return str(self.web_info_source_mode or "ocr_only")
 
-    def set_web_info_source_mode(self, mode, persist=True):
+    def set_web_info_source_mode(self, mode, persist=True, explicit=None):
         target = str(mode or "").strip().lower()
         if target not in {"dom", "ocr_hybrid", "ocr_only", "screen_ocr"}:
-            target = "ocr_hybrid"
+            target = "ocr_only"
         if hasattr(self.vision, "set_info_source_mode"):
             try:
                 target = self.vision.set_info_source_mode(target)
             except Exception:
-                target = "ocr_hybrid"
+                target = "ocr_only"
         self.web_info_source_mode = target
+        if explicit is None:
+            self.dom_web_info_mode_explicit = target == "dom"
+        else:
+            self.dom_web_info_mode_explicit = bool(explicit) and target == "dom"
         if persist:
             self._save_runtime_state()
-        logger.info(f"网页信息源模式已更新: {target}")
+        logger.info(
+            f"网页信息源模式已更新: {target}, "
+            f"dom_explicit={'on' if self.dom_web_info_mode_explicit else 'off'}"
+        )
         return target
 
     def get_web_info_source_status(self):
@@ -1178,8 +1214,8 @@ class LiveAssistant:
                 idx = _parse_index(raw_idx)
                 if idx:
                     return {"action": "unpin_product", "link_index": idx}
-            # 未提供序号时，默认取消当前置顶
-            return {"action": "unpin_product"}
+            # 固定行相对点击模式下，取消置顶必须给出序号，避免误点。
+            return None
 
         # 置顶指定链接：将3号链接置顶 / 置顶3号链接 / 将三号链接置顶
         pin_patterns = [
@@ -1717,6 +1753,21 @@ class LiveAssistant:
             return
         if now - self.last_proactive_time < self.next_proactive_interval:
             return
+        if not self.operations.can_send_message(log_reason=False):
+            logger.info("自动暖场跳过：消息发送门禁未通过")
+            self.last_proactive_time = now
+            self.next_proactive_interval = random.uniform(
+                settings.PROACTIVE_MIN_INTERVAL,
+                settings.PROACTIVE_MAX_INTERVAL
+            )
+            self.danmu_log.appendleft({
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "user": "系统",
+                "text": "[自动暖场]",
+                "status": "proactive_guarded",
+                "reply": ""
+            })
+            return
 
         active_language = self._get_active_language()
         messages = settings.PROACTIVE_MESSAGES_BY_LANGUAGE.get(
@@ -2165,13 +2216,39 @@ class LiveAssistant:
             started = False
         if not started:
             info = self.voice.get_start_failure_info() if hasattr(self.voice, "get_start_failure_info") else {}
-            self.cloud_asr_test_enabled = False
-            return {
-                "ok": False,
-                "error": str((info or {}).get("reason") or "voice_start_failed"),
-                "detail": (info or {}).get("diag"),
-                "url": target_url,
-            }
+            reason = str((info or {}).get("reason") or "")
+            retryable = [
+                "tab_audio_js_no_result",
+                "browser_page_context_unavailable",
+                "media_element_not_found",
+                "capture_stream_unavailable",
+            ]
+            if any(token in reason for token in retryable):
+                logger.info(f"B站播放器流首启失败，执行一次定向重试: reason={reason}")
+                try:
+                    self._inject_bilibili_url_into_debug_browser(target_url)
+                except Exception:
+                    pass
+                ensure_browser_page = getattr(self.vision, "ensure_browser_page_connection", None)
+                if callable(ensure_browser_page):
+                    try:
+                        ensure_browser_page(force=True, prefer_media_tab=True)
+                    except TypeError:
+                        ensure_browser_page(force=True)
+                    except Exception:
+                        pass
+                time.sleep(0.25)
+                if hasattr(self.voice, "_start_tab_audio_stream_capture"):
+                    started = bool(self.voice._start_tab_audio_stream_capture([active_language] + list(fallback_languages or [])))
+                info = self.voice.get_start_failure_info() if hasattr(self.voice, "get_start_failure_info") else {}
+            if not started:
+                self.cloud_asr_test_enabled = False
+                return {
+                    "ok": False,
+                    "error": str((info or {}).get("reason") or "voice_start_failed"),
+                    "detail": (info or {}).get("diag"),
+                    "url": target_url,
+                }
 
         self.last_start_error = ""
         self.last_start_detail = f"cloud_asr_test_ready:{target_url}"
@@ -2560,7 +2637,11 @@ class LiveAssistant:
         while not self._stop_event.is_set():
             try:
                 self._poll_voice_commands()
-                messages = self.vision.get_new_danmu()
+                # B 站播放器流 ASR 对比测试时，不拉取弹幕，避免触发“非 TikTok 页”重连风暴。
+                if self.cloud_asr_test_enabled:
+                    messages = []
+                else:
+                    messages = self.vision.get_new_danmu()
                 if len(messages) > settings.MAX_MESSAGES_PER_CYCLE:
                     logger.debug(
                         f"弹幕高峰: 本轮抓到 {len(messages)} 条，仅处理最新 {settings.MAX_MESSAGES_PER_CYCLE} 条"

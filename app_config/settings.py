@@ -213,11 +213,12 @@ RAG_MIN_RELEVANCE_SCORE = float(os.getenv("RAG_MIN_RELEVANCE_SCORE", "0.25"))
 COMMAND_ALLOWED_USERS = [u.lower() for u in _split_csv_env("COMMAND_ALLOWED_USERS")]
 
 # 运营执行模式：
-# - dom: 现有稳定链路（默认）
-# - ocr_vision: OCR 视觉驱动模式（当前先走兼容链路，便于渐进改造）
-OPERATION_EXECUTION_MODE = os.getenv("OPERATION_EXECUTION_MODE", "dom").strip().lower()
+# - dom: 显式开启 DOM 执行链路（仅手动选择时建议使用）
+# - ocr_vision: OCR 视觉驱动模式（默认）
+OPERATION_EXECUTION_MODE = os.getenv("OPERATION_EXECUTION_MODE", "ocr_vision").strip().lower()
 OCR_VISION_PRECHECK_ENABLED = os.getenv("OCR_VISION_PRECHECK_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 OCR_VISION_REQUIRED_KEYWORDS = _split_csv_env("OCR_VISION_REQUIRED_KEYWORDS", "直播控制台,商品,活动,chat,viewer")
+OCR_VISION_ALLOW_DOM_FALLBACK = os.getenv("OCR_VISION_ALLOW_DOM_FALLBACK", "false").lower() in ("1", "true", "yes", "on")
 HUMAN_LIKE_ACTION_ENABLED = os.getenv("HUMAN_LIKE_ACTION_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 HUMAN_LIKE_ACTION_DELAY_MIN_SECONDS = float(os.getenv("HUMAN_LIKE_ACTION_DELAY_MIN_SECONDS", "0.04"))
 HUMAN_LIKE_ACTION_DELAY_MAX_SECONDS = float(os.getenv("HUMAN_LIKE_ACTION_DELAY_MAX_SECONDS", "0.20"))
@@ -225,11 +226,33 @@ HUMAN_LIKE_ACTION_POST_DELAY_MIN_SECONDS = float(os.getenv("HUMAN_LIKE_ACTION_PO
 HUMAN_LIKE_ACTION_POST_DELAY_MAX_SECONDS = float(os.getenv("HUMAN_LIKE_ACTION_POST_DELAY_MAX_SECONDS", "0.16"))
 HUMAN_LIKE_CLICK_JITTER_PX = float(os.getenv("HUMAN_LIKE_CLICK_JITTER_PX", "1.8"))
 OCR_VISION_FORCE_PHYSICAL_CLICK = os.getenv("OCR_VISION_FORCE_PHYSICAL_CLICK", "true").lower() in ("1", "true", "yes", "on")
+FORCE_FULL_PHYSICAL_MOUSE_KEYBOARD = os.getenv("FORCE_FULL_PHYSICAL_MOUSE_KEYBOARD", "false").lower() in ("1", "true", "yes", "on")
 OCR_ACTION_RETRY_WAIT_SECONDS = float(os.getenv("OCR_ACTION_RETRY_WAIT_SECONDS", "30"))
 OCR_ACTION_RETRY_POLL_SECONDS = float(os.getenv("OCR_ACTION_RETRY_POLL_SECONDS", "0.65"))
 OCR_ACTION_REACTION_LLM_ENABLED = os.getenv("OCR_ACTION_REACTION_LLM_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 OCR_ACTION_REACTION_LLM_MAX_CHECKS = int(os.getenv("OCR_ACTION_REACTION_LLM_MAX_CHECKS", "4"))
 OCR_ACTION_REACTION_LLM_MIN_INTERVAL_SECONDS = float(os.getenv("OCR_ACTION_REACTION_LLM_MIN_INTERVAL_SECONDS", "1.2"))
+# OCR 点击测试模式（pin/unpin）：
+# 将点击点固定为“相对每个链接行”的位置，并可在点击前弹窗给测试人员确认。
+OCR_PIN_FIXED_ROW_CLICK_ENABLED = os.getenv("OCR_PIN_FIXED_ROW_CLICK_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+# pin/unpin 统一执行策略：默认强制只走“固定行相对点击”。
+PIN_UNPIN_FORCE_FIXED_ROW_CLICK = os.getenv("PIN_UNPIN_FORCE_FIXED_ROW_CLICK", "true").lower() in ("1", "true", "yes", "on")
+# link_index 为空时是否允许执行 pin/unpin：默认必须提供序号，避免误点。
+PIN_UNPIN_REQUIRE_LINK_INDEX = os.getenv("PIN_UNPIN_REQUIRE_LINK_INDEX", "true").lower() in ("1", "true", "yes", "on")
+OCR_PIN_FIXED_ROW_CLICK_X_RATIO = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_X_RATIO", "0"))
+OCR_PIN_FIXED_ROW_CLICK_RIGHT_PADDING_PX = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_RIGHT_PADDING_PX", "56"))
+OCR_PIN_FIXED_ROW_CLICK_RIGHT_PADDING_RATIO = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_RIGHT_PADDING_RATIO", "0.06"))
+OCR_PIN_FIXED_ROW_CLICK_PANEL_X_RATIO = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_PANEL_X_RATIO", "0.90"))
+OCR_PIN_FIXED_ROW_CLICK_OFFSET_X_PX = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_OFFSET_X_PX", "0"))
+OCR_PIN_FIXED_ROW_CLICK_OFFSET_X_RATIO = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_OFFSET_X_RATIO", "0.30"))
+OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_PX = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_PX", "0"))
+OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_RATIO = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_RATIO", "0"))
+OCR_PIN_CLICK_TEST_CONFIRM_POPUP = os.getenv("OCR_PIN_CLICK_TEST_CONFIRM_POPUP", "false").lower() in ("1", "true", "yes", "on")
+OCR_PIN_FIXED_ROW_CALIBRATION_LOG_ENABLED = os.getenv("OCR_PIN_FIXED_ROW_CALIBRATION_LOG_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+OCR_PIN_FIXED_ROW_CALIBRATION_LOG_PATH = os.getenv(
+    "OCR_PIN_FIXED_ROW_CALIBRATION_LOG_PATH",
+    "data/reports/pin_click_calibration.jsonl",
+).strip()
 # 运营 JS 执行时延控制：降低跨 frame 执行卡顿导致的单步 10s 阻塞
 OPS_RUN_JS_TIMEOUT_SECONDS = float(os.getenv("OPS_RUN_JS_TIMEOUT_SECONDS", "1.2"))
 OPS_RUN_JS_FALLBACK_TIMEOUT_SECONDS = float(os.getenv("OPS_RUN_JS_FALLBACK_TIMEOUT_SECONDS", "0.45"))
@@ -277,7 +300,7 @@ OPS_LLM_NAVIGATION_SCROLL_PIXELS = int(os.getenv("OPS_LLM_NAVIGATION_SCROLL_PIXE
 # - ocr_hybrid: 优先 OCR（文本+图片特征）读取，必要时回退 DOM
 # - ocr_only: 严格 OCR 信息读取（页面上下文/弹幕抽取/动作回执均不读取 DOM 文本）
 # - screen_ocr: 纯屏幕 OCR 信息读取（完全不读取浏览器 DOM 文本，浏览器仅作为被观察画面）
-WEB_INFO_SOURCE_MODE = os.getenv("WEB_INFO_SOURCE_MODE", "ocr_hybrid").strip().lower()
+WEB_INFO_SOURCE_MODE = os.getenv("WEB_INFO_SOURCE_MODE", "ocr_only").strip().lower()
 OCR_CHAT_MAX_MESSAGES = int(os.getenv("OCR_CHAT_MAX_MESSAGES", "6"))
 SCREEN_CAPTURE_MONITOR_INDEX = int(os.getenv("SCREEN_CAPTURE_MONITOR_INDEX", "1"))
 

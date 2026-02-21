@@ -175,11 +175,25 @@ class PageOCRReader:
         if not t:
             return True
         lower = t.lower()
+        norm = self._norm(t)
         if self._looks_like_timestamp(t):
             return True
         if re.search(r"\b(info|debug|warning|error)\b", lower) and ("|" in t or ":" in t):
             return True
         if any(k in lower for k in self._CHAT_NOISE_KEYWORDS):
+            return True
+        # TikTok Shop 控制台占位文案/活动流水，不应作为聊天消息。
+        if any(
+            k in norm
+            for k in [
+                "直播期间观众评论会在此处显示",
+                "你在直播期间所下订单将显示在此处",
+                "拖动以调整大小",
+                "所有活动",
+                "刚刚进入直播间",
+                "joinedthelive",
+            ]
+        ):
             return True
         if lower.startswith("http://") or lower.startswith("https://"):
             return True
@@ -306,10 +320,61 @@ class PageOCRReader:
     def _extract_live_state(self, text_norm: str, lines: List[Dict]) -> Dict:
         line_text = " ".join(str((ln or {}).get("text") or "") for ln in lines)
         norm = f"{text_norm} {self._norm(line_text)}"
-        not_live_keys = ["立即开始直播", "开始直播", "未开播", "notlive", "golive"]
-        live_keys = ["直播已开始", "正在直播", "live", "直播控制台", "livecontrol", "时长"]
-        is_live = any(self._norm(k) in norm for k in live_keys) and not any(self._norm(k) in norm for k in not_live_keys)
-        return {"is_live": bool(is_live)}
+
+        pre_live_keys = [
+            "立即开始直播",
+            "开始直播",
+            "未开播",
+            "暂无视频推荐",
+            "直播期间观众评论会在此处显示",
+            "你在直播期间所下订单将显示在此处",
+            "notlive",
+            "golive",
+        ]
+        live_keys = [
+            "直播已开始",
+            "正在直播",
+            "开始时间",
+            "开播时间",
+            "实时在线人数",
+            "直播曝光次数",
+            "gmv",
+            "viewer",
+        ]
+
+        pre_hits = [k for k in pre_live_keys if self._norm(k) in norm]
+        live_hits = [k for k in live_keys if self._norm(k) in norm]
+        has_timer = bool(re.search(r"\b\d{2}:\d{2}:\d{2}\b", line_text))
+
+        pre_score = 0.0
+        live_score = 0.0
+
+        if pre_hits:
+            pre_score += 0.72 + min(0.34, 0.11 * len(pre_hits))
+        if live_hits:
+            live_score += 0.58 + min(0.34, 0.09 * len(live_hits))
+        if has_timer:
+            live_score += 0.38
+
+        # 聊天输入框可见通常意味着直播控制台主交互区已就绪（但仍不足以单独判定 live）。
+        if any(k in norm for k in ["输入内容", "请输入内容", "type1andiwillarrangeit"]):
+            live_score += 0.10
+
+        is_live = bool(live_score >= 0.92 and live_score >= (pre_score + 0.16))
+        phase = "live_on_air" if is_live else ("pre_live" if pre_score >= 0.66 else "unknown")
+        confidence = 0.5 + min(0.48, abs(live_score - pre_score) * 0.42)
+        if phase == "unknown":
+            confidence = min(confidence, 0.72)
+
+        return {
+            "is_live": bool(is_live),
+            "phase": phase,
+            "confidence": round(float(confidence), 3),
+            "pre_live_hits": pre_hits[:6],
+            "live_hits": live_hits[:6],
+            "has_timer": bool(has_timer),
+            "scores": {"pre_live": round(pre_score, 3), "live": round(live_score, 3)},
+        }
 
     def _analyze_visual_features(self, img_bgr: np.ndarray) -> Dict:
         if img_bgr is None or not isinstance(img_bgr, np.ndarray) or img_bgr.size == 0:
@@ -349,7 +414,7 @@ class PageOCRReader:
         has_shop = any(k in text_norm for k in ["tiktokshop", "直播管理平台", "streamer", "dashboard"])
         has_dashboard = any(k in text_norm for k in ["直播控制台", "商品", "chat", "观众", "活动", "product"])
         has_overview = any(k in text_norm for k in ["直播大屏", "overview", "流量来源", "gmv", "用户画像"])
-        has_live_room = any(k in text_norm for k in ["正在直播", "live", "关注", "观众", "聊天"])
+        has_live_room = any(k in text_norm for k in ["正在直播", "liveroom", "livechat", "关注", "观众", "聊天"])
 
         if has_shop and has_dashboard:
             return "shop_dashboard"
@@ -469,6 +534,11 @@ class PageOCRReader:
             lower_ratio = b["cy"] / max(1.0, float(h))
             text_score = min(1.0, float(b.get("line_count", 0)) / 20.0)
             chat_score = (0.45 if right_ratio > 0.58 else 0.0) + (0.25 if lower_ratio > 0.35 else 0.0) + text_score
+            norm = self._norm(str((b or {}).get("text") or ""))
+            if any(k in norm for k in ["聊天", "chat", "输入内容", "请输入内容", "商品相关"]):
+                chat_score += 0.20
+            if any(k in norm for k in ["所有活动", "进入直播间", "订单将显示在此处", "活动", "activity"]):
+                chat_score -= 0.22
             b["chat_score"] = round(chat_score, 4)
 
         return blocks
@@ -551,7 +621,7 @@ class PageOCRReader:
             )
         return out
 
-    def _derive_scene_tags(self, text_norm: str, visual: Dict, blocks: List[Dict]) -> List[str]:
+    def _derive_scene_tags(self, text_norm: str, visual: Dict, blocks: List[Dict], live_state: Dict = None) -> List[str]:
         tags = []
         if any(k in text_norm for k in ["tiktokshop", "直播管理平台", "streamer", "dashboard"]):
             tags.append("shop_console")
@@ -569,6 +639,15 @@ class PageOCRReader:
             tags.append("chat_panel_detected")
         if any(str((b or {}).get("role") or "") == "product_panel" for b in blocks or []):
             tags.append("product_panel_detected")
+        phase = str((live_state or {}).get("phase") or "").strip().lower()
+        if phase == "live_on_air":
+            tags.append("live_on_air")
+        elif phase == "pre_live":
+            tags.append("pre_live")
+        if any(k in text_norm for k in ["输入内容", "请输入内容", "type1andiwillarrangeit"]):
+            tags.append("chat_input_visible")
+        if any(k in text_norm for k in ["立即开始直播", "开始直播"]):
+            tags.append("go_live_button_visible")
         # 去重保持顺序
         seen = set()
         dedup = []
@@ -804,7 +883,7 @@ class PageOCRReader:
                         action_candidates = self._extract_action_candidates(lines)
                         action_candidates.extend(self._extract_action_candidates_from_blocks(blocks))
             live_state = self._extract_live_state(text_norm, lines)
-            scene_tags = self._derive_scene_tags(text_norm, visual, blocks)
+            scene_tags = self._derive_scene_tags(text_norm, visual, blocks, live_state=live_state)
 
             payload = {
                 "ok": bool(text),

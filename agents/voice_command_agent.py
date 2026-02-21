@@ -977,7 +977,10 @@ class VoiceCommandAgent:
     def _start_tab_audio_stream_capture(self, langs):
         ensure_browser_page = getattr(self.vision_agent, "ensure_browser_page_connection", None)
         if callable(ensure_browser_page):
-            browser_ready = bool(ensure_browser_page(force=False))
+            try:
+                browser_ready = bool(ensure_browser_page(force=False, prefer_media_tab=True))
+            except TypeError:
+                browser_ready = bool(ensure_browser_page(force=False))
         else:
             browser_ready = bool(self.vision_agent.ensure_connection())
         if not browser_ready:
@@ -1009,11 +1012,11 @@ class VoiceCommandAgent:
           const state = (window.__liveAssistantTabAudioState = window.__liveAssistantTabAudioState || {});
           const queue = (window.__liveAssistantTabAudioQueue = window.__liveAssistantTabAudioQueue || []);
 
-          const setErr = (e) => {
+          const setErr = (e, details) => {
             state.error = String(e || 'unknown');
             state.running = false;
             state.lastErrorAt = Date.now();
-            return { ok: false, reason: state.error };
+            return { ok: false, reason: state.error, details: details || {} };
           };
 
           try {
@@ -1035,27 +1038,77 @@ class VoiceCommandAgent:
               return { m, score };
             })
             .sort((a, b) => b.score - a.score);
-          const media = sorted[0].m;
-          if (!media) return setErr('media_element_not_found');
+          const captureMediaStream = (media) => {
+            try {
+              if (typeof media.captureStream === 'function') return media.captureStream();
+              if (typeof media.mozCaptureStream === 'function') return media.mozCaptureStream();
+              return null;
+            } catch (e) {
+              return null;
+            }
+          };
 
+          let media = null;
           let stream = null;
-          try {
-            if (typeof media.captureStream === 'function') stream = media.captureStream();
-            else if (typeof media.mozCaptureStream === 'function') stream = media.mozCaptureStream();
-          } catch (e) {
-            return setErr('capture_stream_failed:' + String(e));
+          let noTrackCount = 0;
+          for (const item of sorted) {
+            const candidate = item && item.m;
+            if (!candidate) continue;
+            const candidateStream = captureMediaStream(candidate);
+            if (!candidateStream) continue;
+            const audioTracks = (candidateStream.getAudioTracks && candidateStream.getAudioTracks()) || [];
+            if (audioTracks.length > 0) {
+              media = candidate;
+              stream = candidateStream;
+              break;
+            }
+            noTrackCount += 1;
           }
-          if (!stream) return setErr('capture_stream_unavailable');
-          if (!stream.getAudioTracks || !stream.getAudioTracks().length) return setErr('media_stream_no_audio_track');
+          if (!media) {
+            media = sorted.length ? (sorted[0] && sorted[0].m) : null;
+          }
+          if (!media) {
+            return setErr('media_element_not_found');
+          }
+          if (!stream) {
+            // 某些页面/打包环境下 captureStream 拿不到音轨，回退 media element source。
+            try {
+              if (media.paused && typeof media.play === 'function') {
+                media.play().catch(() => {});
+              }
+            } catch (e) {}
+          }
 
           const AudioCtx = window.AudioContext || window.webkitAudioContext;
           if (!AudioCtx) return setErr('audio_context_unavailable');
 
           const ctx = new AudioCtx({ sampleRate: targetRate });
-          const src = ctx.createMediaStreamSource(stream);
+          let src = null;
+          let captureDriver = '';
+          try {
+            if (stream) {
+              src = ctx.createMediaStreamSource(stream);
+              captureDriver = 'capture_stream';
+            } else {
+              src = ctx.createMediaElementSource(media);
+              captureDriver = 'media_element_source';
+            }
+          } catch (e) {
+            return setErr(
+              'create_audio_source_failed:' + String(e),
+              {
+                mediaCandidateCount: sorted.length,
+                mediaNoTrackCount: noTrackCount,
+                mediaTag: (media && media.tagName) || '',
+                mediaSrc: (media && (media.currentSrc || media.src)) || '',
+              }
+            );
+          }
           const proc = ctx.createScriptProcessor(4096, 2, 1);
           const mute = ctx.createGain();
           mute.gain.value = 0.0;
+          const passthrough = ctx.createGain();
+          passthrough.gain.value = 1.0;
 
           proc.onaudioprocess = (ev) => {
             try {
@@ -1106,6 +1159,13 @@ class VoiceCommandAgent:
           src.connect(proc);
           proc.connect(mute);
           mute.connect(ctx.destination);
+          // media element source 需要显式回连 destination，否则页面声音会被“吃掉”。
+          if (captureDriver === 'media_element_source') {
+            try {
+              src.connect(passthrough);
+              passthrough.connect(ctx.destination);
+            } catch (e) {}
+          }
           if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
             ctx.resume().catch(() => {});
           }
@@ -1124,13 +1184,15 @@ class VoiceCommandAgent:
             src,
             proc,
             mute,
+            passthrough,
             keepAliveTimer,
             stop: () => {
               try { clearInterval(keepAliveTimer); } catch (e) {}
               try { proc.disconnect(); } catch (e) {}
               try { src.disconnect(); } catch (e) {}
               try { mute.disconnect(); } catch (e) {}
-              try { stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+              try { passthrough.disconnect(); } catch (e) {}
+              try { if (stream) stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
               try { ctx.close(); } catch (e) {}
             },
           };
@@ -1139,9 +1201,19 @@ class VoiceCommandAgent:
           state.error = null;
           state.startedAt = Date.now();
           state.lastErrorAt = null;
+          state.captureDriver = captureDriver;
+          state.mediaCandidateCount = sorted.length;
+          state.mediaNoTrackCount = noTrackCount;
           state.mediaTag = (media.tagName || '').toLowerCase();
           state.mediaSrc = media.currentSrc || media.src || '';
-          return { ok: true, mediaTag: state.mediaTag, mediaSrc: state.mediaSrc };
+          return {
+            ok: true,
+            mediaTag: state.mediaTag,
+            mediaSrc: state.mediaSrc,
+            captureDriver,
+            mediaCandidateCount: sorted.length,
+            mediaNoTrackCount: noTrackCount,
+          };
         })(arguments[0] || {});
         """
 
@@ -1154,7 +1226,10 @@ class VoiceCommandAgent:
             ensure_browser_page = getattr(self.vision_agent, "ensure_browser_page_connection", None)
             if callable(ensure_browser_page):
                 try:
-                    ensure_browser_page(force=True)
+                    try:
+                        ensure_browser_page(force=True, prefer_media_tab=True)
+                    except TypeError:
+                        ensure_browser_page(force=True)
                 except Exception:
                     pass
             ctx_name, result, errors2 = self._run_js_with_reconnect(
@@ -1178,8 +1253,21 @@ class VoiceCommandAgent:
         self._tab_audio_error = str(reason or "tab_audio_start_failed")
         self.last_start_reason = self._tab_audio_error
         self.last_start_errors = list(errors or [])[:5]
-        self.last_start_diag = {"ctx": ctx_name}
-        logger.warning(f"TabAudio ASR 启动失败: reason={self._tab_audio_error}, ctx={ctx_name}, errors={self.last_start_errors[:2]}")
+        detail = {}
+        if isinstance(result, dict):
+            detail = {
+                "details": result.get("details") if isinstance(result.get("details"), dict) else {},
+                "captureDriver": result.get("captureDriver"),
+                "mediaTag": result.get("mediaTag"),
+                "mediaSrc": result.get("mediaSrc"),
+                "mediaCandidateCount": result.get("mediaCandidateCount"),
+                "mediaNoTrackCount": result.get("mediaNoTrackCount"),
+            }
+        self.last_start_diag = {"ctx": ctx_name, **detail}
+        logger.warning(
+            f"TabAudio ASR 启动失败: reason={self._tab_audio_error}, ctx={ctx_name}, "
+            f"detail={detail}, errors={self.last_start_errors[:2]}"
+        )
         return False
 
     def _stop_tab_audio_stream_capture(self):
@@ -1221,12 +1309,28 @@ class VoiceCommandAgent:
             prefer_ctx_name=self.active_ctx_name,
         )
         if not isinstance(result, dict):
+            ctx_name, result2, errors = self._run_js_with_reconnect(
+                script,
+                int(max(1, max_items)),
+                prefer_ctx_name=self.active_ctx_name,
+            )
+            if ctx_name:
+                self.active_ctx_name = ctx_name
+            if isinstance(result2, dict):
+                result = result2
+            elif errors:
+                logger.debug(f"TabAudio 轮询失败，JS上下文不可用: {errors[:2]}")
+        if not isinstance(result, dict):
             return [], {}
         return list(result.get("items") or []), dict(result.get("state") or {})
 
     def _maybe_restart_tab_audio_stream_capture(self, reason=""):
         now = time.time()
-        if now - float(self._tab_audio_last_restart_at or 0.0) < self._tab_audio_restart_cooldown_seconds:
+        cooldown = float(self._tab_audio_restart_cooldown_seconds)
+        if "media_stream_no_audio_track" in str(self._tab_audio_error or ""):
+            # 页面未开始播放前，音轨通常为空；放慢重启节奏，避免日志风暴。
+            cooldown = max(cooldown, 8.0)
+        if now - float(self._tab_audio_last_restart_at or 0.0) < cooldown:
             return False
         self._tab_audio_last_restart_at = now
         langs = list(self._tab_audio_langs or self.last_langs or ["zh-CN"])
@@ -2027,7 +2131,7 @@ class VoiceCommandAgent:
                     return ctx_name, result, errors
                 return ctx_name, result
             except Exception as e:
-                logger.debug(f"VoiceAgent JS 执行失败({ctx_name}): {e}")
+                logger.debug(f"VoiceAgent JS 执行失败({ctx_name}): {type(e).__name__}: {repr(e)}")
                 errors.append(f"{ctx_name}:{type(e).__name__}:{str(e)[:160]}")
                 continue
         if return_errors:

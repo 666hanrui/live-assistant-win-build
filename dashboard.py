@@ -130,6 +130,10 @@ if "cloud_asr_bili_test_enabled_ui" not in st.session_state:
     st.session_state.cloud_asr_bili_test_enabled_ui = False
 if "cloud_asr_bili_test_prev_ui" not in st.session_state:
     st.session_state.cloud_asr_bili_test_prev_ui = False
+if "cloud_asr_bili_test_force_reset_pending" not in st.session_state:
+    st.session_state.cloud_asr_bili_test_force_reset_pending = False
+if "cloud_asr_bili_test_last_error" not in st.session_state:
+    st.session_state.cloud_asr_bili_test_last_error = ""
 if "cloud_asr_bili_test_url_ui" not in st.session_state:
     st.session_state.cloud_asr_bili_test_url_ui = "https://www.bilibili.com/"
 if "cloud_asr_bili_test_provider_ui" not in st.session_state:
@@ -247,13 +251,13 @@ def _get_operation_execution_mode(assistant):
                 return mode
     except Exception:
         pass
-    return "dom"
+    return "ocr_vision"
 
 
 def _set_operation_execution_mode(assistant, mode):
     value = str(mode or "").strip().lower()
     if value not in {"dom", "ocr_vision"}:
-        value = "dom"
+        value = "ocr_vision"
     try:
         if hasattr(assistant, "set_operation_execution_mode"):
             assistant.set_operation_execution_mode(value)
@@ -335,13 +339,13 @@ def _get_web_info_source_mode(assistant):
                 return mode
     except Exception:
         pass
-    return "ocr_hybrid"
+    return "ocr_only"
 
 
 def _set_web_info_source_mode(assistant, mode):
     value = str(mode or "").strip().lower()
     if value not in {"dom", "ocr_hybrid", "ocr_only", "screen_ocr"}:
-        value = "ocr_hybrid"
+        value = "ocr_only"
     try:
         if hasattr(assistant, "set_web_info_source_mode"):
             assistant.set_web_info_source_mode(value)
@@ -593,6 +597,15 @@ def _get_status_snapshot(assistant):
         "operation_last_click_driver": op_status.get("last_click_driver") or "",
         "operation_last_click_point": op_status.get("last_click_point") if isinstance(op_status.get("last_click_point"), dict) else {},
         "operation_last_click_error": op_status.get("last_click_error") or "",
+        "operation_fixed_row_enabled": bool(op_status.get("ocr_pin_fixed_row_click_enabled", False)),
+        "operation_fixed_row_force": bool(op_status.get("pin_unpin_force_fixed_row_click", False)),
+        "operation_fixed_row_require_index": bool(op_status.get("pin_unpin_require_link_index", False)),
+        "operation_fixed_row_panel_x_ratio": float(op_status.get("ocr_pin_fixed_row_click_panel_x_ratio") or 0.0),
+        "operation_fixed_row_y_ratio": float(op_status.get("ocr_pin_fixed_row_click_offset_y_ratio") or 0.0),
+        "operation_fixed_row_calib_log_enabled": bool(op_status.get("ocr_pin_fixed_row_calibration_log_enabled", False)),
+        "operation_fixed_row_last": op_status.get("last_fixed_row_click") if isinstance(op_status.get("last_fixed_row_click"), dict) else {},
+        "operation_dom_fallback_enabled": bool(op_status.get("dom_fallback_enabled", False)),
+        "operation_force_full_physical_chain": bool(op_status.get("force_full_physical_chain", False)),
         "human_like_enabled": bool(human_like_cfg.get("enabled", True)),
         "human_like_delay_min_ms": int(float(human_like_cfg.get("delay_min_seconds", 0.0) or 0.0) * 1000),
         "human_like_delay_max_ms": int(float(human_like_cfg.get("delay_max_seconds", 0.0) or 0.0) * 1000),
@@ -600,7 +613,10 @@ def _get_status_snapshot(assistant):
         "human_like_post_delay_max_ms": int(float(human_like_cfg.get("post_delay_max_seconds", 0.0) or 0.0) * 1000),
         "human_like_click_jitter_px": float(human_like_cfg.get("click_jitter_px", 0.0) or 0.0),
         "human_like_ocr_physical_click_enabled": bool(human_like_cfg.get("ocr_physical_click_enabled", True)),
+        "human_like_ocr_vision_allow_dom_fallback": bool(human_like_cfg.get("ocr_vision_allow_dom_fallback", False)),
+        "human_like_force_full_physical_chain": bool(human_like_cfg.get("force_full_physical_chain", False)),
         "human_like_keyboard_fallback_enabled": bool(human_like_cfg.get("keyboard_fallback_enabled", False)),
+        "human_like_message_keyboard_only_enabled": bool(human_like_cfg.get("message_keyboard_only_enabled", True)),
         "human_like_typing_min_ms": int(float(human_like_cfg.get("typing_min_interval_seconds", 0.0) or 0.0) * 1000),
         "human_like_typing_max_ms": int(float(human_like_cfg.get("typing_max_interval_seconds", 0.0) or 0.0) * 1000),
         "human_like_delay_total_ms": int(human_like_stats.get("delay_total_ms") or 0),
@@ -623,6 +639,9 @@ def _get_status_snapshot(assistant):
         "web_ocr_lines": web_info_status.get("ocr_line_count") or 0,
         "web_ocr_chat_count": web_info_status.get("ocr_chat_count") or 0,
         "web_ocr_live": bool(web_info_status.get("ocr_live")),
+        "web_ocr_live_phase": web_info_status.get("ocr_live_phase") or "",
+        "web_ocr_live_confidence": float(web_info_status.get("ocr_live_confidence") or 0.0),
+        "web_ocr_live_has_timer": bool(web_info_status.get("ocr_live_has_timer")),
         "web_ocr_scene_tags": web_info_status.get("ocr_scene_tags") if isinstance(web_info_status.get("ocr_scene_tags"), list) else [],
         "web_ocr_block_count": web_info_status.get("ocr_block_count") or 0,
         "web_capture_backend": web_info_status.get("capture_backend") or "",
@@ -737,9 +756,11 @@ def _human_like_preset(name):
             "post_delay_min_ms": 60,
             "post_delay_max_ms": 240,
             "jitter_px": 1.4,
+            "ocr_physical_click_enabled": True,
             "keyboard_fallback_enabled": True,
             "typing_min_ms": 20,
             "typing_max_ms": 62,
+            "force_full_physical_chain": False,
         },
         "平衡（推荐）": {
             "enabled": True,
@@ -748,9 +769,11 @@ def _human_like_preset(name):
             "post_delay_min_ms": 35,
             "post_delay_max_ms": 155,
             "jitter_px": 1.8,
+            "ocr_physical_click_enabled": True,
             "keyboard_fallback_enabled": True,
             "typing_min_ms": 18,
             "typing_max_ms": 55,
+            "force_full_physical_chain": False,
         },
         "激进（速度优先）": {
             "enabled": True,
@@ -759,9 +782,24 @@ def _human_like_preset(name):
             "post_delay_min_ms": 10,
             "post_delay_max_ms": 82,
             "jitter_px": 1.1,
+            "ocr_physical_click_enabled": True,
             "keyboard_fallback_enabled": False,
             "typing_min_ms": 12,
             "typing_max_ms": 34,
+            "force_full_physical_chain": False,
+        },
+        "强制全链路物理键鼠": {
+            "enabled": True,
+            "delay_min_ms": 65,
+            "delay_max_ms": 240,
+            "post_delay_min_ms": 55,
+            "post_delay_max_ms": 210,
+            "jitter_px": 1.6,
+            "ocr_physical_click_enabled": True,
+            "keyboard_fallback_enabled": True,
+            "typing_min_ms": 20,
+            "typing_max_ms": 64,
+            "force_full_physical_chain": True,
         },
     }
     return dict(presets.get(name) or presets["平衡（推荐）"])
@@ -775,9 +813,11 @@ def _apply_human_preset_to_ui(name):
     st.session_state.human_like_post_delay_min_ms_ui = int(cfg.get("post_delay_min_ms", 35))
     st.session_state.human_like_post_delay_max_ms_ui = int(cfg.get("post_delay_max_ms", 155))
     st.session_state.human_like_click_jitter_px_ui = float(cfg.get("jitter_px", 1.8))
+    st.session_state.ocr_physical_click_enabled_ui = bool(cfg.get("ocr_physical_click_enabled", True))
     st.session_state.os_keyboard_fallback_enabled_ui = bool(cfg.get("keyboard_fallback_enabled", True))
     st.session_state.os_keyboard_typing_min_ms_ui = int(cfg.get("typing_min_ms", 18))
     st.session_state.os_keyboard_typing_max_ms_ui = int(cfg.get("typing_max_ms", 55))
+    st.session_state.force_full_physical_chain_ui = bool(cfg.get("force_full_physical_chain", False))
 
 
 def _build_human_like_payload_from_ui():
@@ -796,6 +836,7 @@ def _build_human_like_payload_from_ui():
     if typing_max_ms < typing_min_ms:
         typing_max_ms = typing_min_ms
 
+    force_full_physical_chain = bool(st.session_state.get("force_full_physical_chain_ui", False))
     return {
         "enabled": bool(st.session_state.get("human_like_enabled_ui", True)),
         "delay_min_seconds": delay_min_ms / 1000.0,
@@ -803,10 +844,13 @@ def _build_human_like_payload_from_ui():
         "post_delay_min_seconds": post_min_ms / 1000.0,
         "post_delay_max_seconds": post_max_ms / 1000.0,
         "click_jitter_px": float(st.session_state.get("human_like_click_jitter_px_ui") or 0.0),
-        "ocr_physical_click_enabled": bool(st.session_state.get("ocr_physical_click_enabled_ui", True)),
+        "ocr_physical_click_enabled": bool(st.session_state.get("ocr_physical_click_enabled_ui", True)) or force_full_physical_chain,
         "keyboard_fallback_enabled": bool(st.session_state.get("os_keyboard_fallback_enabled_ui", False)),
         "typing_min_interval_seconds": max(0.001, typing_min_ms / 1000.0),
         "typing_max_interval_seconds": max(0.001, typing_max_ms / 1000.0),
+        "message_keyboard_only_enabled": True if force_full_physical_chain else bool(st.session_state.get("message_keyboard_only_enabled_ui", True)),
+        "ocr_vision_allow_dom_fallback": False if force_full_physical_chain else bool(st.session_state.get("ocr_vision_allow_dom_fallback_ui", False)),
+        "force_full_physical_chain": force_full_physical_chain,
     }
 
 
@@ -1497,20 +1541,42 @@ def render_top_live_status_fragment():
     if runtime_err:
         st.warning(f"ASR运行错误: {runtime_err}")
     st.caption(
-        f"动作执行模式: {live_snapshot.get('operation_mode') or 'dom'} "
+        f"动作执行模式: {live_snapshot.get('operation_mode') or 'ocr_vision'} "
         f"| OCR可用: {'yes' if live_snapshot.get('operation_ocr_available') else 'no'} "
         f"| OCR引擎: {live_snapshot.get('operation_ocr_provider') or '-'} "
         f"| OCR源: {live_snapshot.get('operation_ocr_source') or '-'} "
         f"| OCR耗时: {live_snapshot.get('operation_ocr_ms') or 0}ms "
         f"| OCR行数: {live_snapshot.get('operation_ocr_lines') or 0} "
-        f"| 点击驱动: {live_snapshot.get('operation_last_click_driver') or '-'}"
+        f"| 点击驱动: {live_snapshot.get('operation_last_click_driver') or '-'} "
+        f"| dom_fallback={'on' if live_snapshot.get('operation_dom_fallback_enabled') else 'off'} "
+        f"| fixed_row={'on' if live_snapshot.get('operation_fixed_row_enabled') else 'off'} "
+        f"| force_fixed={'on' if live_snapshot.get('operation_fixed_row_force') else 'off'} "
+        f"| idx_required={'on' if live_snapshot.get('operation_fixed_row_require_index') else 'off'} "
+        f"| calib_log={'on' if live_snapshot.get('operation_fixed_row_calib_log_enabled') else 'off'}"
     )
+    fixed_row_last = live_snapshot.get("operation_fixed_row_last") or {}
+    if isinstance(fixed_row_last, dict) and fixed_row_last:
+        target = fixed_row_last.get("target") or {}
+        vp = target.get("viewport") if isinstance(target, dict) else {}
+        vp_txt = "-"
+        if isinstance(vp, dict):
+            vp_txt = f"({int(vp.get('x') or 0)},{int(vp.get('y') or 0)})"
+        st.caption(
+            f"固定点位最近记录: action={fixed_row_last.get('action') or '-'} "
+            f"| link={fixed_row_last.get('link_index') or 0} "
+            f"| source={target.get('x_source') if isinstance(target, dict) else '-'} "
+            f"| point={vp_txt} "
+            f"| result={fixed_row_last.get('result_reason') or '-'} "
+            f"| ok={'yes' if fixed_row_last.get('ok') else 'no'}"
+        )
     st.caption(
         f"拟人执行: {'on' if live_snapshot.get('human_like_enabled') else 'off'} "
         f"| delay={live_snapshot.get('human_like_delay_min_ms') or 0}-{live_snapshot.get('human_like_delay_max_ms') or 0}ms "
         f"| post={live_snapshot.get('human_like_post_delay_min_ms') or 0}-{live_snapshot.get('human_like_post_delay_max_ms') or 0}ms "
         f"| jitter={live_snapshot.get('human_like_click_jitter_px') or 0:.1f}px "
         f"| ocr_click={'physical' if live_snapshot.get('human_like_ocr_physical_click_enabled') else 'js'} "
+        f"| keyboard_only={'on' if live_snapshot.get('human_like_message_keyboard_only_enabled') else 'off'} "
+        f"| force_physical={'on' if live_snapshot.get('human_like_force_full_physical_chain') else 'off'} "
         f"| 累计延迟={live_snapshot.get('human_like_delay_total_ms') or 0}ms/{live_snapshot.get('human_like_delay_calls') or 0}次"
     )
     st.caption(
@@ -1537,9 +1603,11 @@ def render_top_live_status_fragment():
     if live_snapshot.get("operation_last_click_error"):
         st.caption(f"点击回退原因: {live_snapshot.get('operation_last_click_error')}")
     st.caption(
-        f"网页信息源: {live_snapshot.get('web_info_mode') or 'ocr_hybrid'} "
+        f"网页信息源: {live_snapshot.get('web_info_mode') or 'ocr_only'} "
         f"| OCR可用: {'yes' if live_snapshot.get('web_ocr_available') else 'no'} "
         f"| OCR页型: {live_snapshot.get('web_ocr_page_type') or '-'} "
+        f"| Live态: {live_snapshot.get('web_ocr_live_phase') or ('live' if live_snapshot.get('web_ocr_live') else 'non_live')} "
+        f"({float(live_snapshot.get('web_ocr_live_confidence') or 0.0):.2f}) "
         f"| OCR耗时: {live_snapshot.get('web_ocr_ms') or 0}ms "
         f"| OCR行数: {live_snapshot.get('web_ocr_lines') or 0} "
         f"| OCR弹幕: {live_snapshot.get('web_ocr_chat_count') or 0} "
@@ -1625,7 +1693,7 @@ def render_top_live_status_fragment():
         st.warning(f"语音通道异常：{live_snapshot['voice_error']}")
         err = str(live_snapshot.get("voice_error") or "")
         if "tab_audio_js_no_result" in err or "browser_page_context_unavailable" in err:
-            st.caption("未拿到可执行JS的浏览器页面上下文。请确认 Chrome 已用远程调试端口启动，并且当前会话已连接到 TikTok 直播标签页。")
+            st.caption("未拿到可执行JS的浏览器页面上下文。请确认 Chrome 已用远程调试端口启动；若在 B站 ASR 测试中，请先点击“重新打开B站测试页”再重试。")
         st.caption(live_mic_guide)
     elif live_snapshot["voice_enabled"] and live_snapshot["voice_running"] and not live_snapshot.get("voice_last_result_at"):
         st.info("语音监听已运行，但尚未捕获到有效语音文本。请靠近麦克风说出完整口令再观察“最近识别”。")
@@ -1878,15 +1946,15 @@ with st.sidebar:
         lang_options = list(settings.REPLY_LANGUAGES.keys())
         code_to_label = {v: k for k, v in settings.REPLY_LANGUAGES.items()}
         operation_mode_labels = {
-            "DOM稳态模式（推荐）": "dom",
-            "OCR视觉模式（改造预览）": "ocr_vision",
+            "OCR视觉模式（默认，禁DOM兜底）": "ocr_vision",
+            "DOM执行模式（仅显式启用）": "dom",
         }
         operation_mode_to_label = {v: k for k, v in operation_mode_labels.items()}
         web_info_mode_labels = {
-            "DOM信息源（兼容）": "dom",
-            "OCR优先信息源（推荐）": "ocr_hybrid",
-            "严格OCR信息源（不读取DOM文本）": "ocr_only",
+            "严格OCR信息源（默认，不读取DOM文本）": "ocr_only",
             "纯屏幕OCR信息源（完全无DOM）": "screen_ocr",
+            "OCR优先信息源（兼容）": "ocr_hybrid",
+            "DOM信息源（仅显式启用）": "dom",
         }
         web_info_mode_to_label = {v: k for k, v in web_info_mode_labels.items()}
         current_label = code_to_label.get(
@@ -1894,9 +1962,9 @@ with st.sidebar:
             lang_options[0]
         )
         current_operation_mode = _get_operation_execution_mode(st.session_state.assistant)
-        current_operation_mode_label = operation_mode_to_label.get(current_operation_mode, "DOM稳态模式（推荐）")
+        current_operation_mode_label = operation_mode_to_label.get(current_operation_mode, "OCR视觉模式（默认，禁DOM兜底）")
         current_web_info_mode = _get_web_info_source_mode(st.session_state.assistant)
-        current_web_info_mode_label = web_info_mode_to_label.get(current_web_info_mode, "OCR优先信息源（推荐）")
+        current_web_info_mode_label = web_info_mode_to_label.get(current_web_info_mode, "严格OCR信息源（默认，不读取DOM文本）")
 
         if "reply_lang_label" not in st.session_state:
             st.session_state.reply_lang_label = current_label
@@ -1907,31 +1975,35 @@ with st.sidebar:
         if "operation_execution_mode_label" not in st.session_state:
             st.session_state.operation_execution_mode_label = current_operation_mode_label
         if st.session_state.operation_execution_mode_label not in operation_mode_labels:
-            st.session_state.operation_execution_mode_label = "DOM稳态模式（推荐）"
+            st.session_state.operation_execution_mode_label = "OCR视觉模式（默认，禁DOM兜底）"
         st.selectbox(
             "页面操作模式（置顶/秒杀等动作）",
             options=list(operation_mode_labels.keys()),
             key="operation_execution_mode_label",
-            help="DOM稳态模式：沿用当前稳定逻辑；OCR视觉模式：优先OCR锚点点击，DOM作为兜底链路。",
+            help="默认 OCR视觉模式不启用 DOM 兜底；只有你显式选择 DOM 模式时才会启用 DOM 执行链路。",
         )
-        mode_preview = operation_mode_labels.get(st.session_state.operation_execution_mode_label, "dom")
+        mode_preview = operation_mode_labels.get(st.session_state.operation_execution_mode_label, "ocr_vision")
         if mode_preview == "ocr_vision":
-            st.caption("OCR视觉模式：优先OCR锚点点击 + DOM兼容兜底。若本地缺少OCR依赖会自动回退DOM。")
+            st.caption("OCR视觉模式：优先 OCR 锚点点击，默认不走 DOM 兜底。")
+        elif mode_preview == "dom":
+            st.caption("DOM 执行模式已显式启用：系统将允许 DOM 执行与回执链路。")
         if "web_info_source_mode_label" not in st.session_state:
             st.session_state.web_info_source_mode_label = current_web_info_mode_label
         if st.session_state.web_info_source_mode_label not in web_info_mode_labels:
-            st.session_state.web_info_source_mode_label = "OCR优先信息源（推荐）"
+            st.session_state.web_info_source_mode_label = "严格OCR信息源（默认，不读取DOM文本）"
         st.selectbox(
             "网页信息读取方式",
             options=list(web_info_mode_labels.keys()),
             key="web_info_source_mode_label",
             help="纯屏幕OCR信息源：页面类型/弹幕抽取/动作回执都仅基于屏幕OCR文本+图片特征，不读取DOM文本。",
         )
-        web_mode_preview = web_info_mode_labels.get(st.session_state.web_info_source_mode_label, "ocr_hybrid")
+        web_mode_preview = web_info_mode_labels.get(st.session_state.web_info_source_mode_label, "ocr_only")
         if web_mode_preview == "ocr_only":
             st.caption("严格OCR信息源已选：建议同时使用 OCR视觉模式，以获得完整 OCR 操作链路。")
         elif web_mode_preview == "screen_ocr":
             st.caption("纯屏幕OCR信息源已选：系统完全不读取浏览器DOM文本，所有信息来自屏幕识别。")
+        elif web_mode_preview == "dom":
+            st.caption("DOM 信息源已显式启用：仅在你需要兼容旧链路时建议使用。")
 
         if "tone_template_input" not in st.session_state:
             st.session_state.tone_template_input = st.session_state.assistant.tone_template
@@ -1981,15 +2053,21 @@ with st.sidebar:
             st.session_state.human_like_click_jitter_px_ui = float(current_human_cfg.get("click_jitter_px", 1.8) or 1.8)
         if "ocr_physical_click_enabled_ui" not in st.session_state:
             st.session_state.ocr_physical_click_enabled_ui = bool(current_human_cfg.get("ocr_physical_click_enabled", True))
+        if "ocr_vision_allow_dom_fallback_ui" not in st.session_state:
+            st.session_state.ocr_vision_allow_dom_fallback_ui = bool(current_human_cfg.get("ocr_vision_allow_dom_fallback", False))
         if "os_keyboard_fallback_enabled_ui" not in st.session_state:
             st.session_state.os_keyboard_fallback_enabled_ui = bool(current_human_cfg.get("keyboard_fallback_enabled", False))
+        if "message_keyboard_only_enabled_ui" not in st.session_state:
+            st.session_state.message_keyboard_only_enabled_ui = bool(current_human_cfg.get("message_keyboard_only_enabled", True))
+        if "force_full_physical_chain_ui" not in st.session_state:
+            st.session_state.force_full_physical_chain_ui = bool(current_human_cfg.get("force_full_physical_chain", False))
         if "os_keyboard_typing_min_ms_ui" not in st.session_state:
             st.session_state.os_keyboard_typing_min_ms_ui = int(float(current_human_cfg.get("typing_min_interval_seconds", 0.018) or 0.018) * 1000)
         if "os_keyboard_typing_max_ms_ui" not in st.session_state:
             st.session_state.os_keyboard_typing_max_ms_ui = int(float(current_human_cfg.get("typing_max_interval_seconds", 0.055) or 0.055) * 1000)
 
         with st.expander("真人化执行参数（键鼠）", expanded=False):
-            p1, p2, p3 = st.columns(3)
+            p1, p2, p3, p4 = st.columns(4)
             if p1.button("保守预设", key="btn_human_preset_safe", use_container_width=True):
                 _apply_human_preset_to_ui("保守（低风险）")
                 _set_human_like_settings(st.session_state.assistant, _build_human_like_payload_from_ui())
@@ -2002,10 +2080,21 @@ with st.sidebar:
                 _apply_human_preset_to_ui("激进（速度优先）")
                 _set_human_like_settings(st.session_state.assistant, _build_human_like_payload_from_ui())
                 st.rerun()
+            if p4.button("全链路物理预设", key="btn_human_preset_physical", use_container_width=True):
+                _apply_human_preset_to_ui("强制全链路物理键鼠")
+                st.session_state.operation_execution_mode_label = "OCR视觉模式（默认，禁DOM兜底）"
+                st.session_state.web_info_source_mode_label = "纯屏幕OCR信息源（完全无DOM）"
+                _set_human_like_settings(st.session_state.assistant, _build_human_like_payload_from_ui())
+                st.rerun()
             st.checkbox(
                 "启用真人化动作节奏",
                 key="human_like_enabled_ui",
                 help="开启后会在点击与动作链路加入随机停顿、微抖动和拟人轨迹。",
+            )
+            st.checkbox(
+                "强制全链路物理鼠标键盘执行",
+                key="force_full_physical_chain_ui",
+                help="开启后：强制 OCR视觉 + screen_ocr，禁用 DOM 点击/表单提交回退，发送链路优先系统键盘。",
             )
             h1, h2 = st.columns(2)
             with h1:
@@ -2023,6 +2112,11 @@ with st.sidebar:
                 help="开启后在 OCR 视觉命中时优先走系统鼠标真实移动点击；失败才回退 JS 点击。",
             )
             st.checkbox(
+                "允许 OCR视觉模式回退到 DOM（不推荐）",
+                key="ocr_vision_allow_dom_fallback_ui",
+                help="默认关闭。关闭后未显式选择 DOM 时不会启用 DOM 回退链路。",
+            )
+            st.checkbox(
                 "启用系统键盘输入兜底",
                 key="os_keyboard_fallback_enabled_ui",
                 help="仅在 DOM 输入失败时回退为系统逐字符输入；在极端页面抖动场景更稳。",
@@ -2033,6 +2127,18 @@ with st.sidebar:
                 st.session_state.reply_lang_label,
                 settings.DEFAULT_REPLY_LANGUAGE
             )
+            force_full_physical = bool(st.session_state.get("force_full_physical_chain_ui", False))
+            target_operation_mode = operation_mode_labels.get(
+                st.session_state.operation_execution_mode_label,
+                "ocr_vision",
+            )
+            target_web_info_mode = web_info_mode_labels.get(
+                st.session_state.web_info_source_mode_label,
+                "ocr_only",
+            )
+            if force_full_physical:
+                target_operation_mode = "ocr_vision"
+                target_web_info_mode = "screen_ocr"
             st.session_state.assistant.update_reply_settings(
                 language=selected_lang,
                 tone_template=st.session_state.tone_template_input
@@ -2042,11 +2148,11 @@ with st.sidebar:
             _set_voice_command_enabled(st.session_state.assistant, st.session_state.voice_command_enabled_ui)
             _set_operation_execution_mode(
                 st.session_state.assistant,
-                operation_mode_labels.get(st.session_state.operation_execution_mode_label, "dom"),
+                target_operation_mode,
             )
             _set_web_info_source_mode(
                 st.session_state.assistant,
-                web_info_mode_labels.get(st.session_state.web_info_source_mode_label, "ocr_hybrid"),
+                target_web_info_mode,
             )
             _set_human_like_settings(st.session_state.assistant, _build_human_like_payload_from_ui())
             st.success("回复设置已应用")
@@ -2098,6 +2204,13 @@ with st.sidebar:
 
         st.markdown("---")
         st.caption("🎧 播放器流ASR测试（Bilibili）")
+        # Streamlit 限制：widget key 在实例化后不可在同轮脚本内修改。
+        # 若上一轮开启失败，这里在控件创建前执行重置。
+        if st.session_state.get("cloud_asr_bili_test_force_reset_pending"):
+            st.session_state.cloud_asr_bili_test_enabled_ui = False
+            st.session_state.cloud_asr_bili_test_prev_ui = False
+            st.session_state.cloud_asr_bili_test_force_reset_pending = False
+
         st.text_input(
             "B站测试URL",
             key="cloud_asr_bili_test_url_ui",
@@ -2115,6 +2228,23 @@ with st.sidebar:
             key="cloud_asr_bili_test_enabled_ui",
             help="走浏览器内媒体流识别（不录屏、不录麦），用于本地/云端 ASR 对比测试。",
         )
+        cloud_asr_last_error = str(st.session_state.get("cloud_asr_bili_test_last_error") or "").strip()
+        if cloud_asr_last_error:
+            if any(
+                k in cloud_asr_last_error
+                for k in [
+                    "capture_stream_unavailable",
+                    "media_element_not_found",
+                    "media_stream_no_audio_track",
+                    "tab_audio_js_no_result",
+                    "browser_page_context_unavailable",
+                ]
+            ):
+                st.error("开启失败：未能从当前页面播放器抓到音频流。")
+                st.caption("请确认 Bilibili 页面正在播放视频/直播（不是静止页）且页面未关闭，然后点击“重新打开B站测试页”再试。")
+            else:
+                st.error(f"开启播放器流ASR测试失败：{cloud_asr_last_error}")
+            st.session_state.cloud_asr_bili_test_last_error = ""
         current_cloud_test = bool(st.session_state.cloud_asr_bili_test_enabled_ui)
         prev_cloud_test = bool(st.session_state.cloud_asr_bili_test_prev_ui)
         if current_cloud_test != prev_cloud_test:
@@ -2133,14 +2263,10 @@ with st.sidebar:
                     st.session_state.cloud_asr_bili_test_prev_ui = True
                     need_rerun = True
                 else:
-                    st.session_state.cloud_asr_bili_test_enabled_ui = False
+                    st.session_state.cloud_asr_bili_test_force_reset_pending = True
                     st.session_state.cloud_asr_bili_test_prev_ui = False
-                    err = str(result.get("error") or "unknown")
-                    if any(k in err for k in ["capture_stream_unavailable", "media_element_not_found", "media_stream_no_audio_track"]):
-                        st.error("开启失败：未能从当前页面播放器抓到音频流。")
-                        st.caption("请确认 Bilibili 页面正在播放视频/直播（不是静止页），然后点击“重新打开B站测试页”再试。")
-                    else:
-                        st.error(f"开启播放器流ASR测试失败：{err}")
+                    st.session_state.cloud_asr_bili_test_last_error = str(result.get("error") or "unknown")
+                    need_rerun = True
             else:
                 if hasattr(st.session_state.assistant, "stop_cloud_asr_bilibili_test"):
                     result = st.session_state.assistant.stop_cloud_asr_bilibili_test(restore_previous=True)
@@ -2169,7 +2295,13 @@ with st.sidebar:
                     st.success("已重新打开B站测试页。")
                 else:
                     err = str(result.get("error") or "unknown")
-                    if any(k in err for k in ["capture_stream_unavailable", "media_element_not_found", "media_stream_no_audio_track"]):
+                    if any(k in err for k in [
+                        "capture_stream_unavailable",
+                        "media_element_not_found",
+                        "media_stream_no_audio_track",
+                        "tab_audio_js_no_result",
+                        "browser_page_context_unavailable",
+                    ]):
                         st.error("重开失败：页面播放器音频流不可用。")
                         st.caption("请先在 Bilibili 页面点击播放，再重试。")
                     else:

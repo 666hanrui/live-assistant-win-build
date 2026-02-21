@@ -188,6 +188,7 @@ class VisionAgent:
     def get_info_source_status(self):
         scan = dict(self._last_ocr_scan or {})
         cap = dict(self._last_capture or {})
+        live_state = dict(scan.get("live_state") or {})
         return {
             "mode": self.get_info_source_mode(),
             "ocr_available": bool(getattr(self.ocr_reader, "available", lambda: False)()),
@@ -197,7 +198,10 @@ class VisionAgent:
             "ocr_line_count": int(scan.get("line_count") or 0),
             "ocr_text": str(scan.get("text") or "")[:280],
             "ocr_chat_count": len(scan.get("chat_messages") or []),
-            "ocr_live": bool((scan.get("live_state") or {}).get("is_live")),
+            "ocr_live": bool(live_state.get("is_live")),
+            "ocr_live_phase": str(live_state.get("phase") or ""),
+            "ocr_live_confidence": float(live_state.get("confidence") or 0.0),
+            "ocr_live_has_timer": bool(live_state.get("has_timer")),
             "ocr_scene_tags": list(scan.get("scene_tags") or [])[:8],
             "ocr_block_count": int(len(scan.get("blocks") or [])),
             "capture_backend": scan.get("capture_backend") or cap.get("backend") or "",
@@ -593,14 +597,23 @@ class VisionAgent:
         # TikTok Shop 直播控制台视为目标页（便于稳定复用，不反复重连）
         if "shop.tiktok.com/streamer/live/product/dashboard" in url:
             return True
+        if "shop.tiktok.com/workbench/live/overview" in url:
+            return True
         if "business.tiktokshop.com/us/creator/live" in url:
             return True
         if self._is_local_mock_shop_page(title, url):
             return True
+        # TikTok 常见直播入口页，虽然不一定是 /@xxx/live，但可作为稳定候选，避免长时间找不到目标页。
+        if re.search(r"tiktok\.com/live(?:/|$)", url):
+            return True
         if re.search(r"tiktok\.com/@[^/]+/live", url):
             return True
-        # 兼容中文标题
-        if ("正在直播" in title and "tiktok" in title_lower) or ("直播控制台" in title):
+        # 兼容中英文标题
+        if (
+            ("正在直播" in title and "tiktok" in title_lower)
+            or ("直播控制台" in title)
+            or ("live" in title_lower and "tiktok" in title_lower)
+        ):
             return True
         return False
 
@@ -628,6 +641,8 @@ class VisionAgent:
             score += 3
 
         if "/live/" in url:
+            score += 3
+        elif url.endswith("/live") or "/live?" in url:
             score += 3
         if "dashboard" in url or "dashboard" in title_lower:
             score += 2
@@ -657,6 +672,38 @@ class VisionAgent:
 
         if not self._is_live_like(title, url):
             score -= 2
+        return score
+
+    def _is_audio_test_tab(self, title, url):
+        title_lower = (title or "").lower()
+        url_lower = (url or "").lower()
+        media_hosts = [
+            "bilibili.com",
+            "live.bilibili.com",
+            "youtube.com",
+            "youtu.be",
+            "twitch.tv",
+            "douyin.com",
+        ]
+        if any(host in url_lower for host in media_hosts):
+            return True
+        if any(token in title_lower for token in ["哔哩哔哩", "bilibili", "youtube", "twitch", "douyin"]):
+            return True
+        return False
+
+    def _score_tab_for_browser_page(self, tab, prefer_media_tab=False):
+        score = self._score_tab(tab)
+        if not prefer_media_tab:
+            return score
+        title = (getattr(tab, "title", "") or "")
+        url = (getattr(tab, "url", "") or "")
+        url_lower = url.lower()
+        if self._is_audio_test_tab(title, url):
+            score += 32
+        if "bilibili.com" in url_lower:
+            score += 8
+        if any(key in url_lower for key in ["/video/", "/bangumi/", "/live", "live.bilibili.com"]):
+            score += 4
         return score
 
     def _is_current_live_tab(self):
@@ -785,17 +832,30 @@ class VisionAgent:
             if settings.TIKTOK_FORCE_LIVE_TAB and best_score < settings.TIKTOK_TAB_MIN_SCORE:
                 # 显式兜底：若存在内置 mock 页，优先接入，避免评分阈值误拦截。
                 mock_tab = None
+                soft_tiktok_tab = None
                 for _, tab in candidates:
                     url = (getattr(tab, "url", "") or "").lower()
                     title = (getattr(tab, "title", "") or "").lower()
                     if "mock_tiktok_shop" in url or "mock_tiktok_shop.html" in url or "tiktok shop streamer mock" in title:
                         mock_tab = tab
                         break
+                    if (soft_tiktok_tab is None) and (
+                        ("tiktok.com" in url)
+                        or ("tiktokshop.com" in url)
+                        or ("tiktok" in title)
+                    ):
+                        soft_tiktok_tab = tab
                 if mock_tab is not None:
                     self.page = mock_tab
                     self.last_alive_probe_ok = True
                     self.last_alive_probe_at = time.time()
                     logger.info("评分阈值未命中，已回退连接到内置 Mock 标签页")
+                    return
+                if soft_tiktok_tab is not None:
+                    self.page = soft_tiktok_tab
+                    self.last_alive_probe_ok = True
+                    self.last_alive_probe_at = time.time()
+                    logger.info("评分阈值未命中，已回退连接到 TikTok 相关标签页")
                     return
                 logger.warning(f"未找到可用直播标签页，最高匹配分={best_score}，请先打开 TikTok 直播页")
                 raise RuntimeError("未找到 TikTok 直播标签页")
@@ -808,7 +868,7 @@ class VisionAgent:
             logger.error(f"连接浏览器失败: {e}")
             raise
 
-    def ensure_browser_page_connection(self, force=False):
+    def ensure_browser_page_connection(self, force=False, prefer_media_tab=False):
         """
         仅确保可执行 JS 的浏览器 page 上下文可用。
         与 info_source_mode 无关：即使在 screen_ocr 模式也会尝试连接浏览器页。
@@ -831,8 +891,18 @@ class VisionAgent:
                 self.last_alive_probe_at = time.time()
                 return alive
 
+            media_tabs = []
+            if prefer_media_tab:
+                media_tabs = [
+                    t for t in tabs
+                    if self._is_audio_test_tab(getattr(t, "title", ""), getattr(t, "url", ""))
+                ]
             strict_tabs = [t for t in tabs if self._is_target_live_room(getattr(t, "title", ""), getattr(t, "url", ""))]
-            candidates = [(self._score_tab(tab), tab) for tab in (strict_tabs or tabs)]
+            pick_pool = media_tabs or strict_tabs or tabs
+            candidates = [
+                (self._score_tab_for_browser_page(tab, prefer_media_tab=prefer_media_tab), tab)
+                for tab in pick_pool
+            ]
             candidates.sort(key=lambda x: x[0], reverse=True)
             self.page = candidates[0][1]
             alive = self._browser_page_alive()
@@ -843,6 +913,10 @@ class VisionAgent:
             logger.warning(f"ensure_browser_page_connection 失败: {e}")
             self.last_alive_probe_ok = False
             return False
+
+    def _allow_ocr_danmu_page_type(self, page_type):
+        """OCR 弹幕仅在明确直播页放行，避免把其它应用文本当弹幕。"""
+        return str(page_type or "").strip().lower() in {"tiktok_live_room"}
 
     def get_new_danmu(self):
         """
@@ -867,6 +941,16 @@ class VisionAgent:
                     )
                 self._last_ocr_scan = dict(scan or {})
                 self._update_chat_roi_from_scan(scan or {})
+                page_type = str((scan or {}).get("page_type") or "").strip().lower()
+                if not self._allow_ocr_danmu_page_type(page_type):
+                    self.no_chat_rounds += 1
+                    warn_interval = max(1, settings.NO_CHAT_WARN_INTERVAL_ROUNDS)
+                    if self.no_chat_rounds % warn_interval == 0:
+                        logger.warning(
+                            "VisionAgent(ScreenOCR): 跳过非直播页弹幕抽取 "
+                            f"page_type={scan.get('page_type')} lines={scan.get('line_count')}"
+                        )
+                    return []
                 ocr_msgs = list(scan.get("chat_messages") or [])
                 new_messages = []
                 if not ocr_msgs:
@@ -908,6 +992,16 @@ class VisionAgent:
                     max_chat_messages=max(1, int(getattr(settings, "OCR_CHAT_MAX_MESSAGES", 6))),
                 )
                 self._last_ocr_scan = dict(scan or {})
+                page_type = str((scan or {}).get("page_type") or "").strip().lower()
+                if not self._allow_ocr_danmu_page_type(page_type):
+                    self.no_chat_rounds += 1
+                    warn_interval = max(1, settings.NO_CHAT_WARN_INTERVAL_ROUNDS)
+                    if self.no_chat_rounds % warn_interval == 0:
+                        logger.warning(
+                            "VisionAgent(OCR): 跳过非直播页弹幕抽取 "
+                            f"page_type={scan.get('page_type')} lines={scan.get('line_count')}"
+                        )
+                    return []
                 ocr_msgs = list(scan.get("chat_messages") or [])
                 new_messages = []
                 if not ocr_msgs:

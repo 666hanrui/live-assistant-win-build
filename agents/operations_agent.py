@@ -3,12 +3,15 @@ import time
 import random
 import re
 import json
+import platform
+import subprocess
 from collections import deque
 from pathlib import Path
 from app_config.settings import REPLY_INTERVAL, SEND_MESSAGE_MAX_CHARS, OPERATION_EXECUTION_MODE
 import app_config.settings as settings
 from utils.mouse_utils import (
     human_click,
+    human_move_to,
     human_pause,
     human_paste,
     human_press,
@@ -30,6 +33,8 @@ class OperationsAgent:
         self._full_find_timeout = 0.35
         self.last_action_receipt = {}
         self.execution_mode = self._normalize_execution_mode(OPERATION_EXECUTION_MODE)
+        self._ocr_vision_allow_dom_fallback = bool(getattr(settings, "OCR_VISION_ALLOW_DOM_FALLBACK", False))
+        self._force_full_physical_chain = bool(getattr(settings, "FORCE_FULL_PHYSICAL_MOUSE_KEYBOARD", False))
         self.ocr_engine = LocalOcrEngine()
         self._last_ocr_text = ""
         self._last_ocr_error = ""
@@ -53,6 +58,38 @@ class OperationsAgent:
         self._ocr_reaction_llm_enabled = bool(getattr(settings, "OCR_ACTION_REACTION_LLM_ENABLED", True))
         self._ocr_reaction_llm_max_checks = max(1, int(getattr(settings, "OCR_ACTION_REACTION_LLM_MAX_CHECKS", 4) or 4))
         self._ocr_reaction_llm_min_interval = max(0.2, float(getattr(settings, "OCR_ACTION_REACTION_LLM_MIN_INTERVAL_SECONDS", 1.2) or 1.2))
+        self._ocr_pin_fixed_row_click_enabled = bool(getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_ENABLED", True))
+        self._pin_unpin_force_fixed_row_click = bool(getattr(settings, "PIN_UNPIN_FORCE_FIXED_ROW_CLICK", True))
+        self._pin_unpin_require_link_index = bool(getattr(settings, "PIN_UNPIN_REQUIRE_LINK_INDEX", True))
+        if self._pin_unpin_force_fixed_row_click:
+            self._ocr_pin_fixed_row_click_enabled = True
+        self._ocr_pin_fixed_row_click_x_ratio = float(getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_X_RATIO", 0.0) or 0.0)
+        self._ocr_pin_fixed_row_click_right_padding_px = max(
+            0.0, float(getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_RIGHT_PADDING_PX", 56.0) or 56.0)
+        )
+        self._ocr_pin_fixed_row_click_right_padding_ratio = max(
+            0.0, float(getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_RIGHT_PADDING_RATIO", 0.06) or 0.06)
+        )
+        self._ocr_pin_fixed_row_click_panel_x_ratio = float(
+            getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_PANEL_X_RATIO", 0.90) or 0.90
+        )
+        self._ocr_pin_fixed_row_click_offset_x_px = float(getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_OFFSET_X_PX", 0.0) or 0.0)
+        self._ocr_pin_fixed_row_click_offset_x_ratio = max(
+            0.0, float(getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_OFFSET_X_RATIO", 0.30) or 0.30)
+        )
+        self._ocr_pin_fixed_row_click_offset_y_px = float(getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_PX", 0.0) or 0.0)
+        self._ocr_pin_fixed_row_click_offset_y_ratio = float(
+            getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_OFFSET_Y_RATIO", 0.0) or 0.0
+        )
+        self._ocr_pin_click_test_confirm_popup = bool(getattr(settings, "OCR_PIN_CLICK_TEST_CONFIRM_POPUP", False))
+        self._ocr_pin_fixed_row_calibration_log_enabled = bool(
+            getattr(settings, "OCR_PIN_FIXED_ROW_CALIBRATION_LOG_ENABLED", True)
+        )
+        self._ocr_pin_fixed_row_calibration_log_path = str(
+            getattr(settings, "OCR_PIN_FIXED_ROW_CALIBRATION_LOG_PATH", "data/reports/pin_click_calibration.jsonl")
+            or "data/reports/pin_click_calibration.jsonl"
+        ).strip()
+        self._last_fixed_row_click_meta = {}
         self._reaction_judge_agent = None
         self._os_keyboard_fallback_enabled = bool(getattr(settings, "OS_KEYBOARD_INPUT_FALLBACK_ENABLED", False))
         self._os_key_min_interval = max(0.001, float(getattr(settings, "OS_KEYBOARD_TYPING_MIN_INTERVAL_SECONDS", 0.018) or 0.018))
@@ -117,11 +154,18 @@ class OperationsAgent:
         self._run_js_include_frames = bool(getattr(settings, "OPS_RUN_JS_INCLUDE_FRAMES", False))
         self._last_js_context_name = "page"
 
+        if self._force_full_physical_chain:
+            self.execution_mode = "ocr_vision"
+            self._ocr_physical_click_enabled = True
+            self._ocr_vision_allow_dom_fallback = False
+            self._message_keyboard_only_enabled = True
+            self._os_keyboard_fallback_enabled = True
+
     def _normalize_execution_mode(self, mode):
         mode = str(mode or "").strip().lower()
         if mode in {"dom", "ocr_vision"}:
             return mode
-        return "dom"
+        return "ocr_vision"
 
     def _normalize_keyboard_input_mode(self, mode):
         mode = str(mode or "").strip().lower()
@@ -130,11 +174,27 @@ class OperationsAgent:
         return "type"
 
     def set_execution_mode(self, mode):
-        self.execution_mode = self._normalize_execution_mode(mode)
+        target = self._normalize_execution_mode(mode)
+        if self._force_full_physical_chain and target == "dom":
+            logger.warning("强制全链路物理键鼠已开启，忽略 dom 执行模式请求，保持 ocr_vision。")
+            target = "ocr_vision"
+        self.execution_mode = target
         return self.execution_mode
 
     def get_execution_mode(self):
         return self.execution_mode
+
+    def _dom_execution_enabled(self):
+        return (not self._force_full_physical_chain) and self.get_execution_mode() == "dom"
+
+    def _dom_fallback_enabled(self):
+        if self._force_full_physical_chain:
+            return False
+        if self._dom_execution_enabled():
+            return True
+        if self._is_ocr_info_only_mode():
+            return False
+        return self._is_ocr_vision_mode() and bool(self._ocr_vision_allow_dom_fallback)
 
     def set_reaction_judge(self, judge_agent=None):
         self._reaction_judge_agent = judge_agent
@@ -167,7 +227,10 @@ class OperationsAgent:
 
     def _log_execution_mode(self, action):
         if self._is_ocr_vision_mode():
-            logger.info(f"{action}: OCR视觉模式已启用（优先OCR锚点，DOM兼容兜底）")
+            if self._dom_fallback_enabled():
+                logger.info(f"{action}: OCR视觉模式已启用（优先OCR锚点，DOM兼容兜底）")
+            else:
+                logger.info(f"{action}: OCR视觉模式已启用（优先OCR锚点，DOM兜底已禁用）")
 
     def _human_action_delay(self, reason=""):
         if not self._human_like_enabled:
@@ -236,6 +299,8 @@ class OperationsAgent:
             "typing_max_interval_seconds": float(self._os_key_max_interval),
             "message_keyboard_only_enabled": bool(self._message_keyboard_only_enabled),
             "message_keyboard_input_mode": str(self._message_keyboard_input_mode),
+            "ocr_vision_allow_dom_fallback": bool(self._ocr_vision_allow_dom_fallback),
+            "force_full_physical_chain": bool(self._force_full_physical_chain),
         }
 
     def set_human_like_settings(self, **kwargs):
@@ -263,6 +328,16 @@ class OperationsAgent:
             self._message_keyboard_only_enabled = bool(kwargs.get("message_keyboard_only_enabled"))
         if "message_keyboard_input_mode" in kwargs:
             self._message_keyboard_input_mode = self._normalize_keyboard_input_mode(kwargs.get("message_keyboard_input_mode"))
+        if "ocr_vision_allow_dom_fallback" in kwargs:
+            self._ocr_vision_allow_dom_fallback = bool(kwargs.get("ocr_vision_allow_dom_fallback"))
+        if "force_full_physical_chain" in kwargs:
+            self._force_full_physical_chain = bool(kwargs.get("force_full_physical_chain"))
+        if self._force_full_physical_chain:
+            self.execution_mode = "ocr_vision"
+            self._ocr_physical_click_enabled = True
+            self._ocr_vision_allow_dom_fallback = False
+            self._message_keyboard_only_enabled = True
+            self._os_keyboard_fallback_enabled = True
         return self.get_human_like_settings()
 
     def get_human_like_stats(self, recent_limit=8):
@@ -1021,6 +1096,237 @@ class OperationsAgent:
         except Exception:
             return None
 
+    def _normalize_link_index(self, link_index):
+        try:
+            idx = int(link_index)
+        except Exception:
+            return None
+        return idx if idx > 0 else None
+
+    def _pick_primary_block_rect(self, ocr, target_role):
+        role = str(target_role or "").strip().lower()
+        if not role:
+            return None
+        best = None
+        best_score = -1.0
+        for b in list((ocr or {}).get("blocks") or []):
+            if not isinstance(b, dict):
+                continue
+            if str((b or {}).get("role") or "").strip().lower() != role:
+                continue
+            rect = (b or {}).get("rect") or {}
+            if not isinstance(rect, dict):
+                continue
+            try:
+                w = max(0.0, float(rect.get("x2") or 0.0) - float(rect.get("x1") or 0.0))
+                h = max(0.0, float(rect.get("y2") or 0.0) - float(rect.get("y1") or 0.0))
+            except Exception:
+                continue
+            if w <= 2 or h <= 2:
+                continue
+            score = float((b or {}).get("role_confidence") or 0.0) + (w * h) / 1000000.0
+            if score > best_score:
+                best_score = score
+                best = rect
+        return dict(best or {}) if isinstance(best, dict) else None
+
+    def _build_fixed_row_click_candidate(self, action, row_anchor, ocr, link_index=None):
+        if (not self._ocr_pin_fixed_row_click_enabled) or action not in {"pin_product", "unpin_product"}:
+            return None
+        idx = self._normalize_link_index(link_index)
+        if (not idx) or (not isinstance(row_anchor, dict)):
+            return None
+        row_rect = dict((row_anchor or {}).get("rect") or {})
+        row_center = self._extract_rect_center(row_rect)
+        if not row_center:
+            return None
+        row_h = 0.0
+        try:
+            row_h = max(0.0, float(row_rect.get("y2") or 0.0) - float(row_rect.get("y1") or 0.0))
+        except Exception:
+            row_h = 0.0
+
+        img_w = float((ocr or {}).get("image_w") or 0.0)
+        img_h = float((ocr or {}).get("image_h") or 0.0)
+        x = None
+        x_source = "unknown"
+        panel_rect = self._pick_primary_block_rect(ocr, "product_panel")
+
+        ratio = float(self._ocr_pin_fixed_row_click_x_ratio or 0.0)
+        if img_w > 2 and 0.05 <= ratio <= 0.95:
+            x = img_w * ratio
+            x_source = "x_ratio"
+
+        if (x is None) and panel_rect:
+            try:
+                panel_right = float(panel_rect.get("x2") or 0.0)
+                panel_left = float(panel_rect.get("x1") or 0.0)
+                panel_w = max(0.0, panel_right - panel_left)
+                panel_x_ratio = float(self._ocr_pin_fixed_row_click_panel_x_ratio or 0.0)
+                if panel_w > 2 and 0.55 <= panel_x_ratio <= 0.98:
+                    x = panel_left + panel_w * panel_x_ratio
+                    x_source = "product_panel_x_ratio"
+                elif panel_right > 2:
+                    pad_px = float(self._ocr_pin_fixed_row_click_right_padding_px)
+                    pad_ratio = float(self._ocr_pin_fixed_row_click_right_padding_ratio or 0.0)
+                    if panel_w > 2 and 0.0 < pad_ratio <= 0.45:
+                        pad_px = max(pad_px, panel_w * pad_ratio)
+                    x = panel_right - pad_px
+                    x_source = "product_panel_right_padding"
+            except Exception:
+                x = None
+
+        if x is None:
+            base_x = float(row_center[0])
+            rel_delta = img_w * float(self._ocr_pin_fixed_row_click_offset_x_ratio or 0.0) if img_w > 2 else 0.0
+            abs_delta = float(self._ocr_pin_fixed_row_click_offset_x_px or 0.0)
+            delta = max(abs_delta, rel_delta)
+            if delta <= 1.0:
+                delta = 320.0
+            x = base_x + delta
+            x_source = "row_anchor_offset"
+
+        y_ratio = float(self._ocr_pin_fixed_row_click_offset_y_ratio or 0.0)
+        y_delta_ratio = 0.0
+        if row_h > 2.0 and -0.6 <= y_ratio <= 0.6:
+            y_delta_ratio = row_h * y_ratio
+        y = float(row_center[1]) + float(self._ocr_pin_fixed_row_click_offset_y_px or 0.0) + float(y_delta_ratio)
+        if img_w > 2:
+            x = max(1.0, min(img_w - 2.0, float(x)))
+        if img_h > 2:
+            y = max(1.0, min(img_h - 2.0, float(y)))
+
+        vp = self._map_ocr_point_to_viewport(float(x), float(y), ocr or {})
+        if not vp:
+            return None
+
+        return {
+            "vx": int(vp[0]),
+            "vy": int(vp[1]),
+            "label": "fixed-row-relative",
+            "fixed_mode": True,
+            "fixed_meta": {
+                "action": str(action or ""),
+                "link_index": int(idx),
+                "row_center": {"x": int(round(row_center[0])), "y": int(round(row_center[1]))},
+                "target_ocr_point": {"x": int(round(float(x))), "y": int(round(float(y)))},
+                "x_source": x_source,
+                "row_rect": self._compact_rect(row_rect),
+                "row_h": int(round(row_h)),
+                "panel_rect": self._compact_rect(panel_rect or {}),
+            },
+        }
+
+    def _show_click_test_popup(self, message, timeout_seconds=120.0):
+        """点击测试弹窗（阻塞等待测试人员确认）。"""
+        msg = str(message or "").strip()
+        if not msg:
+            return True, {"skipped": True}
+        contexts = self._ordered_contexts()
+        if not contexts:
+            return False, {"reason": "no_page_context"}
+        script = "alert(String(arguments[0] || '')); return true;"
+        last_err = ""
+        for ctx_name, ctx in contexts[:3]:
+            try:
+                _ = ctx.run_js(script, msg, timeout=max(10.0, float(timeout_seconds or 120.0)))
+                return True, {"ctx": str(ctx_name or "page")}
+            except Exception as e:
+                last_err = str(e)
+                continue
+        return False, {"reason": last_err or "popup_failed"}
+
+    def _build_click_test_notice(self, action, link_index, candidate):
+        meta = dict((candidate or {}).get("fixed_meta") or {})
+        row_center = dict(meta.get("row_center") or {})
+        target_point = dict(meta.get("target_ocr_point") or {})
+        return (
+            "[OCR点击测试确认]\n"
+            f"action={str(action or '')}\n"
+            f"link_index={int(link_index or 0)}\n"
+            f"viewport=({int((candidate or {}).get('vx') or 0)},{int((candidate or {}).get('vy') or 0)})\n"
+            f"row_center=({int(row_center.get('x') or 0)},{int(row_center.get('y') or 0)})\n"
+            f"target_ocr=({int(target_point.get('x') or 0)},{int(target_point.get('y') or 0)})\n"
+            "请确认该点位后点击“确定”继续执行点击。"
+        )
+
+    def _compact_rect(self, rect):
+        if not isinstance(rect, dict):
+            return {}
+        out = {}
+        for k in ("x1", "y1", "x2", "y2"):
+            try:
+                out[k] = int(round(float(rect.get(k) or 0.0)))
+            except Exception:
+                out[k] = 0
+        return out
+
+    def _append_fixed_row_click_log(self, payload):
+        if not self._ocr_pin_fixed_row_calibration_log_enabled:
+            return
+        path = Path(self._ocr_pin_fixed_row_calibration_log_path or "data/reports/pin_click_calibration.jsonl")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning(f"写入固定点位校准日志失败: {e}")
+
+    def _record_fixed_row_click_meta(self, action, link_index, ocr, anchor, line, candidate, click_results, verified, reason):
+        candidate = dict(candidate or {})
+        fixed_meta = dict(candidate.get("fixed_meta") or {})
+        compact_attempts = []
+        for item in list(click_results or [])[:4]:
+            click_obj = dict((item or {}).get("click") or {})
+            compact_attempts.append(
+                {
+                    "attempt": int((item or {}).get("attempt") or 0),
+                    "label": str((item or {}).get("label") or ""),
+                    "point": dict((item or {}).get("point") or {}),
+                    "driver": str(click_obj.get("driver") or ""),
+                    "ok": bool(click_obj.get("ok")),
+                    "reason": str(click_obj.get("reason") or ""),
+                }
+            )
+
+        payload = {
+            "ts": int(time.time() * 1000),
+            "action": str(action or ""),
+            "link_index": int(link_index or 0),
+            "ok": bool(verified),
+            "result_reason": str(reason or ""),
+            "verified": dict(verified or {}),
+            "ocr": {
+                "provider": str((ocr or {}).get("provider") or ""),
+                "page_type": str((ocr or {}).get("page_type") or ""),
+                "coord_space": str((ocr or {}).get("coord_space") or ""),
+                "image_w": int(float((ocr or {}).get("image_w") or 0.0)),
+                "image_h": int(float((ocr or {}).get("image_h") or 0.0)),
+                "view_w": int(float((ocr or {}).get("view_w") or 0.0)),
+                "view_h": int(float((ocr or {}).get("view_h") or 0.0)),
+                "scene_tags": list((ocr or {}).get("scene_tags") or [])[:12],
+            },
+            "line": {
+                "text": str((line or {}).get("text") or "")[:80],
+                "rect": self._compact_rect((line or {}).get("rect") or {}),
+            },
+            "anchor": {
+                "text": str((anchor or {}).get("text") or "")[:80] if isinstance(anchor, dict) else "",
+                "rect": self._compact_rect((anchor or {}).get("rect") or {}) if isinstance(anchor, dict) else {},
+            },
+            "target": {
+                "viewport": {"x": int(candidate.get("vx") or 0), "y": int(candidate.get("vy") or 0)},
+                "x_source": str(fixed_meta.get("x_source") or ""),
+                "row_center": dict(fixed_meta.get("row_center") or {}),
+                "target_ocr_point": dict(fixed_meta.get("target_ocr_point") or {}),
+                "row_rect": self._compact_rect(fixed_meta.get("row_rect") or {}),
+                "panel_rect": self._compact_rect(fixed_meta.get("panel_rect") or {}),
+            },
+            "attempts": compact_attempts,
+        }
+        self._last_fixed_row_click_meta = dict(payload)
+        self._append_fixed_row_click_log(payload)
+
     def _map_ocr_point_to_viewport(self, x, y, ocr):
         coord_space = str((ocr or {}).get("coord_space") or "").strip().lower()
         if coord_space == "screen":
@@ -1128,7 +1434,7 @@ class OperationsAgent:
             meta["error"] = str(e)
         return int(round(mx)), int(round(my)), meta
 
-    def _click_viewport_point(self, vx, vy, ocr=None):
+    def _click_viewport_point(self, vx, vy, ocr=None, pre_click_notice=""):
         if self._is_screen_ocr_info_mode():
             try:
                 tx, ty, map_meta = self._normalize_screen_click_point(vx, vy, ocr=ocr)
@@ -1172,8 +1478,28 @@ class OperationsAgent:
                     f"scaled={bool(map_meta.get('scaled'))}, clamped={bool(map_meta.get('clamped'))}, "
                     f"capture={map_meta.get('capture_rect')}, screen={map_meta.get('mouse_screen')}"
                 )
+                popup_result = {}
+                if pre_click_notice:
+                    human_move_to(int(tx), int(ty), jitter_px=max(0.6, min(self._human_click_jitter, 1.2)), overshoot=False)
+                    popup_ok, popup_result = self._show_click_test_popup(pre_click_notice)
+                    if not popup_ok:
+                        reason = str((popup_result or {}).get("reason") or "test_click_popup_failed")
+                        self._remember_click_result("test_popup_failed", {"x": int(tx), "y": int(ty)}, reason)
+                        return {
+                            "ok": False,
+                            "ctx": "screen",
+                            "driver": "test_popup_failed",
+                            "reason": reason,
+                            "point": {"x": int(tx), "y": int(ty)},
+                            "input_point": {"x": int(vx), "y": int(vy)},
+                            "map_meta": map_meta,
+                            "popup": popup_result,
+                        }
                 self._human_action_delay("screen_click_pre")
-                human_click(int(tx), int(ty), jitter_px=self._human_click_jitter)
+                if pre_click_notice:
+                    human_click(jitter_px=self._human_click_jitter)
+                else:
+                    human_click(int(tx), int(ty), jitter_px=self._human_click_jitter)
                 self._human_action_post_delay("screen_click_post")
                 self._remember_click_result("physical_screen", {"x": int(tx), "y": int(ty)})
                 return {
@@ -1183,6 +1509,7 @@ class OperationsAgent:
                     "point": {"x": int(tx), "y": int(ty)},
                     "input_point": {"x": int(vx), "y": int(vy)},
                     "map_meta": map_meta,
+                    "popup": popup_result,
                 }
             except Exception as e:
                 self._remember_click_result("physical_screen_failed", {"x": int(vx), "y": int(vy)}, str(e))
@@ -1194,13 +1521,32 @@ class OperationsAgent:
                     "point": {"x": int(vx), "y": int(vy)},
                 }
 
-        if self._is_ocr_vision_mode() and self._ocr_physical_click_enabled:
+        if self._is_ocr_vision_mode() and (self._ocr_physical_click_enabled or self._force_full_physical_chain):
             screen_point = self._viewport_to_screen_point(vx, vy)
             if screen_point:
                 sx, sy = screen_point
                 try:
+                    popup_result = {}
+                    if pre_click_notice:
+                        human_move_to(int(sx), int(sy), jitter_px=max(0.6, min(self._human_click_jitter, 1.2)), overshoot=False)
+                        popup_ok, popup_result = self._show_click_test_popup(pre_click_notice)
+                        if not popup_ok:
+                            reason = str((popup_result or {}).get("reason") or "test_click_popup_failed")
+                            self._remember_click_result("test_popup_failed", {"x": int(sx), "y": int(sy)}, reason)
+                            return {
+                                "ok": False,
+                                "ctx": "screen_from_viewport",
+                                "driver": "test_popup_failed",
+                                "reason": reason,
+                                "point": {"x": int(sx), "y": int(sy)},
+                                "viewport_point": {"x": int(vx), "y": int(vy)},
+                                "popup": popup_result,
+                            }
                     self._human_action_delay("ocr_physical_click_pre")
-                    human_click(int(sx), int(sy), jitter_px=self._human_click_jitter)
+                    if pre_click_notice:
+                        human_click(jitter_px=self._human_click_jitter)
+                    else:
+                        human_click(int(sx), int(sy), jitter_px=self._human_click_jitter)
                     self._human_action_post_delay("ocr_physical_click_post")
                     self._remember_click_result("physical_viewport", {"x": int(sx), "y": int(sy)})
                     return {
@@ -1209,10 +1555,30 @@ class OperationsAgent:
                         "driver": "physical_viewport",
                         "point": {"x": int(sx), "y": int(sy)},
                         "viewport_point": {"x": int(vx), "y": int(vy)},
+                        "popup": popup_result,
                     }
                 except Exception as e:
                     logger.warning(f"OCR 物理鼠标点击失败，回退JS点击: {e}")
                     self._remember_click_result("physical_viewport_failed", {"x": int(sx), "y": int(sy)}, str(e))
+            if self._force_full_physical_chain:
+                fail_payload = {
+                    "ok": False,
+                    "reason": "physical_click_failed",
+                    "point": {"x": int(vx), "y": int(vy)},
+                    "driver": "physical_click_failed",
+                }
+                self._remember_click_result("physical_click_failed", fail_payload.get("point"), fail_payload.get("reason"))
+                return fail_payload
+
+        if not self._dom_fallback_enabled():
+            fail_payload = {
+                "ok": False,
+                "reason": "dom_click_disabled",
+                "point": {"x": int(vx), "y": int(vy)},
+                "driver": "dom_click_disabled",
+            }
+            self._remember_click_result("dom_click_disabled", fail_payload.get("point"), fail_payload.get("reason"))
+            return fail_payload
 
         script = """
         const x = Number(arguments[0] || 0);
@@ -1447,8 +1813,8 @@ class OperationsAgent:
                 gated = [ln for ln in norm_lines if ln.get(role_flag)]
                 if gated:
                     anchor_pool = gated
-            if link_index:
-                idx = int(link_index)
+            idx = self._normalize_link_index(link_index)
+            if idx:
                 anchor_keys = [
                     f"序号{idx}", f"{idx}号链接", f"第{idx}", f"link{idx}", f"item{idx}", f"product{idx}",
                 ]
@@ -1465,6 +1831,8 @@ class OperationsAgent:
                         if row_pat.search(ln["text"]):
                             row_anchor = ln
                             break
+                if row_anchor is None:
+                    return None, None
 
             candidates = []
             for ln in norm_lines:
@@ -1564,6 +1932,8 @@ class OperationsAgent:
         )
         if line:
             return line, anchor
+        if action in {"pin_product", "unpin_product"} and self._normalize_link_index(link_index):
+            return None, None
         line = self._pick_ocr_target_from_action_candidates(
             action,
             ocr=ocr,
@@ -1775,7 +2145,7 @@ class OperationsAgent:
         """
 
         dom_fail = None
-        if not self._is_screen_ocr_info_mode():
+        if (not self._is_screen_ocr_info_mode()) and self._dom_fallback_enabled():
             for ctx_name, ctx in self._iter_contexts():
                 try:
                     result = ctx.run_js(script, int(delta), int(vx), int(vy))
@@ -1946,9 +2316,29 @@ class OperationsAgent:
         return {"ok": False, "reason": reason, "ocr": ocr, "line": None, "anchor": None, "nav_trace": nav_trace, "nav_hint": nav_hint}
 
     def _perform_action_by_ocr_anchor(self, action, link_index=None, preferred_text=""):
+        is_pin_unpin = action in {"pin_product", "unpin_product"}
+        link_idx = self._normalize_link_index(link_index)
+        if is_pin_unpin and self._pin_unpin_require_link_index and (not link_idx):
+            fail_payload = {
+                "ts": int(time.time() * 1000),
+                "action": str(action or ""),
+                "link_index": 0,
+                "ok": False,
+                "result_reason": "link_index_required_for_fixed_row_click",
+                "attempts": [],
+            }
+            self._last_fixed_row_click_meta = dict(fail_payload)
+            self._append_fixed_row_click_log(fail_payload)
+            return {
+                "ok": False,
+                "reason": "link_index_required_for_fixed_row_click",
+                "ocr": {},
+                "anchor": None,
+                "nav_trace": [],
+            }
         target = self._resolve_ocr_target_with_navigation(
             action,
-            link_index=link_index,
+            link_index=link_idx if link_idx else link_index,
             preferred_text=preferred_text,
         )
         ocr = dict(target.get("ocr") or {})
@@ -1967,6 +2357,52 @@ class OperationsAgent:
         if not center:
             return {"ok": False, "reason": "ocr_rect_invalid", "line": line}
         candidates = self._build_ocr_click_candidates(line.get("rect"), ocr, fallback_center=center)
+        fixed_candidate = self._build_fixed_row_click_candidate(action, anchor, ocr, link_index=link_idx)
+        if is_pin_unpin and self._ocr_pin_fixed_row_click_enabled:
+            if fixed_candidate:
+                candidates = [fixed_candidate]
+                logger.info(
+                    f"OCR固定行相对点击启用: action={action}, link_index={int(link_idx or 0)}, "
+                    f"point=({int(fixed_candidate['vx'])},{int(fixed_candidate['vy'])}), "
+                    f"source={str((fixed_candidate.get('fixed_meta') or {}).get('x_source') or '')}"
+                )
+            elif self._pin_unpin_force_fixed_row_click:
+                miss_reason = "fixed_row_anchor_missing" if (not isinstance(anchor, dict)) else "fixed_row_candidate_unavailable"
+                fail_payload = {
+                    "ts": int(time.time() * 1000),
+                    "action": str(action or ""),
+                    "link_index": int(link_idx or 0),
+                    "ok": False,
+                    "result_reason": miss_reason,
+                    "ocr": {
+                        "page_type": str((ocr or {}).get("page_type") or ""),
+                        "image_w": int(float((ocr or {}).get("image_w") or 0.0)),
+                        "image_h": int(float((ocr or {}).get("image_h") or 0.0)),
+                    },
+                    "line": {
+                        "text": str((line or {}).get("text") or "")[:80],
+                        "rect": self._compact_rect((line or {}).get("rect") or {}),
+                    },
+                    "anchor": {
+                        "text": str((anchor or {}).get("text") or "")[:80] if isinstance(anchor, dict) else "",
+                        "rect": self._compact_rect((anchor or {}).get("rect") or {}) if isinstance(anchor, dict) else {},
+                    },
+                    "attempts": [],
+                }
+                self._last_fixed_row_click_meta = dict(fail_payload)
+                self._append_fixed_row_click_log(fail_payload)
+                return {
+                    "ok": False,
+                    "reason": miss_reason,
+                    "ocr": ocr,
+                    "line": line,
+                    "anchor": anchor,
+                    "nav_trace": nav_trace,
+                }
+            else:
+                logger.warning(
+                    f"OCR固定行相对点击未生效，将回退常规OCR候选: action={action}, link_index={int(link_idx or 0)}"
+                )
         if not candidates:
             return {"ok": False, "reason": "ocr_viewport_map_failed", "line": line}
 
@@ -1982,27 +2418,31 @@ class OperationsAgent:
         baseline_snapshot = self._build_ocr_reaction_snapshot(ocr)
         long_wait_before_retry = self._is_screen_ocr_info_mode() and action in {"start_flash_sale", "stop_flash_sale"}
         max_attempts = 3 if self._is_screen_ocr_info_mode() else 2
-        for idx, p in enumerate(candidates[:max_attempts]):
+        for attempt_idx, p in enumerate(candidates[:max_attempts]):
             logger.info(
-                f"OCR点击尝试: action={action}, attempt={idx + 1}/{max_attempts}, "
+                f"OCR点击尝试: action={action}, attempt={attempt_idx + 1}/{max_attempts}, "
                 f"label={p.get('label')}, point=({int(p['vx'])},{int(p['vy'])})"
             )
-            click_res = self._click_viewport_point(p["vx"], p["vy"], ocr=ocr)
+            click_notice = ""
+            if bool(p.get("fixed_mode")) and self._ocr_pin_click_test_confirm_popup:
+                click_notice = self._build_click_test_notice(action, link_idx if link_idx else link_index, p)
+            click_res = self._click_viewport_point(p["vx"], p["vy"], ocr=ocr, pre_click_notice=click_notice)
             click_results.append({
-                "attempt": idx + 1,
+                "attempt": attempt_idx + 1,
                 "label": p.get("label"),
                 "point": {"x": int(p["vx"]), "y": int(p["vy"])},
                 "click": click_res,
+                "fixed_meta": dict(p.get("fixed_meta") or {}),
             })
             if not bool(click_res.get("ok")):
                 continue
             ok = True
 
-            if long_wait_before_retry and idx == 0:
+            if long_wait_before_retry and attempt_idx == 0:
                 wait_feedback = self._wait_for_ocr_feedback_after_click(
                     action,
                     baseline_snapshot,
-                    link_index=link_index,
+                    link_index=link_idx if link_idx else link_index,
                     timeout_seconds=self._ocr_retry_wait_seconds,
                 )
                 click_results[-1]["feedback_wait"] = wait_feedback
@@ -2015,15 +2455,15 @@ class OperationsAgent:
                         f"OCR点击后检测到页面反应，暂不二次处理: action={action}, reaction={ui_reaction.get('source')}"
                     )
                     break
-                if idx + 1 < max_attempts:
+                if attempt_idx + 1 < max_attempts:
                     logger.warning(
                         f"OCR点击后{int(self._ocr_retry_wait_seconds)}秒未检测到反应，进入二次处理: action={action}"
                     )
             else:
-                verified = self._verify_receipt_by_ocr(action, link_index=link_index)
+                verified = self._verify_receipt_by_ocr(action, link_index=link_idx if link_idx else link_index)
                 if verified:
                     break
-            if idx + 1 < max_attempts:
+            if attempt_idx + 1 < max_attempts:
                 time.sleep(0.14)
 
         click_res = click_results[-1]["click"] if click_results else {"ok": False, "reason": "click_not_attempted"}
@@ -2032,6 +2472,7 @@ class OperationsAgent:
             "target_rect": line.get("rect"),
             "anchor_text": anchor.get("text") if isinstance(anchor, dict) else "",
             "viewport_point": {"x": candidates[0]["vx"], "y": candidates[0]["vy"]},
+            "fixed_row_click_mode": bool(fixed_candidate),
             "click": click_res,
             "click_attempts": click_results,
             "ocr_verify": verified or {},
@@ -2043,7 +2484,20 @@ class OperationsAgent:
             "ocr_action_candidate_count": len(list(ocr.get("action_candidates") or [])),
             "navigation_trace": nav_trace,
         }
-        return {"ok": ok, "reason": "clicked_verified" if verified else ("clicked" if ok else "click_failed"), "detail": detail}
+        result_reason = "clicked_verified" if verified else ("clicked" if ok else "click_failed")
+        if fixed_candidate:
+            self._record_fixed_row_click_meta(
+                action=action,
+                link_index=link_idx if link_idx else link_index,
+                ocr=ocr,
+                anchor=anchor,
+                line=line,
+                candidate=fixed_candidate,
+                click_results=click_results,
+                verified=verified or {},
+                reason=result_reason,
+            )
+        return {"ok": ok, "reason": result_reason, "detail": detail}
 
     def _llm_judge_operable_page(self, action, ocr):
         if (not self._nav_llm_enabled) or (not self._nav_unknown_page_enabled):
@@ -2145,6 +2599,17 @@ class OperationsAgent:
             "last_click_driver": self._last_click_driver or "",
             "last_click_point": dict(self._last_click_point or {}),
             "last_click_error": self._last_click_error or "",
+            "ocr_pin_fixed_row_click_enabled": bool(self._ocr_pin_fixed_row_click_enabled),
+            "ocr_pin_click_test_confirm_popup": bool(self._ocr_pin_click_test_confirm_popup),
+            "pin_unpin_force_fixed_row_click": bool(self._pin_unpin_force_fixed_row_click),
+            "pin_unpin_require_link_index": bool(self._pin_unpin_require_link_index),
+            "ocr_pin_fixed_row_click_panel_x_ratio": float(self._ocr_pin_fixed_row_click_panel_x_ratio),
+            "ocr_pin_fixed_row_click_offset_y_ratio": float(self._ocr_pin_fixed_row_click_offset_y_ratio),
+            "ocr_pin_fixed_row_calibration_log_enabled": bool(self._ocr_pin_fixed_row_calibration_log_enabled),
+            "ocr_pin_fixed_row_calibration_log_path": str(self._ocr_pin_fixed_row_calibration_log_path or ""),
+            "last_fixed_row_click": dict(self._last_fixed_row_click_meta or {}),
+            "dom_fallback_enabled": bool(self._dom_fallback_enabled()),
+            "force_full_physical_chain": bool(self._force_full_physical_chain),
             "human_like_settings": self.get_human_like_settings(),
             "human_like_stats": self.get_human_like_stats(recent_limit=5),
             "plan_enabled": bool(self._llm_plan_enabled),
@@ -2811,7 +3276,7 @@ class OperationsAgent:
         timeout_seconds = max(0.6, min(12.0, timeout_seconds))
 
         dom_verify = None
-        if not self._is_ocr_info_only_mode():
+        if self._dom_fallback_enabled():
             try:
                 if action == "pin_product":
                     dom_verify = self._verify_pin_receipt(link_index=link_index, timeout_seconds=timeout_seconds)
@@ -3302,7 +3767,7 @@ class OperationsAgent:
                 logger.debug(f"JS执行失败(fallback:{ctx_name}): {e}")
         return None, None
 
-    def _find_first_ele(self, selectors, preferred_ctx=None, preferred_selector=None, timeout=0.25):
+    def _find_first_ele(self, selectors, preferred_ctx=None, preferred_selector=None, timeout=0.25, validator=None):
         """按顺序在 page/frame 上下文中查找第一个可用元素。"""
         contexts = self._iter_contexts()
         if preferred_ctx:
@@ -3324,6 +3789,12 @@ class OperationsAgent:
                 # 优先返回可交互元素；若都不可交互再降级返回第一个
                 fallback = None
                 for ele in eles:
+                    if callable(validator):
+                        try:
+                            if not bool(validator(ele, selector, ctx_name)):
+                                continue
+                        except Exception:
+                            continue
                     if fallback is None:
                         fallback = ele
                     if self._is_clickable_element(ele):
@@ -3345,6 +3816,17 @@ class OperationsAgent:
     def _safe_click(self, ele, prefer_js=False):
         """点击元素；prefer_js=True 时优先 JS 点击以避免慢阻塞。"""
         self._human_action_delay("dom_click_pre")
+        if self._force_full_physical_chain:
+            try:
+                mid = ele.rect.mid_point
+                if isinstance(mid, tuple) and len(mid) >= 2:
+                    human_click(int(mid[0]), int(mid[1]), jitter_px=self._human_click_jitter)
+                    self._human_action_post_delay("dom_click_post_physical")
+                    return True
+            except Exception as e:
+                logger.debug(f"物理点击失败: {e}")
+            return False
+
         if prefer_js:
             try:
                 ele.run_js("this.click && this.click();")
@@ -3406,9 +3888,12 @@ class OperationsAgent:
     def _find_send_button(self, preferred_ctx):
         send_selectors = [
             'css:[data-e2e="chat-send-button"]',
+            'css:[data-e2e*="chat-send"]',
+            'css:[data-e2e*="send-button"]',
             'css:[data-e2e*="send"]',
             'css:[data-e2e*="post"]',
             'css:[aria-label*="Send"]',
+            'css:[aria-label*="send"]',
             'css:[aria-label*="发送"]',
             'css:button[type="submit"]',
         ]
@@ -3422,39 +3907,136 @@ class OperationsAgent:
             self._last_send_selector = selector
         return (ctx_name, ctx, ele, selector)
 
+    def _is_chat_input_element(self, ele, selector="", ctx_name=""):
+        """过滤掉搜索框/通用文本框，尽量只命中聊天输入框。"""
+        selector_text = str(selector or "").strip().lower()
+        strong_selector_tokens = [
+            'chat-input',
+            'data-e2e*="chat"',
+            'data-e2e*="comment"',
+            'data-e2e*="composer"',
+            'placeholder*="chat"',
+            'placeholder*="message"',
+            'placeholder*="comment"',
+            'aria-label*="chat"',
+            'aria-label*="message"',
+            'aria-label*="comment"',
+        ]
+        if any(token in selector_text for token in strong_selector_tokens):
+            return True
+
+        attrs = []
+        for key in ("data-e2e", "role", "aria-label", "placeholder", "class", "id", "name"):
+            try:
+                attrs.append(str(ele.attr(key) or ""))
+            except Exception:
+                attrs.append("")
+        blob = " ".join(attrs).strip().lower()
+        if not blob:
+            return False
+
+        negative_tokens = [
+            "search",
+            "keyword",
+            "query",
+            "password",
+            "email",
+            "phone",
+            "username",
+            "title",
+            "caption",
+            "note",
+            "memo",
+        ]
+        if any(token in blob for token in negative_tokens):
+            return False
+
+        positive_tokens = [
+            "chat",
+            "comment",
+            "message",
+            "composer",
+            "danmu",
+            "弹幕",
+            "聊天",
+            "评论",
+            "留言",
+        ]
+        if any(token in blob for token in positive_tokens):
+            return True
+
+        try:
+            in_chat_container = bool(
+                ele.run_js(
+                    """
+                    let cur = this;
+                    let depth = 0;
+                    while (cur && depth < 6) {
+                      const dataE2E = (cur.getAttribute && cur.getAttribute('data-e2e')) || '';
+                      const cls = (cur.className || '');
+                      const aria = (cur.getAttribute && cur.getAttribute('aria-label')) || '';
+                      const idv = (cur.id || '');
+                      const all = `${dataE2E} ${cls} ${aria} ${idv}`.toLowerCase();
+                      if (/chat|comment|message|composer|danmu|弹幕|聊天|评论/.test(all)) return true;
+                      cur = cur.parentElement;
+                      depth += 1;
+                    }
+                    return false;
+                    """
+                )
+            )
+            if in_chat_container:
+                return True
+        except Exception:
+            pass
+
+        return False
+
     def _find_input_box(self):
         input_selectors = [
             'css:[data-e2e="chat-input"] textarea',
             'css:[data-e2e*="chat-input"] textarea',
             'css:[data-e2e*="chat"] textarea',
             'css:[data-e2e*="composer"] textarea',
+            'css:[data-e2e*="message"] textarea',
             'css:textarea[data-e2e*="chat"]',
+            'css:textarea[data-e2e*="comment"]',
+            'css:textarea[data-e2e*="message"]',
             'css:[data-e2e*="comment"] textarea',
+            'css:[data-e2e*="chat"] [role="textbox"]',
+            'css:[data-e2e*="composer"] [role="textbox"]',
+            'css:[data-e2e*="comment"] [role="textbox"]',
             'css:div[data-e2e*="chat"][contenteditable="true"]',
             'css:div[data-e2e*="chat"][contenteditable="plaintext-only"]',
-            'css:div[contenteditable="plaintext-only"][role="textbox"]',
-            'css:div[contenteditable="true"][role="textbox"]',
-            'css:div[contenteditable="plaintext-only"]',
-            'css:div[contenteditable="true"]',
-            'css:textarea',
+            'css:div[data-e2e*="comment"][contenteditable="true"]',
+            'css:div[data-e2e*="comment"][contenteditable="plaintext-only"]',
+            'css:textarea[placeholder*="message" i]',
+            'css:textarea[placeholder*="chat" i]',
+            'css:textarea[placeholder*="comment" i]',
+            'css:[role="textbox"][aria-label*="message" i]',
+            'css:[role="textbox"][aria-label*="chat" i]',
+            'css:[role="textbox"][aria-label*="comment" i]',
         ]
         ctx_name, ctx, ele, selector = self._find_first_ele(
             input_selectors,
             preferred_selector=self._last_input_selector,
             timeout=self._fast_find_timeout,
+            validator=self._is_chat_input_element,
         )
         if not ele:
             ctx_name, ctx, ele, selector = self._find_first_ele(
                 input_selectors,
                 preferred_selector=self._last_input_selector,
                 timeout=self._full_find_timeout,
+                validator=self._is_chat_input_element,
             )
         if not ele:
             # 兜底：慢速再扫一遍，容忍 TikTok 动态加载抖动
             ctx_name, ctx, ele, selector = self._find_first_ele(
                 input_selectors,
                 preferred_selector=self._last_input_selector,
-                timeout=0.75,
+                timeout=1.2,
+                validator=self._is_chat_input_element,
             )
         if ele:
             self._last_input_selector = selector
@@ -3462,7 +4044,20 @@ class OperationsAgent:
 
     def _submit_by_enter(self, ctx, input_box, prefer_keyboard=False):
         """无发送按钮时尝试通过回车发送。"""
+        try:
+            input_box.run_js("this.focus && this.focus();")
+        except Exception:
+            pass
+
         if prefer_keyboard:
+            try:
+                self._safe_click(input_box, prefer_js=True)
+            except Exception:
+                pass
+            try:
+                input_box.run_js("this.focus && this.focus();")
+            except Exception:
+                pass
             try:
                 human_press("enter")
                 return True
@@ -3473,6 +4068,10 @@ class OperationsAgent:
                 return True
             except Exception:
                 pass
+            if self._force_full_physical_chain:
+                return False
+        if self._force_full_physical_chain:
+            return False
         try:
             # 先尝试通过键盘事件触发发送（优先于纯换行）
             ok = input_box.run_js(
@@ -3514,6 +4113,8 @@ class OperationsAgent:
         """
         在输入框附近通过 JS 寻找并点击“发送”按钮，适配非标准 button 结构。
         """
+        if self._force_full_physical_chain:
+            return False
         try:
             return bool(input_box.run_js(
                 """
@@ -3580,6 +4181,8 @@ class OperationsAgent:
 
     def _submit_by_form(self, input_box):
         """优先触发 form 提交事件，兼容依赖 submit 事件的页面。"""
+        if self._force_full_physical_chain:
+            return False
         try:
             return bool(input_box.run_js(
                 """
@@ -3601,6 +4204,21 @@ class OperationsAgent:
             value = input_box.attr("value")
             if value:
                 return str(value).strip()
+        except Exception:
+            pass
+        try:
+            txt = input_box.run_js(
+                """
+                const el = this;
+                const ownText = (el.innerText || el.textContent || '');
+                const value = (typeof el.value === 'string') ? el.value : '';
+                const nested = el.querySelector && el.querySelector('[contenteditable="true"], [contenteditable="plaintext-only"]');
+                const nestedText = nested ? (nested.innerText || nested.textContent || '') : '';
+                return String(value || ownText || nestedText || '').trim();
+                """
+            )
+            if txt:
+                return str(txt).strip()
         except Exception:
             pass
         try:
@@ -3649,6 +4267,8 @@ class OperationsAgent:
                 logger.warning("键盘输入未命中输入框，回退DOM输入")
             except Exception as e:
                 logger.warning(f"键盘输入失败，回退DOM输入: {e}")
+            if self._force_full_physical_chain:
+                return
         try:
             input_box.run_js("this.focus && this.focus();")
         except Exception:
@@ -3754,31 +4374,182 @@ class OperationsAgent:
 
         if self._message_keyboard_only_enabled:
             enter_ok = self._submit_by_enter(input_ctx, input_box, prefer_keyboard=True)
-            if not enter_ok:
-                return False
-            ok = self._confirm_sent(input_box, text, retries=4, interval=0.06)
-            if ok:
+            if enter_ok and self._confirm_sent(input_box, text, retries=4, interval=0.06):
                 self._human_action_post_delay("send_message_post_keyboard_enter")
-            return ok
+                return True
+            logger.warning("键盘回车未确认发送，回退按钮/表单提交链路")
 
         # 先走 JS 快速发送，避免元素 click 的长等待阻塞
-        if self._click_send_by_js(input_box):
+        if (not self._force_full_physical_chain) and self._click_send_by_js(input_box):
             if self._confirm_sent(input_box, text, retries=1, interval=0.04):
                 self._human_action_post_delay("send_message_post_js")
                 return True
 
-        if self._submit_by_form(input_box):
+        send_ctx_name, _, send_btn, send_selector = self._find_send_button((input_ctx_name, input_ctx))
+        if send_btn:
+            logger.debug(f"发送消息命中发送按钮上下文: {send_ctx_name} selector: {send_selector}")
+            clicked = self._safe_click(send_btn, prefer_js=(not self._force_full_physical_chain))
+            if clicked and self._confirm_sent(input_box, text, retries=2, interval=0.05):
+                self._human_action_post_delay("send_message_post_button")
+                return True
+
+        if (not self._force_full_physical_chain) and self._submit_by_form(input_box):
             if self._confirm_sent(input_box, text, retries=1, interval=0.04):
                 self._human_action_post_delay("send_message_post_form")
                 return True
 
-        enter_ok = self._submit_by_enter(input_ctx, input_box)
+        enter_ok = self._submit_by_enter(input_ctx, input_box, prefer_keyboard=self._message_keyboard_only_enabled)
         if not enter_ok:
             return False
 
         ok = self._confirm_sent(input_box, text, retries=3, interval=0.05)
         if ok:
             self._human_action_post_delay("send_message_post_enter")
+        return ok
+
+    def _requires_foreground_guard_for_message_send(self):
+        return bool(
+            self._message_keyboard_only_enabled
+            or self._force_full_physical_chain
+            or self._os_keyboard_fallback_enabled
+        )
+
+    def _looks_like_tiktok_live_url(self, url, title=""):
+        url_text = str(url or "").strip().lower()
+        title_text = str(title or "").strip().lower()
+        if "mock_tiktok_shop" in url_text:
+            return True
+        if ("tiktok.com" not in url_text) and ("tiktok" not in title_text):
+            return False
+        live_tokens = [
+            "/live",
+            "/@",
+            "live/dashboard",
+            "streamer/live",
+            "creator/live",
+        ]
+        if any(token in url_text for token in live_tokens):
+            return True
+        if any(token in title_text for token in ["tiktok live", "直播", "live"]):
+            return True
+        return False
+
+    def _get_frontmost_window_snapshot(self):
+        if (platform.system() or "").lower() != "darwin":
+            return {"ok": False, "error": "unsupported_platform"}
+        script = (
+            'tell application "System Events"\n'
+            'set frontProc to first application process whose frontmost is true\n'
+            'set appName to name of frontProc\n'
+            'set winTitle to ""\n'
+            'try\n'
+            'tell frontProc to set winTitle to name of front window\n'
+            'end try\n'
+            'return appName & "||" & winTitle\n'
+            "end tell"
+        )
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=1.2,
+                check=False,
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"osascript_exception:{e}"}
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip()[:180]
+            return {"ok": False, "error": f"osascript_failed:{err}"}
+        out = str(proc.stdout or "").strip()
+        app_name, sep, title = out.partition("||")
+        if not sep:
+            return {"ok": False, "error": "osascript_bad_output", "raw": out[:120]}
+        return {
+            "ok": True,
+            "app": app_name.strip(),
+            "title": title.strip(),
+        }
+
+    def _get_frontmost_tab_url(self, app_name):
+        app = str(app_name or "").strip()
+        if not app:
+            return ""
+        if app in {"Google Chrome", "Chromium", "Microsoft Edge", "Brave Browser", "Arc"}:
+            script = f'tell application "{app}" to return URL of active tab of front window'
+        elif app == "Safari":
+            script = 'tell application "Safari" to return URL of front document'
+        else:
+            return ""
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+        except Exception:
+            return ""
+        if proc.returncode != 0:
+            return ""
+        return str(proc.stdout or "").strip()
+
+    def _is_message_page_context_allowed(self, ctx):
+        page_type = str((ctx or {}).get("page_type") or "").strip().lower()
+        return page_type in {"tiktok_live_room", "tiktok_live_dashboard"}
+
+    def _precheck_message_send(self):
+        if not self.vision_agent.page:
+            return False, "browser_not_connected", {}
+
+        try:
+            ctx = dict(self.vision_agent.get_page_context() or {})
+        except Exception:
+            ctx = {}
+        page_type_allowed = self._is_message_page_context_allowed(ctx)
+        mac_foreground_guard = self._requires_foreground_guard_for_message_send() and (platform.system() or "").lower() == "darwin"
+        if (not page_type_allowed) and (not mac_foreground_guard):
+            return False, f"page_type_blocked:{ctx.get('page_type')}", {"page_context": ctx}
+
+        try:
+            page_title = str(getattr(self.vision_agent.page, "title", "") or "")
+            page_url = str(getattr(self.vision_agent.page, "url", "") or "")
+        except Exception:
+            page_title, page_url = "", ""
+        if not self._looks_like_tiktok_live_url(page_url, page_title):
+            return False, "browser_page_not_tiktok_live", {"url": page_url, "title": page_title, "page_context": ctx}
+
+        # 只在涉及系统级键鼠输入时启用前台窗口门禁，防止误输入到其它应用。
+        if mac_foreground_guard:
+            snap = self._get_frontmost_window_snapshot()
+            if not bool(snap.get("ok")):
+                return False, "frontmost_window_unknown", {"snapshot": snap, "page_context": ctx}
+            front_app = str(snap.get("app") or "").strip()
+            browser_apps = {"Google Chrome", "Chromium", "Microsoft Edge", "Brave Browser", "Arc", "Safari"}
+            if front_app not in browser_apps:
+                return False, "front_app_not_browser", {"snapshot": snap, "page_context": ctx}
+            active_url = self._get_frontmost_tab_url(front_app)
+            if active_url:
+                if not self._looks_like_tiktok_live_url(active_url, str(snap.get("title") or "")):
+                    return False, "front_tab_not_tiktok_live", {"snapshot": snap, "front_tab_url": active_url[:240]}
+            elif not self._looks_like_tiktok_live_url("", str(snap.get("title") or "")):
+                return False, "front_window_not_live_like", {"snapshot": snap}
+            if not page_type_allowed:
+                logger.info(
+                    "消息发送门禁：page_type 未命中，已按前台 TikTok 直播页校验放行 "
+                    f"(page_type={ctx.get('page_type')})"
+                )
+
+        if not page_type_allowed:
+            return False, f"page_type_blocked:{ctx.get('page_type')}", {"page_context": ctx}
+
+        return True, "ok", {"page_context": ctx, "url": page_url, "title": page_title}
+
+    def can_send_message(self, log_reason=True):
+        ok, reason, detail = self._precheck_message_send()
+        if (not ok) and bool(log_reason):
+            logger.warning(f"消息发送门禁未通过: reason={reason}, detail={str(detail)[:320]}")
         return ok
 
     def send_message(self, text):
@@ -3810,11 +4581,15 @@ class OperationsAgent:
                 logger.warning("发送前页面连接不可用")
                 return False
 
+            if not self.can_send_message(log_reason=True):
+                return False
+
             ok = self._send_message_once(text)
             if not ok:
                 # 页面可能在发送时断连，强制重连后重试一次
                 if self.vision_agent.ensure_connection(force=True):
-                    ok = self._send_message_once(text)
+                    if self.can_send_message(log_reason=True):
+                        ok = self._send_message_once(text)
 
             if ok:
                 self.last_reply_at = time.time()
@@ -3869,8 +4644,11 @@ class OperationsAgent:
             logger.warning(f"执行动作失败: action={action}, 浏览器未连接")
             return False
 
-        # 严格 OCR 信息源模式：不读取 DOM 页面信息，门禁完全由 OCR 判定。
-        if self._is_ocr_info_only_mode():
+        # 纯 OCR 门禁：不走 DOM 页面判定（适用于 ocr_only/screen_ocr，或 ocr_vision 且禁用 DOM 回退）。
+        ocr_gate_only = (self._is_ocr_info_only_mode() and (not self._dom_execution_enabled())) or (
+            self._is_ocr_vision_mode() and (not self._dom_fallback_enabled())
+        )
+        if ocr_gate_only:
             try:
                 ctx = self.vision_agent.get_page_context() or {}
             except Exception:
@@ -3880,9 +4658,10 @@ class OperationsAgent:
             ocr_ok, ocr_detail = self._is_ocr_operable_page(action)
             if ocr_ok:
                 return True
-            self._set_action_receipt(action, False, "precheck", "ocr_non_operable_page", ocr_detail)
+            reason = "ocr_non_operable_page" if self._is_ocr_info_only_mode() else "ocr_vision_non_operable_page"
+            self._set_action_receipt(action, False, "precheck", reason, ocr_detail)
             logger.warning(
-                f"执行动作失败: action={action}, OCR-only门禁未通过, reason={getattr(ocr_detail, 'get', lambda *_: '')('reason') if isinstance(ocr_detail, dict) else ''}"
+                f"执行动作失败: action={action}, OCR门禁未通过, reason={getattr(ocr_detail, 'get', lambda *_: '')('reason') if isinstance(ocr_detail, dict) else ''}"
             )
             return False
 
@@ -4134,6 +4913,8 @@ class OperationsAgent:
         优先基于 DOM 执行置顶动作。
         link_index: 1-based 链接序号（例如 3 表示 3 号链接）
         """
+        if not self._dom_fallback_enabled():
+            return False
         script = """
         const idx = Number(arguments[0] || 0);
         const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, '');
@@ -4250,6 +5031,8 @@ class OperationsAgent:
 
     def _unpin_product_by_dom(self, link_index=None):
         """优先基于 DOM 执行取消置顶动作。"""
+        if not self._dom_fallback_enabled():
+            return False
         script = """
         const idx = Number(arguments[0] || 0);
         const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, '');
@@ -4353,6 +5136,8 @@ class OperationsAgent:
 
     def _start_flash_sale_by_dom(self):
         """优先基于 DOM 执行秒杀上架动作。"""
+        if not self._dom_fallback_enabled():
+            return False
         script = """
         const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, '');
         const isVisible = (el) => {
@@ -4436,6 +5221,8 @@ class OperationsAgent:
 
     def _stop_flash_sale_by_dom(self):
         """优先基于 DOM 执行秒杀结束动作。"""
+        if not self._dom_fallback_enabled():
+            return False
         script = """
         const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, '');
         const isVisible = (el) => {
@@ -4501,18 +5288,86 @@ class OperationsAgent:
             return False
         return False
 
+    def _execute_pin_unpin_fixed_chain(self, action, link_index=None):
+        idx = self._normalize_link_index(link_index)
+        if self._pin_unpin_require_link_index and (not idx):
+            self._set_action_receipt(
+                action,
+                False,
+                "precheck",
+                "link_index_required_for_fixed_row_click",
+                {"link_index": link_index},
+            )
+            return False
+
+        ocr_try = self._perform_action_by_ocr_anchor(action, link_index=idx)
+        if not bool((ocr_try or {}).get("ok")):
+            self._set_action_receipt(
+                action,
+                False,
+                "verify_ocr_anchor",
+                str((ocr_try or {}).get("reason") or "ocr_target_not_found"),
+                {"link_index": idx, "ocr_try": dict(ocr_try or {})},
+            )
+            return False
+
+        dom_verify = None
+        if self._dom_fallback_enabled():
+            if action == "pin_product":
+                dom_verify = self._verify_pin_receipt(link_index=idx, timeout_seconds=2.2)
+            else:
+                dom_verify = self._verify_unpin_receipt(link_index=idx, timeout_seconds=2.2)
+            if dom_verify:
+                self._set_action_receipt(
+                    action,
+                    True,
+                    "verify_ocr_anchor",
+                    "ok",
+                    {"link_index": idx, "ocr_try": (ocr_try or {}).get("detail") or {}, "verify": dom_verify},
+                )
+                return True
+
+        ocr_verify = self._verify_receipt_by_ocr(action, link_index=idx)
+        if ocr_verify:
+            self._set_action_receipt(
+                action,
+                True,
+                "verify_ocr_anchor",
+                "ok",
+                {"link_index": idx, "ocr_try": (ocr_try or {}).get("detail") or {}, "verify": ocr_verify},
+            )
+            return True
+
+        self._set_action_receipt(
+            action,
+            False,
+            "verify_ocr_anchor",
+            "ocr_fixed_click_receipt_not_confirmed",
+            {
+                "link_index": idx,
+                "ocr_try": dict(ocr_try or {}),
+                "verify_dom": dict(dom_verify or {}),
+                "verify_ocr": dict(ocr_verify or {}),
+            },
+        )
+        return False
+
     def pin_product(self, link_index=None):
-        """置顶商品（优先 DOM，图片模板兜底）。"""
+        """置顶商品。"""
         self._begin_action_trace("pin_product")
         self._human_action_delay("pin_product_entry")
         self._log_execution_mode("pin_product")
         if not self._ensure_action_page("pin_product"):
             return False
-        use_ocr_action = self._is_ocr_vision_mode() or self._is_ocr_info_only_mode()
+        if self._pin_unpin_force_fixed_row_click:
+            return self._execute_pin_unpin_fixed_chain("pin_product", link_index=link_index)
+        use_ocr_action = self._is_ocr_vision_mode() or (
+            self._is_ocr_info_only_mode() and (not self._dom_execution_enabled())
+        )
         if use_ocr_action:
             ocr_try = self._perform_action_by_ocr_anchor("pin_product", link_index=link_index)
             if ocr_try.get("ok"):
-                if not self._is_ocr_info_only_mode():
+                if self._dom_fallback_enabled():
                     verify = self._verify_pin_receipt(link_index=link_index, timeout_seconds=2.2)
                     if verify:
                         self._set_action_receipt(
@@ -4535,12 +5390,12 @@ class OperationsAgent:
                     return True
             else:
                 logger.debug(f"OCR置顶锚点未命中，转DOM: {ocr_try.get('reason')}")
-            if self._is_ocr_info_only_mode():
+            if self._is_ocr_info_only_mode() or (self._is_ocr_vision_mode() and (not self._dom_fallback_enabled())):
                 self._set_action_receipt(
                     "pin_product",
                     False,
                     "verify_ocr_anchor",
-                    "ocr_only_receipt_not_confirmed",
+                    "ocr_receipt_not_confirmed_dom_disabled",
                     {"ocr_try": ocr_try},
                 )
                 return False
@@ -4567,11 +5422,13 @@ class OperationsAgent:
         self._log_execution_mode("start_flash_sale")
         if not self._ensure_action_page("start_flash_sale"):
             return False
-        use_ocr_action = self._is_ocr_vision_mode() or self._is_ocr_info_only_mode()
+        use_ocr_action = self._is_ocr_vision_mode() or (
+            self._is_ocr_info_only_mode() and (not self._dom_execution_enabled())
+        )
         if use_ocr_action:
             ocr_try = self._perform_action_by_ocr_anchor("start_flash_sale")
             if ocr_try.get("ok"):
-                if not self._is_ocr_info_only_mode():
+                if self._dom_fallback_enabled():
                     verify = self._verify_flash_sale_receipt(timeout_seconds=2.6)
                     if verify:
                         self._set_action_receipt(
@@ -4594,12 +5451,12 @@ class OperationsAgent:
                     return True
             else:
                 logger.debug(f"OCR秒杀锚点未命中，转DOM: {ocr_try.get('reason')}")
-            if self._is_ocr_info_only_mode():
+            if self._is_ocr_info_only_mode() or (self._is_ocr_vision_mode() and (not self._dom_fallback_enabled())):
                 self._set_action_receipt(
                     "start_flash_sale",
                     False,
                     "verify_ocr_anchor",
-                    "ocr_only_receipt_not_confirmed",
+                    "ocr_receipt_not_confirmed_dom_disabled",
                     {"ocr_try": ocr_try},
                 )
                 return False
@@ -4616,11 +5473,13 @@ class OperationsAgent:
         self._log_execution_mode("stop_flash_sale")
         if not self._ensure_action_page("stop_flash_sale"):
             return False
-        use_ocr_action = self._is_ocr_vision_mode() or self._is_ocr_info_only_mode()
+        use_ocr_action = self._is_ocr_vision_mode() or (
+            self._is_ocr_info_only_mode() and (not self._dom_execution_enabled())
+        )
         if use_ocr_action:
             ocr_try = self._perform_action_by_ocr_anchor("stop_flash_sale")
             if ocr_try.get("ok"):
-                if not self._is_ocr_info_only_mode():
+                if self._dom_fallback_enabled():
                     verify = self._verify_stop_flash_sale_receipt(timeout_seconds=2.6)
                     if verify:
                         self._set_action_receipt(
@@ -4643,32 +5502,37 @@ class OperationsAgent:
                     return True
             else:
                 logger.debug(f"OCR结束秒杀锚点未命中，转DOM: {ocr_try.get('reason')}")
-            if self._is_ocr_info_only_mode():
+            if self._is_ocr_info_only_mode() or (self._is_ocr_vision_mode() and (not self._dom_fallback_enabled())):
                 self._set_action_receipt(
                     "stop_flash_sale",
                     False,
                     "verify_ocr_anchor",
-                    "ocr_only_receipt_not_confirmed",
+                    "ocr_receipt_not_confirmed_dom_disabled",
                     {"ocr_try": ocr_try},
                 )
                 return False
         ok = self._stop_flash_sale_by_dom()
         if not ok:
-            self._set_action_receipt("stop_flash_sale", False, "dom", "dom_stop_flash_sale_failed")
+            reason = "dom_stop_flash_sale_failed" if self._dom_fallback_enabled() else "dom_disabled_no_ocr_confirm"
+            self._set_action_receipt("stop_flash_sale", False, "dom", reason)
         return ok
 
     def unpin_product(self, link_index=None):
-        """取消置顶（仅 DOM 执行，不走图片模板兜底）。"""
+        """取消置顶。"""
         self._begin_action_trace("unpin_product")
         self._human_action_delay("unpin_product_entry")
         self._log_execution_mode("unpin_product")
         if not self._ensure_action_page("unpin_product"):
             return False
-        use_ocr_action = self._is_ocr_vision_mode() or self._is_ocr_info_only_mode()
+        if self._pin_unpin_force_fixed_row_click:
+            return self._execute_pin_unpin_fixed_chain("unpin_product", link_index=link_index)
+        use_ocr_action = self._is_ocr_vision_mode() or (
+            self._is_ocr_info_only_mode() and (not self._dom_execution_enabled())
+        )
         if use_ocr_action:
             ocr_try = self._perform_action_by_ocr_anchor("unpin_product", link_index=link_index)
             if ocr_try.get("ok"):
-                if not self._is_ocr_info_only_mode():
+                if self._dom_fallback_enabled():
                     verify = self._verify_unpin_receipt(link_index=link_index, timeout_seconds=2.2)
                     if verify:
                         self._set_action_receipt(
@@ -4691,16 +5555,17 @@ class OperationsAgent:
                     return True
             else:
                 logger.debug(f"OCR取消置顶锚点未命中，转DOM: {ocr_try.get('reason')}")
-            if self._is_ocr_info_only_mode():
+            if self._is_ocr_info_only_mode() or (self._is_ocr_vision_mode() and (not self._dom_fallback_enabled())):
                 self._set_action_receipt(
                     "unpin_product",
                     False,
                     "verify_ocr_anchor",
-                    "ocr_only_receipt_not_confirmed",
+                    "ocr_receipt_not_confirmed_dom_disabled",
                     {"ocr_try": ocr_try},
                 )
                 return False
         ok = self._unpin_product_by_dom(link_index=link_index)
         if not ok:
-            self._set_action_receipt("unpin_product", False, "dom", "dom_unpin_failed", {"link_index": link_index})
+            reason = "dom_unpin_failed" if self._dom_fallback_enabled() else "dom_disabled_no_ocr_confirm"
+            self._set_action_receipt("unpin_product", False, "dom", reason, {"link_index": link_index})
         return ok
