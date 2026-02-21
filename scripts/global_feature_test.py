@@ -232,9 +232,12 @@ def _check_assistant_core_logic() -> Tuple[bool, str, Dict[str, object]]:
         ("助播 将3号链接置顶一下", ("pin_product", 3)),
         ("助播 将3号链接取消置顶", ("unpin_product", 3)),
         ("assistant pin link three", ("pin_product", 3)),
+        ("assistant please pin link number 99", ("pin_product", 99)),
         ("assistant stop flash sale now", ("stop_flash_sale", None)),
         ("assistant enable limited offer", ("start_flash_sale", None)),
         ("assistant disable limited offer", ("stop_flash_sale", None)),
+        ("assistant please start flashsale for link number 2", ("start_flash_sale", 2)),
+        ("assistant please pop the link again", ("repin_product", None)),
     ]
     parse_ok = True
     for text, expected in cases:

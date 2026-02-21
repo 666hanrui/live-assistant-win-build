@@ -4,6 +4,7 @@ import random
 import json
 import re
 import os
+import sys
 import subprocess
 import signal
 import urllib.request
@@ -74,6 +75,7 @@ class LiveAssistant:
         self.global_reply_cache = {}
         self.voice_command_cache = {}
         self.voice_action_cache = {}
+        self.danmu_action_cache = {}
         self.sent_message_cache = {}
         self.last_voice_poll_at = 0.0
         self.last_voice_health_log_at = 0.0
@@ -137,6 +139,44 @@ class LiveAssistant:
         if max_langs <= 1:
             return []
         return candidates[: max_langs - 1]
+
+    def _build_cloud_test_languages(self, active_language):
+        """
+        播放器流 ASR 对比测试的语言链：
+        - 不受统一语言“同语族”限制，避免测试页语音与统一语言不一致时持续无文本。
+        - 至少包含 zh-CN / en-US，兼容 B 站中英内容。
+        """
+        def _normalize_lang(code):
+            s = str(code or "").strip()
+            if not s:
+                return ""
+            lower = s.lower()
+            alias = {
+                "zh": "zh-CN",
+                "zh-cn": "zh-CN",
+                "zh-hans": "zh-CN",
+                "en": "en-US",
+                "en-us": "en-US",
+            }
+            return alias.get(lower, s)
+
+        langs = []
+
+        def _add(code):
+            norm = _normalize_lang(code)
+            if norm and norm not in langs:
+                langs.append(norm)
+
+        _add(active_language)
+        for code in list(getattr(settings, "VOICE_DASHSCOPE_LANGUAGE_HINTS", []) or []):
+            _add(code)
+        for code in list(getattr(settings, "VOICE_COMMAND_FALLBACK_LANGUAGES", []) or []):
+            _add(code)
+        _add("zh-CN")
+        _add("en-US")
+
+        max_langs = max(2, int(getattr(settings, "VOICE_COMMAND_MAX_LANGS", 2) or 2))
+        return langs[: max_langs]
 
     def _language_family(self, lang_code):
         code = str(lang_code or "").strip().lower()
@@ -647,6 +687,10 @@ class LiveAssistant:
             "連接": "连接",
             "連結": "链接",
             "秒殺": "秒杀",
+            "秒沙": "秒杀",
+            "秒刹": "秒杀",
+            "描杀": "秒杀",
+            "秒莎": "秒杀",
             "上線": "上线",
             "開啟": "开启",
             "開始": "开始",
@@ -676,8 +720,11 @@ class LiveAssistant:
             "链洁": "链接",
             "連接": "链接",
             "flash sell": "flash sale",
+            "flashsale": "flash sale",
             "flashcell": "flash sale",
             "slash sale": "flash sale",
+            "flesh sale": "flash sale",
+            "flash sail": "flash sale",
             "co host": "cohost",
             "co-host": "cohost",
             "co hoster": "cohost",
@@ -690,8 +737,13 @@ class LiveAssistant:
             "a system": "assistant",
             "hey assistant": "assistant",
             "un pin": "unpin",
+            "re pin": "repin",
+            "re-pin": "repin",
+            "repin": "repin",
             "pin link": "pinlink",
             "unpin link": "unpinlink",
+            "re pin link": "repinlink",
+            "repin link": "repinlink",
             "number too": "number two",
             "number to": "number two",
             "number for": "number four",
@@ -733,6 +785,25 @@ class LiveAssistant:
             "long to the flash sale": "launch flash sale",
             "long the flash sail": "launch flash sale",
             "long to the flash sail": "launch flash sale",
+            # repin / pop again 常见口语
+            "pop the link again": "repin link",
+            "pop link again": "repin link",
+            "pin the link again": "repin link",
+            "pin link again": "repin link",
+            "unpin and pin again": "repin link",
+            "unpin then pin again": "repin link",
+            "取消置顶并重新置顶": "重新置顶",
+            "取消置顶后重新置顶": "重新置顶",
+            "取消置顶再置顶": "重新置顶",
+            "再置顶一下": "重新置顶",
+            "重置顶一下": "重新置顶",
+            "重新顶一下": "重新置顶",
+            "顶回去": "重新置顶",
+            "开秒杀": "开始秒杀",
+            "上秒杀": "开始秒杀",
+            "启秒杀": "开始秒杀",
+            "关秒杀": "停止秒杀",
+            "停秒杀": "停止秒杀",
         }
         for src, dst in phrase_map.items():
             s = s.replace(src.lower(), dst.lower())
@@ -740,6 +811,9 @@ class LiveAssistant:
         # 更宽松的中文口令纠错：覆盖“置顶/链接”附近的常见同音误识别。
         s = re.sub(r"(?:制|置|至|致|治)(?:顶|定|丁|底|足)", "置顶", s)
         s = re.sub(r"(?:链|連|联|令|绿|练)(?:接|结|潔|節)", "链接", s)
+        s = re.sub(r"(?:重|再)(?:置顶|顶一下|顶上|顶回去|顶回)", "重新置顶", s)
+        s = re.sub(r"(?:开|上|启)(?:一下|一下子)?秒杀", "开始秒杀", s)
+        s = re.sub(r"(?:(?:关|停)(?:一下|掉)?|下掉)秒杀", "停止秒杀", s)
         # 英文口令纠错：
         # 1) ASR 常把 pin 识别为 pick/peak/peek/pic/pig/pink（仅在命令语境替换，避免过度改写）。
         s = re.sub(
@@ -776,11 +850,17 @@ class LiveAssistant:
             s,
         )
         s = re.sub(
+            r"\b(?:pop|pup|pap|prop)\b(?=\s+(?:the\s+)?(?:link|item|product)\b)",
+            "repin",
+            s,
+        )
+        s = re.sub(
             r"\b(?:on\s*pin|and\s*pin|open)\b(?=\s+(?:the\s+)?(?:link|item|product|number|no|[0-9]+)\b)",
             "unpin",
             s,
         )
         s = re.sub(r"\b(?:ling|linq|linc)\b", "link", s)
+        s = re.sub(r"\b(?:spin)\b(?=\s+(?:the\s+)?(?:link|item|product|number|no|[0-9]+)\b)", "pin", s)
 
         char_map = str.maketrans({
             "號": "号",
@@ -921,8 +1001,10 @@ class LiveAssistant:
     def _is_command_user(self, user):
         """
         仅允许指定账号触发运营动作。
-        若未配置 COMMAND_ALLOWED_USERS，则默认不限制（兼容历史行为）。
+        默认不限制发送者；仅在显式开启 COMMAND_REQUIRE_ALLOWED_USERS 时校验白名单。
         """
+        if not bool(getattr(settings, "COMMAND_REQUIRE_ALLOWED_USERS", False)):
+            return True
         allowed = settings.COMMAND_ALLOWED_USERS
         if not allowed:
             return True
@@ -950,8 +1032,16 @@ class LiveAssistant:
         ascii_tokens = [tok for tok in ascii_text.split() if tok]
         en_top_position_hint = bool(re.search(r"(?:totop|twotop|tootop|tothetop|twothetop|toothetop)", normalized))
         cn_digit_map = {
-            "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
-            "六": 6, "七": 7, "八": 8, "九": 9
+            "零": 0, "〇": 0,
+            "一": 1, "壹": 1, "幺": 1,
+            "二": 2, "两": 2, "贰": 2, "貳": 2,
+            "三": 3, "叁": 3, "參": 3,
+            "四": 4, "肆": 4,
+            "五": 5, "伍": 5,
+            "六": 6, "陆": 6, "陸": 6,
+            "七": 7, "柒": 7,
+            "八": 8, "捌": 8,
+            "九": 9, "玖": 9,
         }
         en_num_map = {
             "zero": 0,
@@ -980,7 +1070,10 @@ class LiveAssistant:
             "for": 4, "fore": 4,
             "tree": 3, "free": 3,
             "won": 1,
+            "ate": 8,
+            "sex": 6, "sicks": 6,
         }
+        cn_num_token = r"[零〇一二两三四五六七八九十壹贰貳叁參肆伍陆陸柒捌玖拾廿卅幺]{1,4}"
         # 英文数字词按“长词优先”排列，避免 seventeen 被 seven 抢先匹配。
         en_num_token = (
             r"seventeenth|seventeen|seventh|seven|"
@@ -993,15 +1086,34 @@ class LiveAssistant:
             r"twentieth|twenty|second|two|"
             r"eleventh|eleven|first|one|"
             r"twelfth|twelve|tenth|ten|"
-            r"too|to|fore|for|tree|free|won|zero"
+            r"too|to|fore|for|tree|free|won|ate|sex|sicks|zero"
         )
 
         def _parse_cn_number(token):
             token = (token or "").strip()
             if not token:
                 return None
+            token = token.replace("號", "号").replace("#", "")
+            token = re.sub(r"^第", "", token)
+            token = re.sub(r"(?:个|號|号|链接|连接|商品|橱窗)$", "", token)
+            repl = str.maketrans({
+                "壹": "一", "贰": "二", "貳": "二", "叁": "三", "參": "三",
+                "肆": "四", "伍": "五", "陆": "六", "陸": "六", "柒": "七",
+                "捌": "八", "玖": "九", "拾": "十", "〇": "零",
+            })
+            token = token.translate(repl)
             if token in cn_digit_map:
                 return cn_digit_map[token]
+            if token == "廿":
+                return 20
+            if token == "卅":
+                return 30
+            if token.startswith("廿"):
+                ones = _parse_cn_number(token[1:])
+                return (20 + (ones or 0)) if token[1:] else 20
+            if token.startswith("卅"):
+                ones = _parse_cn_number(token[1:])
+                return (30 + (ones or 0)) if token[1:] else 30
             if token == "十":
                 return 10
             if "十" in token:
@@ -1037,7 +1149,7 @@ class LiveAssistant:
                 return True
             # 数字词只允许精准或常见同音，避免把普通词误判成序号。
             if candidate in en_num_map:
-                return token in {candidate, "to", "too", "for", "fore", "tree", "free", "won"}
+                return token in {candidate, "to", "too", "for", "fore", "tree", "free", "won", "ate", "sex", "sicks"}
             # 短命令词（pin/top）要求更严格，避免把 stop/topic 等误判成 top。
             if len(candidate) <= 3:
                 return False
@@ -1061,6 +1173,44 @@ class LiveAssistant:
                     return tok
             return None
 
+        def _extract_link_index(strict_hint=True):
+            idx_token = (
+                r"[0-9]+|"
+                + cn_num_token
+                + r"|"
+                + en_num_token
+            )
+            hint_forward = [
+                rf"(?:link|item|product)(?:number|no)?({idx_token})",
+                rf"(?:number|no)({idx_token})",
+                rf"(?:第)({idx_token})",
+                rf"(?:第)?({idx_token})(?:个)?(?:链接|连接|商品|橱窗)",
+                rf"(?:第)?({idx_token})(?:号|#|个)(?:链接|连接|商品|橱窗)?",
+                rf"(?:第)?({idx_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)?(?:秒杀|活动)",
+            ]
+            hint_reverse = [
+                rf"({idx_token})(?:号|#)?(?:link|item|product|链接|连接|商品|橱窗)",
+                rf"(?:第)?({idx_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)",
+                rf"(?:link|item|product)(?:number|no)?(?:the)?({idx_token})",
+            ]
+            for pattern in hint_forward + hint_reverse:
+                m = re.search(pattern, normalized)
+                if m:
+                    idx = _parse_index(m.group(1))
+                    if idx:
+                        return idx
+
+            if strict_hint:
+                return None
+
+            fallback_num = re.search(rf"({idx_token})", normalized)
+            if fallback_num:
+                idx = _parse_index(fallback_num.group(1))
+                if idx:
+                    return idx
+            ascii_token = _first_ascii_index_token()
+            return _parse_index(ascii_token) if ascii_token else None
+
         # 秒杀命令优先级最高，避免 ASR 混入“置顶/取消置顶”词时误触发商品操作。
         flash_markers = [
             "秒杀", "flashsale", "flashdeal", "flashpromo", "flashpromotion",
@@ -1068,11 +1218,12 @@ class LiveAssistant:
         ]
         flash_stop_actions_cn = [
             "结束", "停止", "下架", "关闭", "撤下", "停一下", "收一下",
+            "关", "停", "关掉", "停掉", "下掉",
         ]
         flash_stop_actions_en = [
             "end", "stop", "close", "disable", "off", "finish", "over", "remove",
         ]
-        flash_actions_cn = ["上架", "开启", "开始", "开一下", "挂一下"]
+        flash_actions_cn = ["上架", "开启", "开始", "开一下", "挂一下", "开", "上", "上线", "挂", "拉起"]
         flash_actions_en = [
             "launch", "start", "enable", "open", "golive", "live", "on", "run", "push", "publish",
             # ASR 英文动词误识别兜底
@@ -1096,7 +1247,7 @@ class LiveAssistant:
         has_en_flash_start = _has_ascii_token(flash_actions_en) or ("turnon" in normalized)
 
         flash_stop_cmd = (
-            ("秒杀" in normalized and any(k in normalized for k in ["结束", "停止", "下架", "关闭", "撤下", "停一下"]))
+            ("秒杀" in normalized and any(k in normalized for k in ["结束", "停止", "下架", "关闭", "撤下", "停一下", "关", "停", "关掉", "停掉", "下掉"]))
             or ("结束秒杀" in normalized)
             or ("停止秒杀" in normalized)
             or ("下架秒杀" in normalized)
@@ -1120,8 +1271,8 @@ class LiveAssistant:
             return {"action": "stop_flash_sale"}
 
         flash_sale_cmd = (
-            ("秒杀" in normalized and any(k in normalized for k in ["上架", "开启", "开始", "开一下", "挂一下"]))
-            or ("秒杀活动" in normalized and any(k in normalized for k in ["上架", "上线", "开一下", "开始"]))
+            ("秒杀" in normalized and any(k in normalized for k in ["上架", "开启", "开始", "开一下", "挂一下", "开", "上", "挂", "上线", "拉起"]))
+            or ("秒杀活动" in normalized and any(k in normalized for k in ["上架", "上线", "开一下", "开始", "开", "挂", "上"]))
             or ("活动" in normalized and "上架" in normalized and "秒杀" in normalized)
             or ("上架" in normalized and "秒杀" in normalized)
             or (
@@ -1147,13 +1298,55 @@ class LiveAssistant:
             )
         )
         if flash_sale_cmd:
+            flash_idx = _extract_link_index(strict_hint=True)
+            if flash_idx:
+                return {"action": "start_flash_sale", "link_index": flash_idx}
             return {"action": "start_flash_sale"}
+
+        # 取消置顶后重新置顶：支持“pop the link again / repin link / 取消置顶并重新置顶”
+        repin_patterns = [
+            rf"(?:repin|pinagain|pinitagain|pinback)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token}|[0-9]+)",
+            rf"(?:repin|pinagain|pinitagain|pinback)(?:the)?(?:link|item|product)(?:number|no)?([0-9]+)",
+            rf"(?:repin|pop)(?:the)?(?:link|item|product)(?:number|no)?({en_num_token}|[0-9]+)(?:again)?",
+            rf"(?:unpin)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token}|[0-9]+)(?:and|then)?(?:pin|repin)",
+            rf"(?:pin|repin)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token}|[0-9]+)(?:again|back)",
+            rf"(?:取消置顶并重新置顶|取消置顶后重新置顶|取消置顶再置顶|重新置顶)(?:第)?([0-9]+|{cn_num_token})(?:号|个)?(?:链接|连接|商品|橱窗)?",
+        ]
+        for pattern in repin_patterns:
+            m = re.search(pattern, normalized)
+            if m:
+                idx = _parse_index(m.group(1))
+                if idx:
+                    return {"action": "repin_product", "link_index": idx}
+
+        repin_intent = any(
+            k in normalized
+            for k in [
+                "重新置顶",
+                "再置顶",
+                "重置顶",
+                "repin",
+                "pinagain",
+                "pinitagain",
+                "pinback",
+                "popthelinkagain",
+                "poplinkagain",
+                "repinlink",
+                "unpinandpin",
+                "unpinthenpin",
+            ]
+        )
+        if repin_intent:
+            idx = _extract_link_index(strict_hint=True)
+            if idx:
+                return {"action": "repin_product", "link_index": idx}
+            return {"action": "repin_product"}
 
         # 取消置顶：将3号链接取消置顶 / 取消3号链接置顶 / unpin link 3
         unpin_patterns = [
-            r"(?:将|把)?([0-9]+|[零一二两三四五六七八九十]{1,3})[号#]?(?:链接|连接|商品|橱窗)?(?:取消置顶|取消顶置|撤销置顶|去掉置顶|下掉置顶|取消pin)",
-            r"(?:取消|撤销|去掉|下掉)(?:第)?([0-9]+|[零一二两三四五六七八九十]{1,3})[号#]?(?:链接|连接|商品|橱窗)?(?:置顶|顶置|pin)?",
-            r"(?:取消置顶|取消顶置|撤销置顶|去掉置顶|下掉置顶)(?:第)?([0-9]+|[零一二两三四五六七八九十]{1,3})(?:(?:号|#)(?:链接|连接|商品|橱窗)?|(?:链接|连接|商品|橱窗))",
+            rf"(?:将|把)?([0-9]+|{cn_num_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)?(?:取消置顶|取消顶置|撤销置顶|去掉置顶|下掉置顶|取消pin)",
+            rf"(?:取消|撤销|去掉|下掉)(?:第)?([0-9]+|{cn_num_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)?(?:置顶|顶置|pin)?",
+            rf"(?:取消置顶|取消顶置|撤销置顶|去掉置顶|下掉置顶)(?:第)?([0-9]+|{cn_num_token})(?:(?:号|#|个)(?:链接|连接|商品|橱窗)?|(?:链接|连接|商品|橱窗))",
             rf"(?:unpin|unset|unstick|unfeature)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token})",
             rf"(?:remove|cancel)(?:the)?pin(?:from)?(?:link|item|product)?(?:number|no)?({en_num_token})",
             rf"(?:link|item|product)(?:number|no)?({en_num_token})(?:unpin|unset|remove(?:the)?pin)",
@@ -1189,7 +1382,7 @@ class LiveAssistant:
         if not has_unpin_intent:
             has_unpin_intent = bool(
                 re.search(
-                    r"(?:取消|撤销|去掉|下掉|移除)(?:第?[0-9零一二两三四五六七八九十]{1,3}[号#]?)?(?:链接|连接|商品|橱窗)?(?:置顶|顶置)",
+                    rf"(?:取消|撤销|去掉|下掉|移除)(?:第?(?:[0-9]+|{cn_num_token})(?:号|#|个)?)?(?:链接|连接|商品|橱窗)?(?:置顶|顶置)",
                     normalized,
                 )
             )
@@ -1202,15 +1395,15 @@ class LiveAssistant:
             )
         if has_unpin_intent:
             fallback_num = re.search(
-                rf"([0-9]+|[零一二两三四五六七八九十]{{1,3}}|{en_num_token})",
+                rf"([0-9]+|{cn_num_token}|{en_num_token})",
                 normalized
             )
             if fallback_num:
                 raw_idx = fallback_num.group(1)
                 # “取消置顶一下”中的“一下”不应当被识别成 1 号链接。
-                if raw_idx == "一":
+                if raw_idx in {"一", "壹", "幺"}:
                     has_index_hint = any(
-                        h in normalized for h in ["一号", "第一", "1号", "#1", "link1", "item1", "product1", "number1", "no1"]
+                        h in normalized for h in ["一号", "第一", "第一个", "1号", "1个", "#1", "link1", "item1", "product1", "number1", "no1"]
                     )
                     if (not has_index_hint) and ("一下" in normalized):
                         raw_idx = None
@@ -1222,9 +1415,9 @@ class LiveAssistant:
 
         # 置顶指定链接：将3号链接置顶 / 置顶3号链接 / 将三号链接置顶
         pin_patterns = [
-            r"(?:将|把)?([0-9]+|[零一二两三四五六七八九十]{1,3})[号#]?(?:链接|连接|商品|橱窗)?(?:置顶|顶一下|顶上去|顶上|置上去|pin|top)",
-            r"(?:置顶|pin|top)(?:第)?([0-9]+|[零一二两三四五六七八九十]{1,3})(?:(?:号|#)(?:链接|连接|商品|橱窗)?|(?:链接|连接|商品|橱窗))",
-            r"(?:把|将)?(?:第)?([0-9]+|[零一二两三四五六七八九十]{1,3})[号#]?(?:链接|连接|商品|橱窗)(?:给我)?(?:置顶|顶上去|顶一下)",
+            rf"(?:将|把)?([0-9]+|{cn_num_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)?(?:置顶|顶一下|顶上去|顶上|置上去|pin|top)",
+            rf"(?:置顶|pin|top)(?:第)?([0-9]+|{cn_num_token})(?:(?:号|#|个)(?:链接|连接|商品|橱窗)?|(?:链接|连接|商品|橱窗))",
+            rf"(?:把|将)?(?:第)?([0-9]+|{cn_num_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)(?:给我)?(?:置顶|顶上去|顶一下)",
             rf"(?:pin|top|feature|stick)(?:the)?(?:number|no)?({en_num_token})(?:link|item|product)?",
             rf"(?:pin|pick|top|feature|stick|choose|select)(?:the)?({en_num_token})(?:to|two|too)?(?:the)?top",
             r"(?:link|item|product)([0-9]+)(?:pin|top)",
@@ -1255,7 +1448,7 @@ class LiveAssistant:
         if has_pin_intent:
             raw_idx = None
             fallback_num = re.search(
-                rf"([0-9]+|[零一二两三四五六七八九十]{{1,3}}|{en_num_token})",
+                rf"([0-9]+|{cn_num_token}|{en_num_token})",
                 normalized
             )
             if fallback_num:
@@ -1264,9 +1457,9 @@ class LiveAssistant:
                 raw_idx = _first_ascii_index_token()
             if raw_idx:
                 # 规避“置顶一下”等口头语误触发：单独“一”只有在带索引语义时才作为 1 号链接
-                if raw_idx == "一":
+                if raw_idx in {"一", "壹", "幺"}:
                     has_index_hint = any(
-                        h in normalized for h in ["一号", "第一", "1号", "#1", "link1", "item1", "product1", "number1", "no1"]
+                        h in normalized for h in ["一号", "第一", "第一个", "1号", "1个", "#1", "link1", "item1", "product1", "number1", "no1"]
                     )
                     if (not has_index_hint) and ("一下" in normalized):
                         raw_idx = None
@@ -1340,9 +1533,11 @@ class LiveAssistant:
             if action == "unpin_product":
                 return f"unpin_product_{idx}" if idx else "unpin_product"
             if action == "start_flash_sale":
-                return "start_flash_sale"
+                return f"start_flash_sale_{idx}" if idx else "start_flash_sale"
             if action == "stop_flash_sale":
                 return "stop_flash_sale"
+            if action == "repin_product":
+                return f"repin_product_{idx}" if idx else "repin_product"
             return str(action or "unknown")
 
         def _run_operation_once():
@@ -1365,6 +1560,12 @@ class LiveAssistant:
                 return bool(self.operations.start_flash_sale()), _action_name_from_command(), False
             if action == "stop_flash_sale":
                 return bool(self.operations.stop_flash_sale()), _action_name_from_command(), False
+            if action == "repin_product":
+                idx = command.get("link_index")
+                unpin_ok = bool(self.operations.unpin_product(link_index=idx))
+                time.sleep(0.08)
+                pin_ok = bool(self.operations.pin_product(link_index=idx))
+                return bool(unpin_ok and pin_ok), _action_name_from_command(), False
             return False, _action_name_from_command(), False
 
         ok, action_name, _planned = _run_operation_once()
@@ -1449,9 +1650,17 @@ class LiveAssistant:
                 return f"unpin_product:{idx}"
             return "unpin_product"
         if action == "start_flash_sale":
+            idx = command.get("link_index")
+            if idx:
+                return f"start_flash_sale:{idx}"
             return "start_flash_sale"
         if action == "stop_flash_sale":
             return "stop_flash_sale"
+        if action == "repin_product":
+            idx = command.get("link_index")
+            if idx:
+                return f"repin_product:{idx}"
+            return "repin_product"
         return action
 
     def _is_duplicate_voice_action(self, command):
@@ -1463,6 +1672,29 @@ class LiveAssistant:
         self.voice_action_cache[key] = now
         self._prune_expired(self.voice_action_cache, settings.VOICE_COMMAND_COOLDOWN_SECONDS * 2)
         return bool(last and now - last < settings.VOICE_COMMAND_COOLDOWN_SECONDS)
+
+    def _is_duplicate_danmu_action(self, command):
+        key = self._voice_action_key(command)
+        if not key:
+            return False
+        cooldown = max(
+            0.0,
+            float(
+                getattr(
+                    settings,
+                    "DANMU_COMMAND_COOLDOWN_SECONDS",
+                    settings.VOICE_COMMAND_COOLDOWN_SECONDS,
+                )
+                or 0.0
+            ),
+        )
+        now = time.time()
+        last = self.danmu_action_cache.get(key)
+        self.danmu_action_cache[key] = now
+        self._prune_expired(self.danmu_action_cache, max(1.0, cooldown * 2))
+        if cooldown <= 0:
+            return False
+        return bool(last and now - last < cooldown)
 
     def _append_voice_input_log(self, source, text, lang=None, status="captured", note="", command=None):
         action_key = ""
@@ -1887,7 +2119,39 @@ class LiveAssistant:
             logger.warning(f"自动报表生成失败: {e}")
 
     def _mock_shop_file_path(self):
-        return (Path(__file__).resolve().parent / "stress" / "mock_shop" / "mock_tiktok_shop.html").resolve()
+        rel = Path("stress") / "mock_shop" / "mock_tiktok_shop.html"
+        candidates = [
+            Path(__file__).resolve().parent / rel,
+            Path.cwd() / rel,
+        ]
+
+        runtime_root = str(os.getenv("LIVE_ASSISTANT_RUNTIME_ROOT", "") or "").strip()
+        if runtime_root:
+            candidates.append(Path(runtime_root).expanduser() / rel)
+
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).resolve().parent
+            candidates.extend(
+                [
+                    exe_dir / rel,
+                    exe_dir / "_internal" / rel,
+                ]
+            )
+
+        seen = set()
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            key = str(resolved).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            if resolved.exists():
+                return resolved
+
+        return candidates[0].resolve()
 
     def _normalize_cloud_test_url(self, url):
         raw = str(url or "").strip()
@@ -2184,21 +2448,40 @@ class LiveAssistant:
             browser = ChromiumPage(co)
             tabs = browser.get_tabs() or []
             target_tab = None
+            bilibili_tab = None
+            bilibili_media_tab = None
+            target_url_lower = str(bilibili_url or "").strip().lower()
 
             for tab in tabs:
                 title = (getattr(tab, "title", "") or "").lower()
                 url = (getattr(tab, "url", "") or "").lower()
                 if ("bilibili.com" in url) or ("哔哩哔哩" in title) or ("b站" in title):
-                    self.vision.page = tab
-                    return True
+                    if target_url_lower and target_url_lower in url:
+                        bilibili_media_tab = tab
+                        continue
+                    if bilibili_media_tab is None and any(
+                        hint in url for hint in ("live.bilibili.com", "/video/", "/bangumi/play", "/read/cv")
+                    ):
+                        bilibili_media_tab = tab
+                    if bilibili_tab is None:
+                        bilibili_tab = tab
                 if target_tab is None and ("tiktok.com" in url or "shop.tiktok.com" in url):
                     target_tab = tab
 
-            if target_tab is None:
-                target_tab = tabs[0] if tabs else browser
+            target_tab = bilibili_media_tab or bilibili_tab or target_tab or (tabs[0] if tabs else browser)
 
-            target_tab.get(bilibili_url)
-            time.sleep(0.35)
+            current_url = str(getattr(target_tab, "url", "") or "").lower()
+            keep_existing_media_page = bool(
+                target_url_lower in {"", "https://www.bilibili.com", "https://www.bilibili.com/"}
+                and any(hint in current_url for hint in ("live.bilibili.com", "/video/", "/bangumi/play"))
+            )
+            should_navigate = bool(bilibili_url) and (not keep_existing_media_page) and (
+                not target_url_lower or target_url_lower not in current_url
+            )
+
+            if should_navigate:
+                target_tab.get(bilibili_url)
+                time.sleep(0.35)
             self.vision.page = target_tab
             current_url = str(getattr(target_tab, "url", "") or "").lower()
             current_title = str(getattr(target_tab, "title", "") or "").lower()
@@ -2216,7 +2499,8 @@ class LiveAssistant:
         """
         target_url = self._normalize_cloud_test_url(url)
         active_language = str(language or self._get_active_language() or settings.DEFAULT_REPLY_LANGUAGE)
-        fallback_languages = self._get_voice_fallback_languages(active_language)
+        test_languages = self._build_cloud_test_languages(active_language)
+        fallback_languages = test_languages[1:]
         selected_provider = str(provider or "").strip().lower()
 
         if not self._cloud_asr_test_prev_provider:
@@ -2265,7 +2549,7 @@ class LiveAssistant:
             pass
 
         if hasattr(self.voice, "_start_tab_audio_stream_capture"):
-            started = bool(self.voice._start_tab_audio_stream_capture([active_language] + list(fallback_languages or [])))
+            started = bool(self.voice._start_tab_audio_stream_capture(list(test_languages or [active_language])))
         else:
             started = False
         if not started:
@@ -2293,7 +2577,7 @@ class LiveAssistant:
                         pass
                 time.sleep(0.25)
                 if hasattr(self.voice, "_start_tab_audio_stream_capture"):
-                    started = bool(self.voice._start_tab_audio_stream_capture([active_language] + list(fallback_languages or [])))
+                    started = bool(self.voice._start_tab_audio_stream_capture(list(test_languages or [active_language])))
                 info = self.voice.get_start_failure_info() if hasattr(self.voice, "get_start_failure_info") else {}
             if not started:
                 self.cloud_asr_test_enabled = False
@@ -2306,7 +2590,10 @@ class LiveAssistant:
 
         self.last_start_error = ""
         self.last_start_detail = f"cloud_asr_test_ready:{target_url}"
-        logger.info(f"播放器流 ASR 对比测试已启动: url={target_url}, lang={active_language}, provider={getattr(settings, 'VOICE_PYTHON_ASR_PROVIDER', '')}")
+        logger.info(
+            f"播放器流 ASR 对比测试已启动: url={target_url}, lang={active_language}, "
+            f"test_langs={test_languages}, provider={getattr(settings, 'VOICE_PYTHON_ASR_PROVIDER', '')}"
+        )
         return {
             "ok": True,
             "url": target_url,
@@ -2314,6 +2601,7 @@ class LiveAssistant:
             "mode": "tab_media_stream",
             "language": active_language,
             "fallback_languages": fallback_languages,
+            "test_languages": test_languages,
         }
 
     def stop_cloud_asr_bilibili_test(self, restore_previous=True):
@@ -2615,28 +2903,32 @@ class LiveAssistant:
                 log_entry["status"] = "self_echo_ignored"
                 return
 
-            if self._is_duplicate_message(user, text):
-                log_entry["status"] = "duplicate_message_skipped"
-                return
-
             # 0. 先解析主播运营动作口令（优先级最高）
             command = None
             if self.get_web_info_source_mode() == "screen_ocr":
-                # screen_ocr 下弹幕源可能混入页面 UI 文案，运营动作仅接受明确助播唤醒词，防误触。
-                normalized_cmd_text = self._normalize_voice_command_text(text)
-                normalized_dense = re.sub(r"\s+", "", str(normalized_cmd_text or "").lower())
-                explicit_wake = any(
-                    w in normalized_dense
-                    for w in ["助播", "assistant", "cohost", "liveassistant", "streamassistant"]
+                # screen_ocr 下弹幕源可能混入页面 UI 文案：按配置决定是否要求唤醒词。
+                require_wake = bool(
+                    getattr(settings, "SCREEN_OCR_DANMU_REQUIRE_WAKE_WORD", True)
                 )
-                if explicit_wake:
+                if (not require_wake) or self._pass_voice_wake_word(text):
                     command = self._parse_operation_command(user, text)
                 else:
                     log_entry["action_guard"] = "screen_ocr_danmu_no_wake"
             else:
                 command = self._parse_operation_command(user, text)
             if command:
+                if self._is_duplicate_danmu_action(command):
+                    log_entry["status"] = "duplicate_action_skipped"
+                    log_entry["action"] = self._voice_action_key(command) or str(
+                        command.get("action") or ""
+                    )
+                    log_entry["action_guard"] = "danmu_action_cooldown"
+                    return
                 self._execute_operation_command(command, trigger_source="danmu", log_entry=log_entry)
+                return
+
+            if self._is_duplicate_message(user, text):
+                log_entry["status"] = "duplicate_message_skipped"
                 return
 
             if not self.reply_enabled:

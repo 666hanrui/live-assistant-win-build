@@ -331,7 +331,8 @@ class VoiceCommandAgent:
         if expected == "en":
             return not has_cjk
         if expected == "zh":
-            return not has_latin
+            # 中文链路允许中英混合（如“B站/AI/USB”），避免误丢有效中文结果。
+            return has_cjk or (not has_latin)
         return True
 
     def _is_runtime_lang_compatible(self, text, detected_lang=None):
@@ -773,15 +774,24 @@ class VoiceCommandAgent:
         return []
 
     def _extract_text_from_dashscope_result(self, result):
-        texts = []
+        prioritized_texts = []
+        fallback_texts = []
         if result is None:
             return ""
+
+        def _push(bucket, value):
+            s = str(value or "").strip()
+            if not s:
+                return
+            if len(s) > 400:
+                return
+            bucket.append(s)
+
         try:
             sentence = result.get_sentence() if hasattr(result, "get_sentence") else None
             if isinstance(sentence, dict):
-                t = str(sentence.get("text") or "").strip()
-                if t:
-                    texts.append(t)
+                _push(prioritized_texts, sentence.get("text"))
+                _push(prioritized_texts, sentence.get("transcript"))
         except Exception:
             pass
 
@@ -796,39 +806,54 @@ class VoiceCommandAgent:
                 data = result
 
         text_keys = {"text", "transcript", "sentence_text", "result_text"}
-        container_keys = {"sentence", "sentences", "output", "payload", "result", "results", "data", "message"}
+        container_keys = {"sentence", "sentences", "output", "payload", "result", "results", "data"}
+        low_value_tokens = {
+            "ok",
+            "success",
+            "succeed",
+            "completed",
+            "complete",
+            "request_success",
+            "status_ok",
+        }
 
-        def _walk(node, depth=0):
+        def _walk(node, depth=0, prefer=False):
             if depth > 8 or node is None:
                 return
             if isinstance(node, str):
-                s = node.strip()
-                if s:
-                    texts.append(s)
+                if prefer:
+                    _push(fallback_texts, node)
                 return
             if isinstance(node, (list, tuple)):
                 for it in node:
-                    _walk(it, depth + 1)
+                    _walk(it, depth + 1, prefer=prefer)
                 return
             if isinstance(node, dict):
                 for k, v in node.items():
                     key = str(k or "").strip().lower()
-                    if key in text_keys and isinstance(v, str):
-                        s = v.strip()
-                        if s:
-                            texts.append(s)
+                    if key in text_keys:
+                        if isinstance(v, str):
+                            _push(prioritized_texts, v)
+                        else:
+                            _walk(v, depth + 1, prefer=True)
                         continue
-                    if key in container_keys or isinstance(v, (dict, list, tuple)):
-                        _walk(v, depth + 1)
+                    child_prefer = bool(prefer or key in container_keys)
+                    if isinstance(v, (dict, list, tuple)):
+                        _walk(v, depth + 1, prefer=child_prefer)
+                    elif child_prefer and isinstance(v, str):
+                        _push(fallback_texts, v)
 
-        _walk(data, depth=0)
-        if not texts:
+        _walk(data, depth=0, prefer=False)
+        prioritized_texts = [t for t in prioritized_texts if t.lower() not in low_value_tokens]
+        if prioritized_texts:
+            return max(prioritized_texts, key=len)
+        fallback_texts = [t for t in fallback_texts if t.lower() not in low_value_tokens]
+        if not fallback_texts:
             return ""
-        # 优先返回较长文本，通常更接近最终句子。
-        texts = [t for t in texts if t and len(t) <= 400]
-        if not texts:
-            return ""
-        return max(texts, key=len)
+        cjk_fallback = [t for t in fallback_texts if re.search(r"[\u4e00-\u9fff]", t)]
+        if cjk_fallback:
+            return max(cjk_fallback, key=len)
+        return max(fallback_texts, key=len)
 
     def _transcribe_wav_with_dashscope_funasr(self, wav_data, sample_rate=16000, lang=None):
         api_key = self._get_dashscope_api_key()
@@ -956,10 +981,18 @@ class VoiceCommandAgent:
     def _transcribe_with_dashscope_funasr(self, audio, lang=None):
         sample_rate = max(8000, int(getattr(settings, "VOICE_DASHSCOPE_SAMPLE_RATE", 16000) or 16000))
         wav_data = audio.get_wav_data(convert_rate=sample_rate, convert_width=2)
-        return self._transcribe_wav_with_dashscope_funasr(
+        text = self._transcribe_wav_with_dashscope_funasr(
             wav_data=wav_data,
             sample_rate=sample_rate,
             lang=lang,
+        )
+        if text or (lang is None):
+            return text
+        # 语言提示偶发过窄导致空文本时，补一次“无提示”兜底。
+        return self._transcribe_wav_with_dashscope_funasr(
+            wav_data=wav_data,
+            sample_rate=sample_rate,
+            lang=None,
         )
 
     def _build_wav_from_pcm16(self, pcm_bytes, sample_rate=16000, channels=1):
@@ -1614,6 +1647,18 @@ class VoiceCommandAgent:
                         self._last_provider_error = str(err)
                         self._last_provider_at = int(time.time() * 1000)
                     self._tab_audio_no_text_count += 1
+                    if (not err) and self._tab_audio_no_text_count in {3, 8, 16, 32}:
+                        runtime_provider = (
+                            self._last_provider_selected
+                            or self._last_provider_attempt
+                            or self._normalize_provider_name()
+                        )
+                        logger.info(
+                            "TabAudio ASR 空结果: "
+                            f"provider={runtime_provider}, langs={self._tab_audio_langs}, "
+                            f"rms={self._tab_audio_last_audio_rms}, sr={self._tab_audio_sample_rate}, "
+                            f"no_text_count={self._tab_audio_no_text_count}"
+                        )
             except Exception as e:
                 self._tab_audio_error = f"asr_error: {e}"
                 self._last_provider_selected = None

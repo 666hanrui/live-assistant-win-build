@@ -22,7 +22,7 @@ datas += add_path(".env.example")
 datas += add_path("README.md")
 datas += add_path("文档.txt")
 
-for folder in ("docs", "assets", "data", "app_config", "models", "scripts", ".streamlit"):
+for folder in ("docs", "assets", "data", "app_config", "models", "scripts", "stress", ".streamlit"):
     datas += add_path(folder, folder)
 
 datas += collect_data_files("streamlit")
@@ -30,6 +30,10 @@ datas += collect_data_files("altair")
 datas += collect_data_files("pydeck")
 datas += collect_data_files("pygments")
 datas += collect_data_files("tiktoken")
+try:
+    datas += collect_data_files("whisper")
+except Exception:
+    pass
 
 hiddenimports = [
     "dashboard",
@@ -40,7 +44,7 @@ hiddenimports = [
     "streamlit.runtime",
 ]
 
-for pkg in ("streamlit", "altair", "pydeck", "pygments", "tiktoken", "watchdog", "mss"):
+for pkg in ("streamlit", "altair", "pydeck", "pygments", "tiktoken", "watchdog", "mss", "whisper"):
     try:
         pkg_datas, pkg_bins, pkg_hidden = collect_all(pkg)
         datas += pkg_datas
@@ -63,6 +67,7 @@ for pkg in (
     "DrissionPage",
     "openpyxl",
     "mss",
+    "whisper",
 ):
     try:
         hiddenimports.extend(collect_submodules(pkg))

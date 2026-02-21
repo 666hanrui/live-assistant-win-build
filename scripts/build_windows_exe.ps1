@@ -345,6 +345,50 @@ if ((-not $HasDashboard) -and (Test-Path $DashboardSource)) {
   Write-Host "Injected missing dashboard.py into bundle."
 }
 
+$MockSourceDir = Join-Path $Root "stress\mock_shop"
+$MockTargetCandidates = @(
+  (Join-Path $BundleDir "_internal\stress\mock_shop"),
+  (Join-Path $BundleDir "stress\mock_shop")
+)
+$HasMockFile = $false
+foreach ($mockDir in $MockTargetCandidates) {
+  if (Test-Path (Join-Path $mockDir "mock_tiktok_shop.html")) {
+    $HasMockFile = $true
+    break
+  }
+}
+if ((-not $HasMockFile) -and (Test-Path $MockSourceDir -PathType Container)) {
+  foreach ($mockDir in $MockTargetCandidates) {
+    New-Item -ItemType Directory -Force -Path $mockDir | Out-Null
+    Copy-Item -Path (Join-Path $MockSourceDir "*") -Destination $mockDir -Recurse -Force
+  }
+  Write-Host "Injected missing mock shop files into bundle."
+}
+
+$MockFileCandidates = @(
+  (Join-Path $BundleDir "_internal\stress\mock_shop\mock_tiktok_shop.html"),
+  (Join-Path $BundleDir "stress\mock_shop\mock_tiktok_shop.html")
+)
+$MockFileInBundle = $null
+foreach ($candidate in $MockFileCandidates) {
+  if (Test-Path $candidate -PathType Leaf) {
+    $MockFileInBundle = $candidate
+    break
+  }
+}
+if (-not $MockFileInBundle) {
+  throw "mock_tiktok_shop.html missing in bundle. checked=$($MockFileCandidates -join '; ')"
+}
+try {
+  $mockBody = Get-Content -Path $MockFileInBundle -Raw -Encoding UTF8
+  if (($mockBody -notmatch "mock_tiktok_shop") -or ($mockBody -notmatch "dashboard_live")) {
+    throw "mock_tiktok_shop.html marker check failed: $MockFileInBundle"
+  }
+} catch {
+  throw "mock_tiktok_shop.html validation failed: $($_.Exception.Message)"
+}
+Write-Host "Verified mock page in bundle: $MockFileInBundle"
+
 $VenvSitePackages = ""
 try {
   $VenvSitePackages = (& $VenvPython -c "import site; p=[x for x in site.getsitepackages() if 'site-packages' in x.lower()]; print(p[0] if p else '')").Trim()

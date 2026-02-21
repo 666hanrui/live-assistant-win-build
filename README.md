@@ -329,7 +329,8 @@ Windows CMD：
 
 - 置顶 N 号链接：`pin_product`
 - 取消 N 号置顶：`unpin_product`
-- 上架秒杀活动：`start_flash_sale`
+- 上架秒杀活动（可带链接序号）：`start_flash_sale`
+- 取消置顶并重新置顶（可带链接序号）：`repin_product`
 
 ### 11.5 常见中英口令（示例）
 
@@ -342,8 +343,11 @@ Windows CMD：
 英文：
 
 - assistant pin link three
+- assistant please pin link number 99
 - assistant unpin link one
 - assistant launch flash sale
+- assistant please start flashsale for link number 2
+- assistant please pop the link again
 
 > 系统内置了大量同音/误识别归一化规则（例如 `to/too/two`、`launch/lounge/lanch` 等）。
 
@@ -621,6 +625,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 - `MAIN_LOOP_ERROR_BACKOFF_SECONDS`
 - `NO_CHAT_WARN_INTERVAL_ROUNDS`
 - `NO_CHAT_FORCE_RECONNECT_ROUNDS`
+- `WEB_INFO_SOURCE_MODE`
+- `OCR_CHAT_MAX_MESSAGES`
+- `SCREEN_CAPTURE_MONITOR_INDEX`
+- `SCREEN_OCR_FIXED_CHAT_REGION_ENABLED`
+- `SCREEN_OCR_FIXED_CHAT_REGION_X1_RATIO`
+- `SCREEN_OCR_FIXED_CHAT_REGION_Y1_RATIO`
+- `SCREEN_OCR_FIXED_CHAT_REGION_X2_RATIO`
+- `SCREEN_OCR_FIXED_CHAT_REGION_Y2_RATIO`
+- `SCREEN_OCR_CHAT_ROI_DEBUG_ENABLED`
+- `SCREEN_OCR_CHAT_ROI_DEBUG_DIR`
+- `SCREEN_OCR_CHAT_ROI_DEBUG_INTERVAL_SECONDS`
+- `SCREEN_OCR_CHAT_ROI_DEBUG_MAX_FILES`
 
 ### 18.5 RAG / Embedding
 
@@ -639,6 +655,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 ### 18.6 运营口令用户与回声过滤
 
 - `COMMAND_ALLOWED_USERS`
+- `COMMAND_REQUIRE_ALLOWED_USERS`
+- `DANMU_COMMAND_COOLDOWN_SECONDS`
+- `SCREEN_OCR_DANMU_REQUIRE_WAKE_WORD`
 - `SELF_USERNAMES`
 - `SELF_ECHO_IGNORE_ENABLED`
 - `SELF_ECHO_TTL_SECONDS`

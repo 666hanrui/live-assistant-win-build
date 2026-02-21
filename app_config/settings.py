@@ -211,6 +211,18 @@ RAG_MIN_RELEVANCE_SCORE = float(os.getenv("RAG_MIN_RELEVANCE_SCORE", "0.25"))
 # 运营动作口令（主播说“置顶/秒杀上架”）
 # 可在 .env 中配置：COMMAND_ALLOWED_USERS=bonusmom70,主播名2
 COMMAND_ALLOWED_USERS = [u.lower() for u in _split_csv_env("COMMAND_ALLOWED_USERS")]
+# 是否启用“运营口令发言人白名单”校验（默认关闭：不限制谁发送）
+COMMAND_REQUIRE_ALLOWED_USERS = os.getenv(
+    "COMMAND_REQUIRE_ALLOWED_USERS",
+    "false",
+).lower() in ("1", "true", "yes", "on")
+# 弹幕运营动作冷却（秒）：用于抑制 OCR/DOM 重复抽取导致的同动作连触发。
+DANMU_COMMAND_COOLDOWN_SECONDS = float(os.getenv("DANMU_COMMAND_COOLDOWN_SECONDS", "6"))
+# screen_ocr 模式下，是否要求弹幕包含唤醒词才允许执行运营动作。
+SCREEN_OCR_DANMU_REQUIRE_WAKE_WORD = os.getenv(
+    "SCREEN_OCR_DANMU_REQUIRE_WAKE_WORD",
+    "true",
+).lower() in ("1", "true", "yes", "on")
 
 # 运营执行模式：
 # - dom: 显式开启 DOM 执行链路（仅手动选择时建议使用）
@@ -304,6 +316,28 @@ OPS_LLM_NAVIGATION_SCROLL_PIXELS = int(os.getenv("OPS_LLM_NAVIGATION_SCROLL_PIXE
 WEB_INFO_SOURCE_MODE = os.getenv("WEB_INFO_SOURCE_MODE", "ocr_only").strip().lower()
 OCR_CHAT_MAX_MESSAGES = int(os.getenv("OCR_CHAT_MAX_MESSAGES", "6"))
 SCREEN_CAPTURE_MONITOR_INDEX = int(os.getenv("SCREEN_CAPTURE_MONITOR_INDEX", "1"))
+# screen_ocr 弹幕固定区域裁剪（相对整屏比例，优先用于聊天抓取）
+SCREEN_OCR_FIXED_CHAT_REGION_ENABLED = os.getenv(
+    "SCREEN_OCR_FIXED_CHAT_REGION_ENABLED",
+    "true",
+).lower() in ("1", "true", "yes", "on")
+SCREEN_OCR_FIXED_CHAT_REGION_X1_RATIO = float(os.getenv("SCREEN_OCR_FIXED_CHAT_REGION_X1_RATIO", "0.44"))
+SCREEN_OCR_FIXED_CHAT_REGION_Y1_RATIO = float(os.getenv("SCREEN_OCR_FIXED_CHAT_REGION_Y1_RATIO", "0.43"))
+SCREEN_OCR_FIXED_CHAT_REGION_X2_RATIO = float(os.getenv("SCREEN_OCR_FIXED_CHAT_REGION_X2_RATIO", "0.72"))
+SCREEN_OCR_FIXED_CHAT_REGION_Y2_RATIO = float(os.getenv("SCREEN_OCR_FIXED_CHAT_REGION_Y2_RATIO", "0.90"))
+# screen_ocr 聊天 ROI 可视化调试（落盘标注图）
+SCREEN_OCR_CHAT_ROI_DEBUG_ENABLED = os.getenv(
+    "SCREEN_OCR_CHAT_ROI_DEBUG_ENABLED",
+    "false",
+).lower() in ("1", "true", "yes", "on")
+SCREEN_OCR_CHAT_ROI_DEBUG_DIR = os.getenv(
+    "SCREEN_OCR_CHAT_ROI_DEBUG_DIR",
+    "logs/screen_chat_roi_debug",
+).strip()
+SCREEN_OCR_CHAT_ROI_DEBUG_INTERVAL_SECONDS = float(
+    os.getenv("SCREEN_OCR_CHAT_ROI_DEBUG_INTERVAL_SECONDS", "2.0")
+)
+SCREEN_OCR_CHAT_ROI_DEBUG_MAX_FILES = int(os.getenv("SCREEN_OCR_CHAT_ROI_DEBUG_MAX_FILES", "240"))
 
 # 语音口令监听（物理听到主播说话）
 # 模式：

@@ -42,6 +42,30 @@ jobs:
             dist/AI_Live_Assistant/logs/**
           if-no-files-found: warn
 
+      - name: Verify mock shop page packaged
+        if: success()
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "dist/AI_Live_Assistant/_internal/stress/mock_shop/mock_tiktok_shop.html",
+            "dist/AI_Live_Assistant/stress/mock_shop/mock_tiktok_shop.html"
+          )
+          $hit = $null
+          foreach ($p in $candidates) {
+            if (Test-Path $p -PathType Leaf) {
+              $hit = $p
+              break
+            }
+          }
+          if (-not $hit) {
+            throw "mock_tiktok_shop.html not found in packaged bundle. checked=$($candidates -join '; ')"
+          }
+          $raw = Get-Content -Path $hit -Raw -Encoding UTF8
+          if (($raw -notmatch "mock_tiktok_shop") -or ($raw -notmatch "dashboard_live")) {
+            throw "mock page marker check failed: $hit"
+          }
+          Write-Host "Mock page verification passed: $hit"
+
       - name: Pack distributable zip
         if: success()
         shell: pwsh

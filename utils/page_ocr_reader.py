@@ -687,8 +687,10 @@ class PageOCRReader:
                     scoped_by_chat_block = True
 
         # 屏幕 OCR 且未定位到聊天区时，优先保留右侧区域文本，减少左侧 UI/日志串扰。
+        # 对 ROI 裁剪源不再强制右侧过滤，避免把用户名/消息前缀误删。
         vis_w = int((visual or {}).get("w") or 0)
-        if (not scoped_by_chat_block) and vis_w > 0 and str(source or "").startswith("screen"):
+        source_tag = str(source or "").strip().lower()
+        if (not scoped_by_chat_block) and vis_w > 0 and source_tag.startswith("screen") and ("roi" not in source_tag):
             right_lines = [ln for ln in source_lines if self._line_center_x(ln) >= vis_w * self._CHAT_RIGHT_PANEL_X_RATIO]
             if len(right_lines) >= max(3, max_messages):
                 source_lines = right_lines

@@ -885,12 +885,646 @@
       margin-top: 8px;
       box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
     }
+
+    /* Screenshot-aligned skin */
+    html,
+    body {
+      background: #f5f6f8;
+      min-width: 1520px;
+    }
+
+    .topbar {
+      height: 52px;
+      padding: 0 16px;
+      background: #0f1115;
+      border-bottom: 1px solid #1a1e27;
+    }
+
+    .brand {
+      font-size: 30px;
+      font-weight: 800;
+      letter-spacing: .1px;
+      gap: 10px;
+    }
+
+    .brand small {
+      font-size: 32px;
+      font-weight: 700;
+      color: #f3f4f6;
+      letter-spacing: .3px;
+    }
+
+    .userline {
+      font-size: 12px;
+      color: #d6dae1;
+      gap: 12px;
+    }
+
+    #modeBadge {
+      display: none;
+    }
+
+    .layout {
+      grid-template-columns: 176px 1fr;
+      min-height: calc(100vh - 52px);
+    }
+
+    .sidebar {
+      background: #f3f4f6;
+      border-right: 1px solid #e4e7ec;
+      padding: 12px 6px;
+    }
+
+    .start-btn {
+      background: #ff4f73;
+      border-radius: 4px;
+      height: 34px;
+      font-size: 17px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      padding: 0;
+    }
+
+    .nav-group-title {
+      color: #6b7280;
+      font-size: 12px;
+      padding: 8px 10px 4px;
+    }
+
+    .nav {
+      font-size: 13px;
+      color: #4b5563;
+      padding: 8px 10px;
+      border-radius: 4px;
+      margin-bottom: 2px;
+    }
+
+    .nav.sub {
+      padding-left: 22px;
+    }
+
+    .nav.active {
+      background: #d9dde4;
+      font-weight: 700;
+      color: #1f2937;
+    }
+
+    .main {
+      padding: 12px;
+      background: #f5f6f8;
+    }
+
+    .title-row {
+      margin-bottom: 8px;
+      padding: 0 2px;
+    }
+
+    .title {
+      font-size: 34px;
+      font-weight: 800;
+      gap: 10px;
+    }
+
+    .title small {
+      font-size: 23px;
+      color: #6b7280;
+      font-weight: 500;
+    }
+
+    .view-switch {
+      gap: 4px;
+      opacity: .58;
+    }
+
+    .vbtn {
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      background: #fff;
+      color: #6b7280;
+    }
+
+    .vbtn.active {
+      background: #111827;
+      border-color: #111827;
+      color: #fff;
+    }
+
+    .dash-grid {
+      grid-template-columns: 536px 500px minmax(340px, 1fr);
+      gap: 10px;
+    }
+
+    .card {
+      border-radius: 6px;
+      border: 1px solid #e5e7eb;
+      background: #fff;
+    }
+
+    .card-head {
+      padding: 9px 12px;
+      font-size: 15px;
+      border-bottom: 1px solid #eceff4;
+    }
+
+    .tabs {
+      padding: 8px 12px 0;
+      gap: 7px;
+    }
+
+    .tab {
+      height: 31px;
+      border-radius: 4px;
+      border: 1px solid #ebedf0;
+      background: #f4f6f8;
+      color: #374151;
+      font-size: 13px;
+      padding: 0 13px;
+    }
+
+    .tab.active {
+      background: #f0f2f5;
+      color: #111827;
+      border-color: #e4e7ec;
+    }
+
+    .prod-wrap {
+      min-height: 656px;
+      padding: 10px 12px 10px;
+      grid-template-rows: auto auto auto auto 1fr auto;
+    }
+
+    .search input {
+      height: 34px;
+      border-radius: 4px;
+      border-color: #e5e7eb;
+      background: #fff;
+    }
+
+    .search .btn {
+      min-width: 74px;
+      border-radius: 4px;
+      color: #14b8a6;
+      border-color: transparent;
+      background: transparent;
+      font-size: 26px;
+      line-height: 1;
+      padding: 0 6px;
+    }
+
+    .filter-row {
+      grid-template-columns: auto 1fr 1fr;
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    .chip {
+      border-radius: 4px;
+      border-color: #e5e7eb;
+      background: #fff;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      font-size: 12px;
+    }
+
+    .live-notice {
+      border: 1px solid #eceff4;
+      border-radius: 6px;
+      background: #f8fafc;
+      padding: 10px 10px 9px;
+      display: none;
+      grid-template-columns: 34px 1fr;
+      gap: 10px;
+      align-items: start;
+    }
+
+    .live-notice-icon {
+      font-size: 22px;
+      line-height: 1;
+      margin-top: 2px;
+    }
+
+    .live-notice-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #334155;
+      margin-bottom: 2px;
+    }
+
+    .live-notice-desc {
+      font-size: 12px;
+      color: #6b7280;
+      line-height: 1.45;
+    }
+
+    .thumb-row {
+      gap: 6px;
+      border-bottom-style: solid;
+      border-bottom-color: #eceff4;
+      padding-bottom: 10px;
+    }
+
+    .mini-thumb {
+      width: 34px;
+      height: 34px;
+      border-radius: 6px;
+      background: linear-gradient(130deg, #374151, #1f2937 60%, #6b7280);
+    }
+
+    .pinned-spot {
+      min-height: 62px;
+      border-radius: 6px;
+      border-color: #e4f5f3;
+      background: #f5fffd;
+      padding: 7px 8px;
+      grid-template-columns: 50px 1fr auto;
+      margin-top: 2px;
+    }
+
+    .pinned-spot.empty {
+      min-height: 52px;
+      background: #fafafa;
+      border-color: #e5e7eb;
+    }
+
+    .pinned-spot .thumb {
+      width: 50px;
+      height: 50px;
+      border-radius: 6px;
+    }
+
+    .pinned-title {
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .pinned-meta {
+      font-size: 11px;
+      color: #64748b;
+    }
+
+    .product-scroll {
+      height: 336px;
+      border-radius: 6px;
+      border-color: #e5e7eb;
+      background: #fff;
+    }
+
+    .list-header {
+      background: #f8fafc;
+      font-size: 12px;
+      color: #6b7280;
+      padding: 7px 8px;
+    }
+
+    .prod-row {
+      border-radius: 6px;
+      border-color: #e8ebf0;
+      padding: 7px;
+      grid-template-columns: 30px 56px 1fr auto;
+      margin-bottom: 7px;
+    }
+
+    .index-badge {
+      width: 30px;
+      height: 30px;
+      border-radius: 4px;
+      font-size: 18px;
+      font-weight: 700;
+      color: #4b5563;
+    }
+
+    .thumb {
+      width: 56px;
+      height: 56px;
+      border-radius: 6px;
+    }
+
+    .ptitle {
+      font-size: 13px;
+      font-weight: 600;
+      max-width: 280px;
+      margin-bottom: 2px;
+    }
+
+    .pprice {
+      font-size: 36px;
+      letter-spacing: -.6px;
+      margin-bottom: 1px;
+    }
+
+    .pmeta {
+      font-size: 11px;
+    }
+
+    .pstats {
+      margin-top: 4px;
+      border-radius: 5px;
+      background: #f8fafc;
+    }
+
+    .prod-actions {
+      gap: 5px;
+    }
+
+    .icon-list {
+      font-size: 15px;
+      letter-spacing: 1px;
+      color: #9ca3af;
+    }
+
+    .prod-ops {
+      position: sticky;
+      bottom: -2px;
+      gap: 7px;
+      padding-top: 8px;
+      background: linear-gradient(to top, #fff 76%, rgba(255, 255, 255, 0));
+    }
+
+    .ops-hint {
+      font-size: 11px;
+      color: #94a3b8;
+    }
+
+    .ops-status {
+      min-height: 31px;
+      font-size: 12px;
+      border-radius: 6px;
+      border-style: solid;
+      border-color: #e6e9ef;
+      background: #f8fafc;
+    }
+
+    .preview-shell {
+      background: #fff;
+      border: 0;
+      min-height: 656px;
+      padding: 0;
+      color: #1f2937;
+    }
+
+    .preview-head {
+      margin: 0;
+      padding: 9px 12px;
+      border-bottom: 1px solid #eceff4;
+      color: #374151;
+      font-size: 13px;
+    }
+
+    .video-zone {
+      margin: 0;
+      border: 0;
+      border-bottom: 1px solid #edf0f5;
+      border-radius: 0;
+      height: 248px;
+      background: radial-gradient(ellipse at top, #232833 0%, #090b0f 36%, #08090b 100%);
+      color: #8f97a5;
+      font-size: 14px;
+      position: relative;
+    }
+
+    .video-zone::before {
+      content: "视频   脚本";
+      position: absolute;
+      top: 10px;
+      left: 12px;
+      color: #d1d5db;
+      font-size: 12px;
+      letter-spacing: .4px;
+    }
+
+    .video-zone.live::after {
+      content: "⏺ 00:11:37";
+      position: absolute;
+      top: 10px;
+      right: 12px;
+      color: #f8fafc;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .live-product {
+      display: none;
+    }
+
+    .chat-block {
+      border-top: 0;
+      padding: 0;
+      height: 408px;
+      gap: 0;
+      grid-template-rows: auto 1fr auto;
+    }
+
+    .chat-tabs {
+      margin: 0;
+      padding: 8px 12px 7px;
+      border-bottom: 1px solid #eceff4;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+
+    .chat-tabs b {
+      color: #111827;
+      font-weight: 700;
+    }
+
+    .chat-list {
+      border: 0;
+      border-radius: 0;
+      background: #fff;
+      padding: 8px 12px;
+      font-size: 14px;
+      color: #374151;
+    }
+
+    .chat-item {
+      border-bottom: 0;
+      padding: 5px 0;
+      color: #374151;
+      line-height: 1.4;
+    }
+
+    .owner {
+      color: #374151;
+      font-weight: 700;
+    }
+
+    .chat-empty {
+      color: #9ca3af;
+      font-size: 14px;
+      text-align: center;
+      margin-top: 130px;
+    }
+
+    .chat-input {
+      padding: 8px 12px 10px;
+      border-top: 1px solid #eceff4;
+      background: #fff;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+
+    .chat-input textarea {
+      min-height: 40px;
+      max-height: 84px;
+      border-color: #e5e7eb;
+      background: #fff;
+      color: #111827;
+      border-radius: 4px;
+      padding: 8px 9px;
+    }
+
+    .composer-foot {
+      color: #9ca3af;
+      margin-top: -3px;
+      font-size: 11px;
+    }
+
+    .right-col {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 10px;
+    }
+
+    .kpi-grid {
+      padding: 10px;
+      gap: 7px;
+    }
+
+    .kpi {
+      border-color: #eef1f5;
+      border-radius: 6px;
+      min-height: 80px;
+      padding: 8px;
+      background: #f9fbfd;
+    }
+
+    .kpi .k {
+      color: #6b7280;
+      font-size: 11px;
+    }
+
+    .kpi .v {
+      font-size: 34px;
+      margin-top: 4px;
+    }
+
+    .kpi-trend {
+      font-size: 12px;
+      color: #ef4444;
+      margin-top: 2px;
+      font-weight: 700;
+    }
+
+    .suggestion-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: #fff;
+      min-height: 84px;
+      padding: 9px 10px;
+    }
+
+    .suggestion-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 14px;
+      font-weight: 700;
+      color: #1f2937;
+      margin-bottom: 7px;
+    }
+
+    .suggestion-body {
+      min-height: 38px;
+      border-top: 1px dashed #e5e7eb;
+      padding-top: 7px;
+      font-size: 12px;
+      color: #6b7280;
+      line-height: 1.45;
+    }
+
+    .suggestion-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .suggestion-empty {
+      text-align: center;
+      color: #9ca3af;
+      margin-top: 8px;
+    }
+
+    .activity {
+      min-height: 470px;
+      border-color: #e5e7eb;
+      border-radius: 6px;
+      padding: 0;
+      grid-template-rows: auto auto 1fr;
+    }
+
+    .activity-head {
+      margin: 0;
+      padding: 10px;
+      border-bottom: 1px solid #eceff4;
+      font-size: 14px;
+      color: #1f2937;
+    }
+
+    .activity-toolbar {
+      padding: 8px 10px;
+      border-bottom: 1px solid #eef1f4;
+      font-size: 12px;
+      color: #64748b;
+    }
+
+    .activity-list {
+      border-top: 0;
+      padding: 8px 10px;
+    }
+
+    .act-row {
+      font-size: 13px;
+      color: #374151;
+      padding: 7px 0;
+    }
+
+    .act-row.viewer {
+      display: grid;
+      grid-template-columns: 24px 1fr;
+      gap: 8px;
+      align-items: center;
+      border-bottom: 0;
+      padding: 6px 0;
+    }
+
+    .viewer-avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      border: 1px solid #e5e7eb;
+      background: linear-gradient(140deg, #dbeafe, #e2e8f0);
+      display: grid;
+      place-items: center;
+      font-size: 11px;
+      color: #334155;
+      font-weight: 700;
+    }
+
+    .viewer-text {
+      font-size: 13px;
+      color: #374151;
+    }
   </style>
 </head>
 <body>
   <header class="topbar">
     <div class="brand">TikTok Shop <small>| 直播管理平台</small></div>
     <div class="userline">
+      <span>🔔</span>
+      <span>🎮 达人 Discord</span>
       <span><span class="live-dot"></span>msgemhair1</span>
       <span id="clock">--:--:--</span>
       <span id="modeBadge">Mock</span>
@@ -902,11 +1536,21 @@
       <button id="btnStartLive" class="start-btn">立即开始直播</button>
       <button class="nav">首页</button>
       <button class="nav">直播工具</button>
-      <button class="nav active">直播控制台</button>
-      <button class="nav">直播商品组合</button>
-      <button class="nav">直播送好礼</button>
-      <button class="nav">数据分析</button>
-      <button class="nav">账号健康</button>
+      <button class="nav sub active">直播控制台</button>
+      <button class="nav sub">直播商品组合</button>
+      <button class="nav sub">直播送好礼</button>
+      <button class="nav sub">直播高光时刻</button>
+      <button class="nav sub">直播和短视频活动</button>
+      <div class="nav-group-title">商品橱窗</div>
+      <button class="nav sub">直播橱窗中的商品</button>
+      <div class="nav-group-title">数据分析</div>
+      <button class="nav sub">数据概览</button>
+      <button class="nav sub">直播分析</button>
+      <button class="nav sub">视频分析</button>
+      <button class="nav sub">商品分析</button>
+      <div class="nav-group-title">账号健康</div>
+      <button class="nav sub">Product selection score</button>
+      <button class="nav sub">违规中心</button>
     </aside>
 
     <main class="main">
@@ -923,14 +1567,13 @@
         <div class="dash-grid">
           <div class="card">
             <div class="card-head">
-              <span>商品（20/150）</span>
+              <span>商品（19/150）</span>
               <span class="head-muted" id="liveStateText">状态：未开播</span>
             </div>
             <div class="tabs">
-              <button class="tab active">商品</button>
-              <button class="tab">送好礼活动</button>
-              <button class="tab">看板</button>
-              <button class="tab">拍卖</button>
+              <button id="tabGift" class="tab">送好礼活动</button>
+              <button id="tabBoard" class="tab active">看板</button>
+              <button id="tabAuction" class="tab">拍卖</button>
             </div>
             <div class="prod-wrap">
               <div class="search">
@@ -942,7 +1585,14 @@
                 <span>☐ 全部</span>
                 <span class="chip">所有类目</span>
                 <span class="chip">所有库存</span>
-                <span class="chip">全部价格</span>
+              </div>
+
+              <div id="liveNotice" class="live-notice">
+                <div class="live-notice-icon">📢</div>
+                <div>
+                  <div class="live-notice-title">价格显示已更新</div>
+                  <div class="live-notice-desc">这是主播的通用价格，直播间中的消费者在使用优惠券和其他促销活动之前可以看到。</div>
+                </div>
               </div>
 
               <div class="thumb-row" id="thumbRow"></div>
@@ -959,7 +1609,7 @@
 
               <div id="opsPanel" class="prod-ops" data-e2e="ops-panel">
                 <button id="btnFlash" class="btn primary" data-e2e="flash-sale-btn" data-op="flash_toggle">秒杀活动上架</button>
-                <button id="btnGlobalPin" class="btn pin" data-e2e="pin-selected-btn" data-op="pin_selected">置顶选中链接</button>
+                <button id="btnGlobalPin" class="btn pin" data-e2e="pin-selected-btn" data-op="pin_selected">立即置顶</button>
                 <button id="btnGlobalUnpin" class="btn unpin" data-e2e="unpin-selected-btn" data-op="unpin_selected">取消置顶</button>
                 <span id="flashBadge" class="tag hidden">秒杀进行中</span>
               </div>
@@ -972,9 +1622,9 @@
             <div class="preview-shell">
               <div class="preview-head">
                 <div>
-                  <span class="live-dot"></span>视频 | 脚本 | 时长 <span id="liveDuration">00:00:00</span>
+                  直播预览
                 </div>
-                <button class="btn">开始直播</button>
+                <button class="btn">切换模式 ↔</button>
               </div>
 
               <div id="videoHint" class="video-zone">暂无视频推荐</div>
@@ -989,13 +1639,9 @@
               </div>
 
               <div class="chat-block">
-                <div>
-                  <div class="chat-tabs"><b>全部</b><span>商品相关</span></div>
-                  <div id="chatList" class="chat-list" data-e2e="live-chat-container">
-                    <div class="chat-item" data-e2e="chat-message"><span class="owner" data-e2e="message-owner-name">msgemhair1</span>VIP fast shipping for u dear</div>
-                    <div class="chat-item" data-e2e="chat-message"><span class="owner" data-e2e="message-owner-name">msgemhair1</span>What’s good, beautiful ladies! Welcome to Msgem!</div>
-                    <div class="chat-item" data-e2e="chat-message"><span class="owner" data-e2e="message-owner-name">lisa</span>Can you pin number 3 please?</div>
-                  </div>
+                <div class="chat-tabs"><b>全部</b><span>商品相关</span></div>
+                <div id="chatList" class="chat-list" data-e2e="live-chat-container">
+                  <div class="chat-empty">直播期间，观众评论会在此处显示。</div>
                 </div>
                 <div class="chat-input">
                   <textarea id="chatInput" data-e2e="chat-input" maxlength="100" placeholder="请输入内容......"></textarea>
@@ -1015,14 +1661,28 @@
                 <div class="kpi"><div class="k">直播曝光次数</div><div id="kpiExpo" class="v">--</div></div>
                 <div class="kpi"><div class="k">点击率</div><div id="kpiCtr" class="v">--</div></div>
                 <div class="kpi"><div class="k">人均观看时长</div><div class="v">11秒</div></div>
-                <div class="kpi"><div class="k">商品点击量</div><div id="kpiClick" class="v">52</div></div>
+                <div class="kpi">
+                  <div class="k">商品点击量</div>
+                  <div id="kpiClick" class="v">52</div>
+                  <div id="kpiClickTrend" class="kpi-trend hidden">↗ 75%</div>
+                </div>
               </div>
             </div>
+
+            <div class="suggestion-card">
+              <div class="suggestion-head">
+                <span>建议</span>
+                <span class="head-muted">ⓘ</span>
+              </div>
+              <div id="suggestionBody" class="suggestion-body"></div>
+            </div>
+
             <div class="activity">
               <div class="activity-head">
                 <span>活动</span>
-                <span class="head-muted">所有活动</span>
+                <span class="head-muted">启动以调整大小</span>
               </div>
+              <div class="activity-toolbar">所有活动 ▾</div>
               <div id="activityList" class="activity-list"></div>
             </div>
           </div>
@@ -1097,30 +1757,30 @@
   <div id="toastWrap" class="toast-wrap"></div>
 
   <script>
-    const baseTitles = [
-      "Msgem Hair 15A Burmese Curly Bundles Raw Human Hair",
-      "<Live Only> Msgem Hair 15A Raw Hair Bundles Burmese",
-      "<Live Only> Msgem Hair 15A Kinky Straight 100% Human",
-      "<Live Only> Msgem Hair 15A Grade Brazilian Raw Hair",
-      "Msgem Hair 15A Grade Brazilian Raw Hair Material",
-      "<Live Only> Msgem Water Wave Hair Bundles",
-      "Msgem Kinky Curly Human Hair Wig",
-      "Lace Front Human Hair Wig 30inch"
+    const productSeeds = [
+      { title: "Msgem Hair 15A Burmese Curly Bundles Raw Human Hair", price: 42.35, stock: "49.9K" },
+      { title: "<Live Only> Msgem Hair 15A Raw Hair Bundles Burmese", price: 42.35, stock: "49.9K" },
+      { title: "<Live Only> Msgem Hair 15A Kinky Straight 100% Human", price: 85.50, stock: "38.5K" },
+      { title: "<Live Only> Msgem Hair 15A Grade Brazilian Raw Hair", price: 80.46, stock: "38.9K" },
+      { title: "Msgem Hair 15A Grade Brazilian Raw Hair Material", price: 83.19, stock: "35.1K" },
+      { title: "<Live Only> Msgem Water Wave Hair Bundles", price: 56.88, stock: "32.4K" },
+      { title: "Msgem Hair 15A Kinky Curly Human Hair Wig", price: 61.99, stock: "28.9K" },
+      { title: "Lace Front Human Hair Wig 30inch", price: 93.80, stock: "26.7K" },
+      { title: "Msgem Hair HD Lace Frontal Wig Deep Wave", price: 73.20, stock: "24.1K" },
+      { title: "Msgem Hair Body Wave Bundle Deal", price: 47.15, stock: "22.6K" }
     ];
 
-    const products = Array.from({ length: 20 }).map((_, i) => {
+    const products = Array.from({ length: 19 }).map((_, i) => {
       const idx = i + 1;
-      const base = baseTitles[i % baseTitles.length];
-      const price = (38 + (i % 7) * 7.6 + (i % 3) * 1.1).toFixed(2);
-      const stock = i < 3 ? "49.9K" : `${Math.max(117 - i * 3, 18)}`;
+      const seed = productSeeds[i % productSeeds.length];
       return {
         id: idx,
-        title: base,
-        price: Number(price),
-        stock,
-        clicked: Math.floor(Math.random() * 5),
-        cart: Math.floor(Math.random() * 3),
-        done: Math.floor(Math.random() * 2)
+        title: seed.title,
+        price: Number(seed.price),
+        stock: seed.stock,
+        clicked: idx <= 4 ? 0 : Math.floor(Math.random() * 4),
+        cart: idx <= 4 ? 0 : Math.floor(Math.random() * 2),
+        done: idx <= 4 ? 0 : Math.floor(Math.random() * 2)
       };
     });
 
@@ -1136,9 +1796,18 @@
       expo: 0,
       ctr: 0,
       orders: 0,
-      clicks: 52,
+      clicks: 0,
       activities: [],
-      actionPending: null
+      actionPending: null,
+      chatMessages: [],
+      viewerFeed: [
+        "Patricia Fullwood 刚刚进入直播间",
+        "judyjones1612 刚刚进入直播间",
+        "Melinda 刚刚进入直播间",
+        "Jahniece 刚刚进入直播间",
+        "Angel 刚刚进入直播间",
+        "Nikki Porter 刚刚进入直播间"
+      ]
     };
 
     const el = {
@@ -1148,8 +1817,12 @@
       swIdle: document.getElementById("swIdle"),
       swLive: document.getElementById("swLive"),
       swOverview: document.getElementById("swOverview"),
+      tabGift: document.getElementById("tabGift"),
+      tabBoard: document.getElementById("tabBoard"),
+      tabAuction: document.getElementById("tabAuction"),
       startInfo: document.getElementById("startInfo"),
       liveStateText: document.getElementById("liveStateText"),
+      liveNotice: document.getElementById("liveNotice"),
       thumbRow: document.getElementById("thumbRow"),
       pinnedSpot: document.getElementById("pinnedSpot"),
       productScroll: document.getElementById("productScroll"),
@@ -1173,6 +1846,8 @@
       kpiExpo: document.getElementById("kpiExpo"),
       kpiCtr: document.getElementById("kpiCtr"),
       kpiClick: document.getElementById("kpiClick"),
+      kpiClickTrend: document.getElementById("kpiClickTrend"),
+      suggestionBody: document.getElementById("suggestionBody"),
       activityList: document.getElementById("activityList"),
       viewDashboard: document.getElementById("viewDashboard"),
       viewOverview: document.getElementById("viewOverview"),
@@ -1189,8 +1864,8 @@
       return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    function fmtMoney(v) { return `$${v.toFixed(1)}`; }
-    function fmtK(v) { return v >= 1000 ? `${(v / 1000).toFixed(2)}K` : String(v); }
+    function fmtMoney(v) { return `$${Math.round(Number(v || 0))}`; }
+    function fmtK(v) { return v >= 10000 ? `${(v / 1000).toFixed(2)}K` : String(Math.round(Number(v || 0))); }
     function fmtPct(v) { return `${v.toFixed(2)}%`; }
 
     function toast(msg) {
@@ -1218,20 +1893,69 @@
     }
 
     function renderActivity() {
-      if (!state.activities.length) {
-        el.activityList.innerHTML = '<div class="act-row">直播期间，观众活动会在此处显示。</div>';
+      if (!state.live) {
+        el.activityList.innerHTML = '<div class="act-row suggestion-empty">你在直播期间所下订单将显示在此处</div>';
         return;
       }
-      el.activityList.innerHTML = state.activities.map(a => {
+      const opRows = state.activities.slice(0, 3).map(a => {
         const hh = String(a.ts.getHours()).padStart(2, "0");
         const mm = String(a.ts.getMinutes()).padStart(2, "0");
         const ss = String(a.ts.getSeconds()).padStart(2, "0");
         return `<div class="act-row">[${hh}:${mm}:${ss}] ${a.msg}</div>`;
+      });
+      const viewerRows = (state.viewerFeed || []).slice(0, 8).map(line => {
+        const name = String(line || "").split(" ")[0] || "U";
+        const avatar = String(name).slice(0, 1).toUpperCase();
+        return `<div class="act-row viewer"><div class="viewer-avatar">${avatar}</div><div class="viewer-text">${line}</div></div>`;
+      });
+      el.activityList.innerHTML = [...opRows, ...viewerRows].join("");
+    }
+
+    function renderSuggestion() {
+      if (!el.suggestionBody) return;
+      if (!state.live) {
+        el.suggestionBody.innerHTML = '<div class="suggestion-empty">在直播期间获得实时建议。</div>';
+        return;
+      }
+
+      const suggestIdx = state.pinnedId ? Math.min(state.pinnedId + 1, products.length) : 4;
+      el.suggestionBody.innerHTML = `
+        <div class="suggestion-row">
+          <div>置顶第 ${suggestIdx} 号商品以提高销量！</div>
+          <button id="btnSuggestPin" class="btn pin">立即置顶</button>
+        </div>
+      `;
+    }
+
+    function renderChat() {
+      if (!el.chatList) return;
+      if (!state.chatMessages.length) {
+        el.chatList.innerHTML = '<div class="chat-empty">直播期间，观众评论会在此处显示。</div>';
+        return;
+      }
+      el.chatList.innerHTML = state.chatMessages.map(item => {
+        const owner = String(item.owner || "user");
+        const text = String(item.text || "");
+        return `<div class="chat-item" data-e2e="chat-message"><span class="owner" data-e2e="message-owner-name">${owner}</span> ${text}</div>`;
       }).join("");
     }
 
+    function seedLiveChatIfNeeded() {
+      if (!state.live) return;
+      if (state.chatMessages.length > 0) return;
+      state.chatMessages = [
+        { owner: "msgemhair1", text: "assistant pin link three" },
+        { owner: "msgemhair1", text: "Need sizing, shipping, or deals? Ask me now." },
+        { owner: "msgemhair1", text: "assistant pin link three" },
+        { owner: "Zoey Zhou", text: "do you have straight hair" },
+        { owner: "Zoey Zhou", text: "do you have curly hair" },
+        { owner: "msgemhair1", text: "Tell me your needs and I can suggest the right option." }
+      ];
+    }
+
     function renderThumbs() {
-      el.thumbRow.innerHTML = products.slice(0, 5).map(() => '<div class="mini-thumb"></div>').join("") + '<span style="font-size:12px;color:#6b7280;">+15</span>';
+      const remain = Math.max(0, products.length - 5);
+      el.thumbRow.innerHTML = products.slice(0, 5).map(() => '<div class="mini-thumb"></div>').join("") + `<span style="font-size:12px;color:#6b7280;">+${remain}</span>`;
     }
 
     function withPending(actionKey) {
@@ -1249,8 +1973,8 @@
       el.pinnedSpot.innerHTML = `
         <div class="thumb"></div>
         <div>
-          <div class="pinned-title">序号${p.id}（${p.id}号链接）${p.title}</div>
-          <div class="pinned-meta">起始价 $${p.price.toFixed(2)} ｜ 库存 ${p.stock} ｜ 当前置顶中</div>
+          <div class="pinned-title">${p.title}</div>
+          <div class="pinned-meta">序号 ${p.id} ｜ 库存 ${p.stock} ｜ 当前置顶中</div>
         </div>
         <button class="btn unpin ${withPending('pin') ? 'loading' : ''}" data-e2e="pin-product-button" data-product-index="${p.id}">${withPending('pin') ? '处理中...' : '取消置顶'}</button>
       `;
@@ -1266,7 +1990,7 @@
             <div class="index-badge">${p.id}</div>
             <div class="thumb"></div>
             <div>
-              <div class="ptitle">序号${p.id}（${p.id}号链接）${p.title} ${pinned ? '<span class="tag">已置顶</span>' : ''}</div>
+              <div class="ptitle">${p.title} ${pinned ? '<span class="tag">已置顶</span>' : ''}</div>
               <div class="pprice">$${p.price.toFixed(2)}</div>
               <div class="pmeta">库存量: ${p.stock} ｜ 申请展示: 0</div>
               <div class="pstats">
@@ -1320,6 +2044,9 @@
       el.kpiExpo.textContent = state.live ? fmtK(state.expo) : "--";
       el.kpiCtr.textContent = state.live ? fmtPct(state.ctr) : "--";
       el.kpiClick.textContent = state.live ? String(state.clicks) : "--";
+      if (el.kpiClickTrend) {
+        el.kpiClickTrend.classList.toggle("hidden", !state.live);
+      }
 
       el.heroGmv.textContent = Math.round(state.gmv).toString();
       el.heroOrders.textContent = String(state.orders);
@@ -1339,11 +2066,22 @@
 
     function renderLiveState() {
       el.liveStateText.textContent = `状态：${state.live ? "开播中" : "未开播"}`;
-      el.videoHint.textContent = state.live ? "直播画面模拟区域" : "暂无视频推荐";
+      el.videoHint.textContent = state.live ? "" : "暂无视频推荐";
+      el.videoHint.classList.toggle("live", state.live);
       el.btnStartLive.disabled = state.live;
       el.btnStartLive.textContent = state.live ? "直播已开始" : "立即开始直播";
-      el.startInfo.textContent = state.startedAt ? `开始时间: ${state.startedAt.toLocaleString()}` : "开始时间: --";
+      if (state.startedAt) {
+        el.startInfo.textContent = `开始时间: ${state.startedAt.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}`;
+      } else {
+        el.startInfo.textContent = "开始时间: --";
+      }
       el.listHint.textContent = state.live ? "可滚动 · 点击行可选中" : "未开播：可预览列表";
+      if (el.liveNotice) {
+        el.liveNotice.style.display = state.live ? "grid" : "none";
+      }
+      if (el.tabGift) {
+        el.tabGift.style.display = state.live ? "none" : "inline-flex";
+      }
       if (!state.live) {
         setOpsStatus("未开播（可预览，不能置顶/上架）", "warn");
       } else if (state.flashLive) {
@@ -1370,9 +2108,12 @@
       renderPinnedSpot();
       renderProducts();
       renderLiveCard();
+      seedLiveChatIfNeeded();
+      renderChat();
       renderFlash();
       renderLiveState();
       renderKpi();
+      renderSuggestion();
       renderOverviewRows();
       renderActivity();
     }
@@ -1390,12 +2131,12 @@
       if (!state.live) {
         state.live = true;
         state.startedAt = new Date();
-        state.gmv = 74.2;
-        state.viewers = 4;
-        state.expo = 7874;
-        state.ctr = 8.15;
-        state.orders = 2;
-        state.clicks = 52;
+        state.gmv = 0;
+        state.viewers = 3;
+        state.expo = 1182;
+        state.ctr = 17.34;
+        state.orders = 3;
+        state.clicks = 3;
       }
     }
 
@@ -1477,11 +2218,8 @@
     function sendChat() {
       const txt = el.chatInput.value.trim();
       if (!txt) return;
-      const item = document.createElement("div");
-      item.className = "chat-item";
-      item.setAttribute("data-e2e", "chat-message");
-      item.innerHTML = `<span class="owner" data-e2e="message-owner-name">msgemhair1</span>${txt}`;
-      el.chatList.appendChild(item);
+      state.chatMessages.push({ owner: "msgemhair1", text: txt });
+      renderChat();
       el.chatList.scrollTop = el.chatList.scrollHeight;
       el.chatInput.value = "";
       el.chatCount.textContent = "0";
@@ -1507,29 +2245,45 @@
         const ss = String(sec % 60).padStart(2, "0");
         el.liveDuration.textContent = `${hh}:${mm}:${ss}`;
 
-        state.viewers = Math.max(1, 4 + Math.floor(Math.random() * 5));
-        state.expo += Math.floor(Math.random() * 22 + 7);
-        state.ctr = 7.8 + Math.random() * 0.9;
+        state.viewers = Math.max(2, 3 + Math.floor(Math.random() * 2));
+        state.expo += Math.floor(Math.random() * 9 + 2);
+        state.ctr = 16.8 + Math.random() * 1.2;
 
-        if (Math.random() < 0.16) {
-          const order = 38 + Math.random() * 108;
+        if (Math.random() < 0.07) {
+          const order = 28 + Math.random() * 52;
           state.orders += 1;
           state.gmv += order;
           const p = products[Math.floor(Math.random() * products.length)];
           p.done += 1;
-          p.clicked += Math.random() < 0.6 ? 1 : 0;
+          p.clicked += 1;
           addActivity(`观众下单：序号${p.id} ｜ +$${order.toFixed(2)}`);
         }
 
-        if (Math.random() < 0.08) {
+        if (Math.random() < 0.06) {
           const samples = [
-            "just joined the LIVE",
-            "刚刚进入直播间",
+            "do you have straight hair",
+            "do you have curly hair",
             "can you pin #3?",
             "求上架秒杀链接",
-            "VIP fast shipping?"
+            "Need sizing and shipping info"
           ];
-          addActivity(`观众互动：${samples[Math.floor(Math.random() * samples.length)]}`);
+          const names = ["Zoey Zhou", "rose", "Nikki Porter", "Angel", "Patricia Fullwood"];
+          state.chatMessages.push({
+            owner: names[Math.floor(Math.random() * names.length)],
+            text: samples[Math.floor(Math.random() * samples.length)]
+          });
+          if (state.chatMessages.length > 30) {
+            state.chatMessages = state.chatMessages.slice(-30);
+          }
+          renderChat();
+        }
+
+        if (Math.random() < 0.04) {
+          const names = ["Patricia Fullwood", "judyjones1612", "Melinda", "Jahniece", "Angel", "Nikki Porter", "rose"];
+          const candidate = `${names[Math.floor(Math.random() * names.length)]} 刚刚进入直播间`;
+          state.viewerFeed.unshift(candidate);
+          state.viewerFeed = state.viewerFeed.slice(0, 12);
+          renderActivity();
         }
 
         renderKpi();
@@ -1586,6 +2340,12 @@
         return;
       }
 
+      if (e.target.id === "btnSuggestPin") {
+        ensureLiveInitialized();
+        await pinProduct(Math.min((state.pinnedId || 3) + 1, products.length));
+        return;
+      }
+
       if (e.target.id === "btnStartLive") {
         ensureLiveInitialized();
         addActivity("直播开始，数据看板已激活");
@@ -1614,6 +2374,7 @@
       state.startedAt = null;
       state.flashLive = false;
       state.pinnedId = null;
+      state.chatMessages = [];
       setRoute("dashboard_idle");
     });
 
@@ -1635,7 +2396,7 @@
       if (path.includes("/workbench/live/overview")) {
         state.currentView = "overview";
         ensureLiveInitialized();
-        state.startedAt = new Date(Date.now() - 78 * 60 * 1000);
+        state.startedAt = new Date(Date.now() - 697 * 1000);
         state.pinnedId = 3;
         state.selectedId = 3;
       } else if (qView === "dashboard_idle") {
@@ -1643,12 +2404,11 @@
       } else {
         state.currentView = "dashboard_live";
         ensureLiveInitialized();
-        state.startedAt = new Date(Date.now() - 78 * 60 * 1000);
-        state.pinnedId = 3;
-        state.selectedId = 3;
+        state.startedAt = new Date(Date.now() - 697 * 1000);
+        state.pinnedId = null;
+        state.selectedId = 1;
       }
 
-      addActivity("Mock 页面已加载，可测试置顶/秒杀链路");
       renderView();
 
       enhanceNativeScroll(el.productScroll);

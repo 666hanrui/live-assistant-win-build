@@ -5,6 +5,8 @@ from utils.screen_capture import ScreenCapture
 import app_config.settings as settings
 import time
 import re
+from pathlib import Path
+import cv2
 
 class VisionAgent:
     def __init__(self, port=settings.BROWSER_PORT):
@@ -28,6 +30,24 @@ class VisionAgent:
         self._last_screen_scan_at = 0.0
         self._screen_scan_cache_ttl = 0.55
         self._chat_roi = None
+        self._fixed_chat_roi_enabled = bool(getattr(settings, "SCREEN_OCR_FIXED_CHAT_REGION_ENABLED", True))
+        self._fixed_chat_roi_ratios = {
+            "x1": float(getattr(settings, "SCREEN_OCR_FIXED_CHAT_REGION_X1_RATIO", 0.44) or 0.44),
+            "y1": float(getattr(settings, "SCREEN_OCR_FIXED_CHAT_REGION_Y1_RATIO", 0.43) or 0.43),
+            "x2": float(getattr(settings, "SCREEN_OCR_FIXED_CHAT_REGION_X2_RATIO", 0.72) or 0.72),
+            "y2": float(getattr(settings, "SCREEN_OCR_FIXED_CHAT_REGION_Y2_RATIO", 0.90) or 0.90),
+        }
+        self._chat_roi_debug_enabled = bool(getattr(settings, "SCREEN_OCR_CHAT_ROI_DEBUG_ENABLED", False))
+        self._chat_roi_debug_dir = str(getattr(settings, "SCREEN_OCR_CHAT_ROI_DEBUG_DIR", "logs/screen_chat_roi_debug") or "logs/screen_chat_roi_debug")
+        self._chat_roi_debug_interval = max(
+            0.2,
+            float(getattr(settings, "SCREEN_OCR_CHAT_ROI_DEBUG_INTERVAL_SECONDS", 2.0) or 2.0),
+        )
+        self._chat_roi_debug_max_files = max(
+            20,
+            int(getattr(settings, "SCREEN_OCR_CHAT_ROI_DEBUG_MAX_FILES", 240) or 240),
+        )
+        self._last_chat_roi_debug_at = 0.0
 
     def _normalize_info_source_mode(self, mode):
         mode = str(mode or "").strip().lower()
@@ -65,6 +85,106 @@ class VisionAgent:
         except Exception:
             return None
 
+    @staticmethod
+    def _ratio01(value, default):
+        try:
+            v = float(value)
+        except Exception:
+            v = float(default)
+        return max(0.0, min(1.0, v))
+
+    def _fixed_chat_roi_for_size(self, width, height):
+        if (not self._fixed_chat_roi_enabled) or width <= 0 or height <= 0:
+            return None
+        x1 = self._ratio01(self._fixed_chat_roi_ratios.get("x1"), 0.44)
+        y1 = self._ratio01(self._fixed_chat_roi_ratios.get("y1"), 0.43)
+        x2 = self._ratio01(self._fixed_chat_roi_ratios.get("x2"), 0.72)
+        y2 = self._ratio01(self._fixed_chat_roi_ratios.get("y2"), 0.90)
+        # 比例配置兜底，避免反向区间导致空 ROI。
+        if x2 <= x1:
+            x1, x2 = min(x1, x2), max(x1, x2)
+        if y2 <= y1:
+            y1, y2 = min(y1, y2), max(y1, y2)
+        if (x2 - x1) < 0.08:
+            x2 = min(1.0, x1 + 0.08)
+        if (y2 - y1) < 0.12:
+            y2 = min(1.0, y1 + 0.12)
+        return self._clamp_rect(
+            {
+                "x1": int(round(width * x1)),
+                "y1": int(round(height * y1)),
+                "x2": int(round(width * x2)),
+                "y2": int(round(height * y2)),
+            },
+            width,
+            height,
+        )
+
+    def _resolve_preferred_chat_roi(self, width, height):
+        fixed = self._fixed_chat_roi_for_size(width, height)
+        if fixed:
+            return fixed, "fixed"
+        if isinstance(self._chat_roi, dict):
+            learned = self._clamp_rect(self._chat_roi, width, height)
+            if learned:
+                return learned, "learned"
+        return None, ""
+
+    def _dump_chat_roi_debug(self, full_img, roi_rect, source, scan):
+        if not self._chat_roi_debug_enabled:
+            return
+        now = time.time()
+        if (now - self._last_chat_roi_debug_at) < self._chat_roi_debug_interval:
+            return
+        if full_img is None or getattr(full_img, "size", 0) <= 0:
+            return
+        try:
+            debug_dir = Path(self._chat_roi_debug_dir)
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
+            ms = int((now - int(now)) * 1000)
+            tag = f"{stamp}_{ms:03d}"
+
+            full = full_img.copy()
+            h, w = full.shape[:2]
+            x1 = y1 = x2 = y2 = 0
+            if isinstance(roi_rect, dict):
+                clamped = self._clamp_rect(roi_rect, w, h)
+                if clamped:
+                    x1, y1, x2, y2 = clamped["x1"], clamped["y1"], clamped["x2"], clamped["y2"]
+                    cv2.rectangle(full, (x1, y1), (x2, y2), (48, 245, 255), 2)
+
+            chat_count = int(len((scan or {}).get("chat_messages") or []))
+            line_count = int((scan or {}).get("line_count") or 0)
+            page_type = str((scan or {}).get("page_type") or "")
+            roi_origin = str((scan or {}).get("capture_roi_origin") or "")
+            head = f"src={source} roi={roi_origin or 'none'} chat={chat_count} lines={line_count} page={page_type}"
+            cv2.putText(full, head[:180], (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 255), 2, cv2.LINE_AA)
+
+            full_file = debug_dir / f"{tag}_{source}_full.jpg"
+            cv2.imwrite(str(full_file), full)
+
+            if (x2 - x1) >= 16 and (y2 - y1) >= 16:
+                roi_img = full_img[y1:y2, x1:x2]
+                if roi_img is not None and getattr(roi_img, "size", 0) > 0:
+                    roi_file = debug_dir / f"{tag}_{source}_roi.jpg"
+                    cv2.imwrite(str(roi_file), roi_img)
+
+            files = sorted(
+                [p for p in debug_dir.glob("*.jpg") if p.is_file()],
+                key=lambda p: p.stat().st_mtime,
+            )
+            overflow = len(files) - self._chat_roi_debug_max_files
+            if overflow > 0:
+                for old in files[:overflow]:
+                    try:
+                        old.unlink()
+                    except Exception:
+                        pass
+            self._last_chat_roi_debug_at = now
+        except Exception as e:
+            logger.debug(f"chat roi debug dump failed: {e}")
+
     def _update_chat_roi_from_scan(self, scan):
         try:
             blocks = list((scan or {}).get("blocks") or [])
@@ -79,27 +199,50 @@ class VisionAgent:
             if score < 0.62 or not isinstance(rect, dict):
                 return
             source = str((scan or {}).get("source") or "").strip().lower()
-            # 仅在整屏扫描时更新 ROI，避免在 ROI 内再次“自我收缩”。
-            if source != "screen_capture":
-                return
             vis = (scan or {}).get("visual") or {}
-            w = int(vis.get("w") or 0)
-            h = int(vis.get("h") or 0)
-            clamped = self._clamp_rect(rect, w, h)
+            vis_w = int(vis.get("w") or 0)
+            vis_h = int(vis.get("h") or 0)
+            clamped = self._clamp_rect(rect, vis_w, vis_h)
             if not clamped:
                 return
+            mapped = clamped
+            if source in {"screen_chat_roi", "screen_fixed_chat_roi"}:
+                roi = (scan or {}).get("capture_roi") or {}
+                if not isinstance(roi, dict):
+                    return
+                mapped = {
+                    "x1": int(roi.get("x1") or 0) + int(clamped.get("x1") or 0),
+                    "y1": int(roi.get("y1") or 0) + int(clamped.get("y1") or 0),
+                    "x2": int(roi.get("x1") or 0) + int(clamped.get("x2") or 0),
+                    "y2": int(roi.get("y1") or 0) + int(clamped.get("y2") or 0),
+                }
+                full_w = int((scan or {}).get("screen_full_width") or 0)
+                full_h = int((scan or {}).get("screen_full_height") or 0)
+                if full_w > 0 and full_h > 0:
+                    mapped = self._clamp_rect(mapped, full_w, full_h)
+                else:
+                    mapped = self._clamp_rect(mapped, int(roi.get("x2") or 0), int(roi.get("y2") or 0))
+                if not mapped:
+                    return
+            elif source != "screen_capture":
+                return
             # 略微外扩，减少漏识别
-            pad_x = max(6, int((clamped["x2"] - clamped["x1"]) * 0.04))
-            pad_y = max(6, int((clamped["y2"] - clamped["y1"]) * 0.03))
+            pad_x = max(6, int((mapped["x2"] - mapped["x1"]) * 0.04))
+            pad_y = max(6, int((mapped["y2"] - mapped["y1"]) * 0.03))
+            full_w = int((scan or {}).get("screen_full_width") or 0)
+            full_h = int((scan or {}).get("screen_full_height") or 0)
+            if source == "screen_capture" and (full_w <= 0 or full_h <= 0):
+                full_w = max(0, vis_w)
+                full_h = max(0, vis_h)
             expanded = self._clamp_rect(
                 {
-                    "x1": clamped["x1"] - pad_x,
-                    "y1": clamped["y1"] - pad_y,
-                    "x2": clamped["x2"] + pad_x,
-                    "y2": clamped["y2"] + pad_y,
+                    "x1": mapped["x1"] - pad_x,
+                    "y1": mapped["y1"] - pad_y,
+                    "x2": mapped["x2"] + pad_x,
+                    "y2": mapped["y2"] + pad_y,
                 },
-                w,
-                h,
+                max(1, full_w),
+                max(1, full_h),
             )
             if expanded:
                 self._chat_roi = expanded
@@ -152,21 +295,30 @@ class VisionAgent:
             }
         source = "screen_capture"
         img = cap.get("image")
+        full_img = img
         capture_meta = dict(cap)
-        if prefer_chat_roi and isinstance(self._chat_roi, dict):
+        h, w = img.shape[:2]
+        capture_meta["screen_full_width"] = int(w)
+        capture_meta["screen_full_height"] = int(h)
+        if prefer_chat_roi:
+            roi, roi_origin = self._resolve_preferred_chat_roi(w, h)
+        else:
+            roi, roi_origin = (None, "")
+        if roi:
             h, w = img.shape[:2]
-            roi = self._clamp_rect(self._chat_roi, w, h)
+            roi = self._clamp_rect(roi, w, h)
             if roi:
                 x1, y1, x2, y2 = roi["x1"], roi["y1"], roi["x2"], roi["y2"]
                 cropped = img[y1:y2, x1:x2]
                 if cropped is not None and getattr(cropped, "size", 0) > 0:
                     img = cropped
-                    source = "screen_chat_roi"
+                    source = "screen_fixed_chat_roi" if roi_origin == "fixed" else "screen_chat_roi"
                     capture_meta["left"] = int(cap.get("left") or 0) + x1
                     capture_meta["top"] = int(cap.get("top") or 0) + y1
                     capture_meta["width"] = int(x2 - x1)
                     capture_meta["height"] = int(y2 - y1)
                     capture_meta["roi"] = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                    capture_meta["roi_origin"] = roi_origin
 
         scan = self.ocr_reader.scan_image(
             img,
@@ -181,8 +333,18 @@ class VisionAgent:
             scan.setdefault("capture_elapsed_ms", int(cap.get("elapsed_ms") or 0))
             if capture_meta.get("roi"):
                 scan.setdefault("capture_roi", dict(capture_meta.get("roi") or {}))
+            if capture_meta.get("roi_origin"):
+                scan.setdefault("capture_roi_origin", str(capture_meta.get("roi_origin") or ""))
+            scan.setdefault("screen_full_width", int(capture_meta.get("screen_full_width") or 0))
+            scan.setdefault("screen_full_height", int(capture_meta.get("screen_full_height") or 0))
             if source == "screen_capture":
                 self._last_screen_scan_at = time.time()
+            self._dump_chat_roi_debug(
+                full_img=full_img,
+                roi_rect=(capture_meta.get("roi") or self._chat_roi),
+                source=source,
+                scan=scan,
+            )
         return scan
 
     def get_info_source_status(self):

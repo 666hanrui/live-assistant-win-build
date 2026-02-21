@@ -138,6 +138,8 @@ if "cloud_asr_bili_test_url_ui" not in st.session_state:
     st.session_state.cloud_asr_bili_test_url_ui = "https://www.bilibili.com/"
 if "cloud_asr_bili_test_provider_ui" not in st.session_state:
     st.session_state.cloud_asr_bili_test_provider_ui = "follow_current"
+if "pin_click_test_confirm_popup_sync_pending" not in st.session_state:
+    st.session_state.pin_click_test_confirm_popup_sync_pending = False
 
 # 兼容旧版会话对象（旧对象可能没有 get_unified_language 方法）
 def _get_unified_language(assistant):
@@ -241,6 +243,29 @@ def _is_loopback_voice_mode(mode):
         "loopback_asr",
         "loopback",
     }
+
+
+def _normalize_asr_provider_name(value):
+    raw = str(value or "").strip().lower()
+    aliases = {
+        "dashscope": "dashscope_funasr",
+        "aliyun_funasr": "dashscope_funasr",
+        "funasr": "dashscope_funasr",
+        "hybrid": "hybrid_local_cloud",
+        "local_cloud": "hybrid_local_cloud",
+        "cloud_local": "hybrid_local_cloud",
+    }
+    return aliases.get(raw, raw)
+
+
+def _resolve_cloud_test_provider_from_ui():
+    selected = str(st.session_state.get("cloud_asr_bili_test_provider_ui") or "follow_current").strip().lower()
+    if selected and selected != "follow_current":
+        return _normalize_asr_provider_name(selected)
+    ui_provider = _normalize_asr_provider_name(st.session_state.get("voice_asr_provider_ui"))
+    if ui_provider in {"whisper_local", "dashscope_funasr", "hybrid_local_cloud", "auto", "google", "sphinx"}:
+        return ui_provider
+    return _normalize_asr_provider_name(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local"))
 
 
 def _get_operation_execution_mode(assistant):
@@ -1258,9 +1283,12 @@ def _run_system_self_check(assistant):
             ("助播 将3号链接置顶一下", ("pin_product", 3)),
             ("助播 将3号链接取消置顶", ("unpin_product", 3)),
             ("assistant pin link three", ("pin_product", 3)),
+            ("assistant please pin link number 99", ("pin_product", 99)),
             ("assistant unpin link three", ("unpin_product", 3)),
             ("cohost top item fifth", ("pin_product", 5)),
             ("assistant launch flash promotion now", ("start_flash_sale", None)),
+            ("assistant please start flashsale for link number 2", ("start_flash_sale", 2)),
+            ("assistant please pop the link again", ("repin_product", None)),
             ("助播 结束秒杀活动", ("stop_flash_sale", None)),
             ("assistant stop flash sale now", ("stop_flash_sale", None)),
             ("pin link 3 please", ("pin_product", 3)),
@@ -1285,9 +1313,12 @@ def _run_system_self_check(assistant):
             sample_inputs = [
                 "助播 置顶3号链接",
                 "assistant pin link three",
+                "assistant please pin link number 99",
                 "cohost unpin link 2",
                 "助播 秒杀活动上架",
                 "assistant start flash sale now",
+                "assistant please start flashsale for link number 2",
+                "assistant please pop the link again",
             ]
             start_t = time.perf_counter()
             for i in range(800):
@@ -2086,7 +2117,14 @@ with st.sidebar:
             st.session_state.message_keyboard_only_enabled_ui = bool(current_human_cfg.get("message_keyboard_only_enabled", True))
         if "force_full_physical_chain_ui" not in st.session_state:
             st.session_state.force_full_physical_chain_ui = bool(current_human_cfg.get("force_full_physical_chain", False))
-        if "pin_click_test_confirm_popup_ui" not in st.session_state:
+        # Streamlit 限制：widget key 在实例化后不可在同轮脚本内修改。
+        # 若上一轮通过“即时开关”改了值，这里在控件创建前执行同步。
+        if st.session_state.get("pin_click_test_confirm_popup_sync_pending"):
+            st.session_state.pin_click_test_confirm_popup_ui = bool(
+                st.session_state.get("pin_click_test_confirm_popup_quick_ui", False)
+            )
+            st.session_state.pin_click_test_confirm_popup_sync_pending = False
+        elif "pin_click_test_confirm_popup_ui" not in st.session_state:
             st.session_state.pin_click_test_confirm_popup_ui = bool(current_human_cfg.get("pin_click_test_confirm_popup", False))
         if "os_keyboard_typing_min_ms_ui" not in st.session_state:
             st.session_state.os_keyboard_typing_min_ms_ui = int(float(current_human_cfg.get("typing_min_interval_seconds", 0.018) or 0.018) * 1000)
@@ -2205,7 +2243,7 @@ with st.sidebar:
         quick_prev = bool(st.session_state.pin_click_test_confirm_popup_quick_prev_ui)
         if quick_now != quick_prev:
             _set_human_like_settings(st.session_state.assistant, {"pin_click_test_confirm_popup": quick_now})
-            st.session_state.pin_click_test_confirm_popup_ui = quick_now
+            st.session_state.pin_click_test_confirm_popup_sync_pending = True
             st.session_state.pin_click_test_confirm_popup_quick_prev_ui = quick_now
             st.success(f"置顶点击测试弹窗已{'开启' if quick_now else '关闭'}")
             st.rerun()
@@ -2275,6 +2313,9 @@ with st.sidebar:
             format_func=lambda x: "follow_current（跟随当前配置）" if x == "follow_current" else x,
             help="本地/云端都走同一条播放器抓流链路，仅切换识别模型。",
         )
+        effective_cloud_provider = _resolve_cloud_test_provider_from_ui()
+        if st.session_state.cloud_asr_bili_test_provider_ui == "follow_current":
+            st.caption(f"当前 follow_current 生效 Provider：{effective_cloud_provider}")
         st.toggle(
             "开启播放器流ASR测试开关",
             key="cloud_asr_bili_test_enabled_ui",
@@ -2303,15 +2344,19 @@ with st.sidebar:
             need_rerun = False
             if current_cloud_test:
                 if hasattr(st.session_state.assistant, "start_cloud_asr_bilibili_test"):
-                    selected_provider = st.session_state.cloud_asr_bili_test_provider_ui
+                    selected_provider = _resolve_cloud_test_provider_from_ui()
                     result = st.session_state.assistant.start_cloud_asr_bilibili_test(
                         url=st.session_state.cloud_asr_bili_test_url_ui,
-                        provider=(None if selected_provider == "follow_current" else selected_provider),
+                        provider=selected_provider,
                     )
                 else:
                     result = {"ok": False, "error": "assistant_method_missing"}
                 if result.get("ok"):
-                    st.success("播放器流ASR测试已开启：Bilibili 页面已打开，开始播放音频即可。")
+                    langs_desc = ",".join(list(result.get("test_languages") or []))
+                    st.success(
+                        f"播放器流ASR测试已开启（provider={result.get('provider') or selected_provider}"
+                        f"{', langs=' + langs_desc if langs_desc else ''}）：Bilibili 页面已打开，开始播放音频即可。"
+                    )
                     st.session_state.cloud_asr_bili_test_prev_ui = True
                     need_rerun = True
                 else:
@@ -2336,15 +2381,19 @@ with st.sidebar:
         if st.session_state.cloud_asr_bili_test_enabled_ui:
             if st.button("🔄 重新打开B站测试页", key="btn_reopen_cloud_asr_bili", use_container_width=True):
                 if hasattr(st.session_state.assistant, "start_cloud_asr_bilibili_test"):
-                    selected_provider = st.session_state.cloud_asr_bili_test_provider_ui
+                    selected_provider = _resolve_cloud_test_provider_from_ui()
                     result = st.session_state.assistant.start_cloud_asr_bilibili_test(
                         url=st.session_state.cloud_asr_bili_test_url_ui,
-                        provider=(None if selected_provider == "follow_current" else selected_provider),
+                        provider=selected_provider,
                     )
                 else:
                     result = {"ok": False, "error": "assistant_method_missing"}
                 if result.get("ok"):
-                    st.success("已重新打开B站测试页。")
+                    langs_desc = ",".join(list(result.get("test_languages") or []))
+                    st.success(
+                        f"已重新打开B站测试页（provider={result.get('provider') or selected_provider}"
+                        f"{', langs=' + langs_desc if langs_desc else ''}）。"
+                    )
                 else:
                     err = str(result.get("error") or "unknown")
                     if any(k in err for k in [
