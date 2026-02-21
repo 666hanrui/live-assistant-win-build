@@ -5,7 +5,7 @@
   "reply_enabled": true,
   "proactive_enabled": true,
   "voice_command_enabled": true,
-  "voice_input_mode": "tab_audio_asr",
+  "voice_input_mode": "python_asr",
   "operation_execution_mode": "ocr_vision",
   "dom_operation_mode_explicit": false,
   "web_info_source_mode": "screen_ocr",
@@ -25,9 +25,9 @@
     "message_keyboard_input_mode": "type",
     "ocr_vision_allow_dom_fallback": false,
     "force_full_physical_chain": false,
-    "pin_click_test_confirm_popup": false
+    "pin_click_test_confirm_popup": true
   },
   "voice_mic_device_index": -1,
   "voice_mic_name_hint": "blackhole,stereo mix,loopback,vb-cable",
-  "voice_asr_provider": "dashscope_funasr"
+  "voice_asr_provider": "whisper_local"
 }

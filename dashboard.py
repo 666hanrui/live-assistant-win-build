@@ -111,9 +111,15 @@ def _reset_assistant_for_rerun():
     st.session_state.logs = []
     st.cache_resource.clear()
 
+
+@st.cache_resource(show_spinner=False)
+def _get_cached_assistant():
+    return LiveAssistant()
+
+
 # 使用 Session State 管理单例助手实例
 if 'assistant' not in st.session_state:
-    st.session_state.assistant = LiveAssistant()
+    st.session_state.assistant = _get_cached_assistant()
 if 'logs' not in st.session_state:
     st.session_state.logs = []
 if 'self_test_results' not in st.session_state:
@@ -140,6 +146,10 @@ if "cloud_asr_bili_test_provider_ui" not in st.session_state:
     st.session_state.cloud_asr_bili_test_provider_ui = "follow_current"
 if "pin_click_test_confirm_popup_sync_pending" not in st.session_state:
     st.session_state.pin_click_test_confirm_popup_sync_pending = False
+if "pin_click_default_apply_result" not in st.session_state:
+    st.session_state.pin_click_default_apply_result = None
+if "pin_click_regression_result" not in st.session_state:
+    st.session_state.pin_click_regression_result = None
 
 # 兼容旧版会话对象（旧对象可能没有 get_unified_language 方法）
 def _get_unified_language(assistant):
@@ -1414,7 +1424,7 @@ def _run_system_self_check(assistant):
 
 # 兼容旧版会话对象（热重载后旧对象缺少新属性/方法）
 if (not hasattr(st.session_state.assistant, "voice_command_enabled")) or (not hasattr(st.session_state.assistant, "analytics")):
-    st.session_state.assistant = LiveAssistant()
+    st.session_state.assistant = _get_cached_assistant()
 
 # 定义日志文件路径
 LOG_FILE = "logs/app.log"
@@ -2248,6 +2258,134 @@ with st.sidebar:
             st.success(f"置顶点击测试弹窗已{'开启' if quick_now else '关闭'}")
             st.rerun()
 
+        cfg_col1, cfg_col2 = st.columns(2)
+        with cfg_col1:
+            if st.button("🔒 固化置顶链路默认配置", key="btn_pin_click_apply_defaults", use_container_width=True):
+                if hasattr(st.session_state.assistant, "apply_pin_click_stable_defaults"):
+                    result = st.session_state.assistant.apply_pin_click_stable_defaults(persist=True)
+                    st.session_state.pin_click_default_apply_result = result
+                    if bool((result or {}).get("ok")):
+                        st.success("已固化默认配置：ocr_vision + screen_ocr + 物理链路。")
+                    else:
+                        st.warning(f"默认配置固化失败：{result}")
+                else:
+                    st.warning("当前运行实例不支持默认配置固化。")
+        with cfg_col2:
+            if st.button("🧪 置顶9号链接回归自检", key="btn_pin_click_regression_9", use_container_width=True):
+                if hasattr(st.session_state.assistant, "run_pin_click_regression_check"):
+                    with st.spinner("正在执行置顶9号链接回归自检..."):
+                        st.session_state.pin_click_regression_result = st.session_state.assistant.run_pin_click_regression_check(
+                            link_index=9,
+                            source="pin_click_regression_button",
+                            apply_stable_defaults=True,
+                        )
+                    if bool((st.session_state.pin_click_regression_result or {}).get("ok")):
+                        st.success("置顶9号链接回归自检通过。")
+                    else:
+                        st.warning("置顶9号链接回归自检未通过，请查看下方详情。")
+                else:
+                    st.warning("当前运行实例不支持置顶回归自检。")
+
+        default_apply_result = st.session_state.get("pin_click_default_apply_result")
+        if isinstance(default_apply_result, dict) and default_apply_result:
+            st.caption(
+                "默认配置："
+                f"op={default_apply_result.get('operation_execution_mode') or '-'} | "
+                f"web={default_apply_result.get('web_info_source_mode') or '-'}"
+            )
+
+        pin_reg_result = st.session_state.get("pin_click_regression_result")
+        if isinstance(pin_reg_result, dict) and pin_reg_result:
+            rr = pin_reg_result.get("receipt_reason") or "-"
+            cmd = pin_reg_result.get("command_text") or "-"
+            if pin_reg_result.get("ok"):
+                st.success(f"回归结果：ok=True | command={cmd} | receipt={rr}")
+            else:
+                st.warning(f"回归结果：ok=False | command={cmd} | receipt={rr}")
+            op_stat = pin_reg_result.get("operation_status") if isinstance(pin_reg_result.get("operation_status"), dict) else {}
+            web_stat = pin_reg_result.get("web_status") if isinstance(pin_reg_result.get("web_status"), dict) else {}
+            st.caption(
+                "运行态："
+                f"op_mode={op_stat.get('mode') or '-'} | "
+                f"click_driver={op_stat.get('last_click_driver') or '-'} | "
+                f"click_point={op_stat.get('last_click_point') or {}} | "
+                f"web_mode={web_stat.get('mode') or '-'} | "
+                f"page={web_stat.get('ocr_page_type') or '-'}"
+            )
+
+        st.caption("⌨️ 打字触发置顶测试（不走 ASR）")
+        if "pin_click_test_typing_cmd_text" not in st.session_state:
+            st.session_state.pin_click_test_typing_cmd_text = "助播，置顶2号链接"
+        st.text_input(
+            "打字口令（置顶测试）",
+            key="pin_click_test_typing_cmd_text",
+            help="示例：助播，置顶2号链接 ｜ 助播，取消置顶2号链接 ｜ assistant pin link 2 ｜ assistant unpin link 2",
+        )
+        if st.button("⌨️ 打字触发置顶动作", key="btn_pin_click_test_typing_trigger", use_container_width=True):
+            typed_cmd = str(st.session_state.get("pin_click_test_typing_cmd_text") or "").strip()
+            if not typed_cmd:
+                st.warning("请输入口令后再执行。")
+            elif not hasattr(st.session_state.assistant, "execute_manual_voice_text"):
+                st.error("当前运行实例不支持打字触发。")
+            else:
+                parsed = None
+                if hasattr(st.session_state.assistant, "_parse_operation_command_text"):
+                    try:
+                        parsed = st.session_state.assistant._parse_operation_command_text(typed_cmd)
+                    except Exception:
+                        parsed = None
+                action = str((parsed or {}).get("action") or "")
+                if action not in {"pin_product", "unpin_product", "repin_product"}:
+                    st.warning("该按钮仅支持置顶/取消置顶相关口令。")
+                else:
+                    if not bool(st.session_state.pin_click_test_confirm_popup_quick_ui):
+                        _set_human_like_settings(st.session_state.assistant, {"pin_click_test_confirm_popup": True})
+                        st.session_state.pin_click_test_confirm_popup_quick_ui = True
+                        st.session_state.pin_click_test_confirm_popup_quick_prev_ui = True
+                        st.session_state.pin_click_test_confirm_popup_sync_pending = True
+                        st.info("已自动开启“置顶点击测试弹窗（即时）”。")
+                    result = st.session_state.assistant.execute_manual_voice_text(
+                        typed_cmd,
+                        source="pin_click_test_typing_trigger",
+                    )
+                    receipt = {}
+                    ops = getattr(st.session_state.assistant, "operations", None)
+                    if ops is not None and hasattr(ops, "get_last_action_receipt"):
+                        try:
+                            receipt = ops.get_last_action_receipt() or {}
+                        except Exception:
+                            receipt = {}
+                    if isinstance(receipt, dict) and receipt:
+                        result["action_receipt"] = receipt
+                    st.session_state.pin_click_test_typing_result = result
+
+        pin_typing_result = st.session_state.get("pin_click_test_typing_result")
+        if isinstance(pin_typing_result, dict):
+            receipt = pin_typing_result.get("action_receipt") if isinstance(pin_typing_result.get("action_receipt"), dict) else {}
+            receipt_reason = receipt.get("reason") if isinstance(receipt, dict) else ""
+            page_prepare = pin_typing_result.get("page_prepare") if isinstance(pin_typing_result.get("page_prepare"), dict) else {}
+            page_prepare_reason = str(page_prepare.get("reason") or "")
+            page_prepare_type = str(page_prepare.get("page_type") or "")
+            page_prepare_url = str(page_prepare.get("url") or "")
+            if pin_typing_result.get("ok"):
+                if receipt_reason:
+                    st.success(f"置顶测试触发成功：{pin_typing_result.get('command')} | receipt={receipt_reason}")
+                else:
+                    st.success(f"置顶测试触发成功：{pin_typing_result.get('command')}")
+            else:
+                st.warning(
+                    f"置顶测试触发结果：ok={pin_typing_result.get('ok')} "
+                    f"error={pin_typing_result.get('error')} "
+                    f"command={pin_typing_result.get('command')} "
+                    f"receipt={receipt_reason or '-'}"
+                )
+                if page_prepare_reason:
+                    st.caption(
+                        f"页面准备：reason={page_prepare_reason} "
+                        f"page_type={page_prepare_type or '-'} "
+                        f"url={page_prepare_url or '-'}"
+                    )
+
         if st.session_state.assistant.is_running:
             if st.button("停止监听", use_container_width=True):
                 st.session_state.assistant.stop()
@@ -2643,6 +2781,10 @@ with st.sidebar:
                 st.session_state.manual_voice_cmd_result = result
             cmd_result = st.session_state.get("manual_voice_cmd_result")
             if isinstance(cmd_result, dict):
+                page_prepare = cmd_result.get("page_prepare") if isinstance(cmd_result.get("page_prepare"), dict) else {}
+                page_prepare_reason = str(page_prepare.get("reason") or "")
+                page_prepare_type = str(page_prepare.get("page_type") or "")
+                page_prepare_url = str(page_prepare.get("url") or "")
                 if cmd_result.get("ok"):
                     st.success(f"链路执行成功：{cmd_result.get('command')}")
                 else:
@@ -2651,6 +2793,12 @@ with st.sidebar:
                         f"error={cmd_result.get('error')} "
                         f"command={cmd_result.get('command')}"
                     )
+                    if page_prepare_reason:
+                        st.caption(
+                            f"页面准备：reason={page_prepare_reason} "
+                            f"page_type={page_prepare_type or '-'} "
+                            f"url={page_prepare_url or '-'}"
+                        )
 
         if st.button("♻️ 强制重载系统", use_container_width=True, help="如果修改了代码或遇到异常，点击此按钮重置系统"):
             _reload_runtime_settings()

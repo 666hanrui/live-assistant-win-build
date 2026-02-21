@@ -52,6 +52,18 @@ class OperationsAgent:
         self._human_post_max = max(self._human_post_min, float(getattr(settings, "HUMAN_LIKE_ACTION_POST_DELAY_MAX_SECONDS", 0.16) or 0.16))
         self._human_click_jitter = max(0.0, float(getattr(settings, "HUMAN_LIKE_CLICK_JITTER_PX", 1.8) or 1.8))
         self._ocr_physical_click_enabled = bool(getattr(settings, "OCR_VISION_FORCE_PHYSICAL_CLICK", True))
+        self._viewport_screen_use_border_comp = bool(
+            getattr(settings, "OCR_VIEWPORT_TO_SCREEN_USE_BORDER_COMPENSATION", False)
+        )
+        self._viewport_screen_scale = max(0.5, min(3.0, float(getattr(settings, "OCR_VIEWPORT_TO_SCREEN_SCALE", 1.0) or 1.0)))
+        self._viewport_screen_offset_x = float(getattr(settings, "OCR_VIEWPORT_TO_SCREEN_OFFSET_X", 0.0) or 0.0)
+        self._viewport_screen_offset_y = float(getattr(settings, "OCR_VIEWPORT_TO_SCREEN_OFFSET_Y", 0.0) or 0.0)
+        self._screen_ocr_mac_retina_half_scale_fallback = bool(
+            getattr(settings, "SCREEN_OCR_MAC_RETINA_HALF_SCALE_FALLBACK", True)
+        )
+        self._screen_ocr_mac_retina_half_scale_ratio = max(
+            0.35, min(0.85, float(getattr(settings, "SCREEN_OCR_MAC_RETINA_HALF_SCALE_RATIO", 0.5) or 0.5))
+        )
         self._ocr_retry_wait_seconds = max(5.0, float(getattr(settings, "OCR_ACTION_RETRY_WAIT_SECONDS", 30.0) or 30.0))
         self._ocr_retry_poll_seconds = max(0.2, float(getattr(settings, "OCR_ACTION_RETRY_POLL_SECONDS", 0.65) or 0.65))
         self._ocr_reaction_llm_enabled = bool(getattr(settings, "OCR_ACTION_REACTION_LLM_ENABLED", True))
@@ -138,7 +150,7 @@ class OperationsAgent:
         self._nav_max_llm_calls = max(1, int(getattr(settings, "OPS_LLM_NAVIGATION_MAX_LLM_CALLS", 3) or 3))
         self._nav_min_interval = max(0.2, float(getattr(settings, "OPS_LLM_NAVIGATION_MIN_INTERVAL_SECONDS", 0.9) or 0.9))
         self._nav_scroll_cooldown = max(0.05, float(getattr(settings, "OPS_LLM_NAVIGATION_SCROLL_COOLDOWN_SECONDS", 0.32) or 0.32))
-        self._nav_scroll_pixels = max(180, int(getattr(settings, "OPS_LLM_NAVIGATION_SCROLL_PIXELS", 520) or 520))
+        self._nav_scroll_pixels = max(80, int(getattr(settings, "OPS_LLM_NAVIGATION_SCROLL_PIXELS", 180) or 180))
         self._nav_last_llm_at = 0.0
         self._last_nav_trace = {}
         self._run_js_timeout_seconds = max(
@@ -1040,6 +1052,84 @@ class OperationsAgent:
         ]
         return any(k in n for k in noise_terms)
 
+    def _is_browser_chrome_noise_text(self, text):
+        """
+        过滤浏览器地址栏/系统路径等噪声文本，避免把 URL 当作“置顶/取消置顶”按钮。
+        """
+        t = str(text or "").strip()
+        if not t:
+            return False
+        low = t.lower()
+        markers = [
+            "http://",
+            "https://",
+            "file://",
+            "localhost",
+            "127.0.0.1",
+            "/users/",
+            "\\users\\",
+            "desktop/",
+            "mock_tiktok_shop",
+            ".html?",
+            ".html",
+        ]
+        if any(m in low for m in markers):
+            return True
+        # 地址/路径文本通常分隔符密集，且不应被当作按钮。
+        slash_count = low.count("/") + low.count("\\")
+        return slash_count >= 3
+
+    def _is_command_like_text(self, text):
+        """
+        过滤口令/聊天中的“置顶xx号链接”文本，避免误当作商品行锚点。
+        """
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        n = self._norm_ocr_text(raw)
+        markers = [
+            "助播",
+            "助手",
+            "assistant",
+            "cohost",
+            "置顶",
+            "取消置顶",
+            "重新置顶",
+            "口令",
+            "命令",
+            "pinlink",
+            "unpinlink",
+            "pin",
+            "unpin",
+            "top",
+            "链接",
+        ]
+        hit = any(m in n for m in markers)
+        if not hit:
+            return False
+        # 只有同时带“动作词 + 数字索引”才判定为口令类噪声。
+        has_idx = bool(re.search(r"([0-9]{1,3}|一|二|三|四|五|六|七|八|九|十)", raw))
+        return bool(has_idx)
+
+    def _match_pin_unpin_target_text(self, text, action):
+        """
+        pin/unpin 目标词匹配：英文使用词边界，避免 desktop/top 误命中。
+        """
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        if self._is_streamlit_panel_noise_text(raw) or self._is_browser_chrome_noise_text(raw):
+            return False
+        low = raw.lower()
+        norm = self._norm_ocr_text(raw)
+        if action == "unpin_product":
+            if any(k in norm for k in ["取消置顶", "取消顶置", "撤销置顶", "去掉置顶", "下掉置顶"]):
+                return True
+            return bool(re.search(r"(?<![a-z])(unpin|pinned)(?![a-z])", low))
+        if any(k in norm for k in ["置顶", "顶置"]):
+            return True
+        return bool(re.search(r"(?<![a-z])(pin|top)(?![a-z])", low))
+
     def _build_ocr_click_candidates(self, rect, ocr, fallback_center=None):
         """
         基于 OCR 目标框生成多个候选点击点，降低一次点击偏移导致失败的概率。
@@ -1135,6 +1225,392 @@ class OperationsAgent:
                 best = rect
         return dict(best or {}) if isinstance(best, dict) else None
 
+    def _extract_link_index_from_line(self, text, rect=None, product_panel_rect=None):
+        raw = str(text or "").strip()
+        if not raw:
+            return 0
+        if self._is_command_like_text(raw):
+            return 0
+
+        strict_patterns = [
+            r"(?:序号|第)\s*([0-9]{1,3})(?![0-9])",
+            r"([0-9]{1,3})\s*号\s*(?:链接|连接|商品|橱窗)",
+            r"(?:link|item|product)\s*(?:no\.?|number)?\s*#?\s*([0-9]{1,3})(?![0-9])",
+            r"#\s*([0-9]{1,3})(?![0-9])",
+        ]
+        for pat in strict_patterns:
+            m = re.search(pat, raw, re.IGNORECASE)
+            if not m:
+                continue
+            try:
+                idx = int(m.group(1))
+            except Exception:
+                idx = 0
+            if 1 <= idx <= 300:
+                return idx
+
+        # 仅在商品面板左侧小数字 badge 场景，放行纯数字文本。
+        m_num = re.fullmatch(r"\s*([0-9]{1,3})\s*", raw)
+        if not m_num:
+            return 0
+        try:
+            idx = int(m_num.group(1))
+        except Exception:
+            idx = 0
+        if idx < 1 or idx > 300:
+            return 0
+        if not (isinstance(rect, dict) and isinstance(product_panel_rect, dict)):
+            return 0
+        try:
+            x1 = float(rect.get("x1") or 0.0)
+            x2 = float(rect.get("x2") or 0.0)
+            y1 = float(rect.get("y1") or 0.0)
+            y2 = float(rect.get("y2") or 0.0)
+            w = max(0.0, x2 - x1)
+            h = max(0.0, y2 - y1)
+            px1 = float(product_panel_rect.get("x1") or 0.0)
+            px2 = float(product_panel_rect.get("x2") or 0.0)
+            pw = max(0.0, px2 - px1)
+            if pw <= 2.0:
+                return 0
+            center_x = (x1 + x2) / 2.0
+            in_left_band = center_x <= (px1 + pw * 0.33)
+            looks_badge = w <= max(84.0, pw * 0.18) and h <= 68.0
+            if in_left_band and looks_badge:
+                return idx
+        except Exception:
+            return 0
+        return 0
+
+    def _collect_visible_link_index_hits(self, ocr):
+        lines = list((ocr or {}).get("lines") or [])
+        if not lines:
+            return []
+        product_panel = self._pick_primary_block_rect(ocr or {}, "product_panel") or {}
+        main_panel = self._pick_primary_block_rect(ocr or {}, "main_content") or {}
+        image_w = float((ocr or {}).get("image_w") or 0.0)
+        image_h = float((ocr or {}).get("image_h") or 0.0)
+
+        def _in_rect(line_rect, panel_rect):
+            if not (isinstance(line_rect, dict) and isinstance(panel_rect, dict) and panel_rect):
+                return False
+            try:
+                lx1 = float(line_rect.get("x1") or 0.0)
+                ly1 = float(line_rect.get("y1") or 0.0)
+                lx2 = float(line_rect.get("x2") or 0.0)
+                ly2 = float(line_rect.get("y2") or 0.0)
+                px1 = float(panel_rect.get("x1") or 0.0)
+                py1 = float(panel_rect.get("y1") or 0.0)
+                px2 = float(panel_rect.get("x2") or 0.0)
+                py2 = float(panel_rect.get("y2") or 0.0)
+                ix1 = max(lx1, px1)
+                iy1 = max(ly1, py1)
+                ix2 = min(lx2, px2)
+                iy2 = min(ly2, py2)
+                return (ix2 - ix1) > 2.0 and (iy2 - iy1) > 2.0
+            except Exception:
+                return False
+
+        hits = []
+        for ln in lines:
+            if not isinstance(ln, dict):
+                continue
+            raw = str((ln or {}).get("text") or "").strip()
+            rect = (ln or {}).get("rect") or {}
+            if not raw or (not isinstance(rect, dict)):
+                continue
+            if self._is_streamlit_panel_noise_text(raw) or self._is_browser_chrome_noise_text(raw):
+                continue
+            if self._is_command_like_text(raw):
+                continue
+
+            idx = self._extract_link_index_from_line(raw, rect=rect, product_panel_rect=product_panel)
+            if not idx:
+                m_num = re.fullmatch(r"\s*([0-9]{1,3})\s*", raw)
+                if m_num:
+                    try:
+                        idx_try = int(m_num.group(1))
+                    except Exception:
+                        idx_try = 0
+                    if 1 <= idx_try <= 300:
+                        center_try = self._extract_rect_center(rect)
+                        if center_try:
+                            try:
+                                x1 = float(rect.get("x1") or 0.0)
+                                x2 = float(rect.get("x2") or 0.0)
+                                y1 = float(rect.get("y1") or 0.0)
+                                y2 = float(rect.get("y2") or 0.0)
+                                w = max(0.0, x2 - x1)
+                                h = max(0.0, y2 - y1)
+                            except Exception:
+                                w = h = 0.0
+                            in_product = _in_rect(rect, product_panel) if product_panel else False
+                            in_main = _in_rect(rect, main_panel) if main_panel else True
+                            left_cap = image_w * 0.46 if image_w > 2 else 1200.0
+                            top_cap = image_h * 0.15 if image_h > 2 else 0.0
+                            bottom_cap = image_h * 0.93 if image_h > 2 else 99999.0
+                            likely_badge = (
+                                center_try[0] <= left_cap
+                                and top_cap <= center_try[1] <= bottom_cap
+                                and w <= max(110.0, image_w * 0.08 if image_w > 2 else 110.0)
+                                and h <= max(84.0, image_h * 0.08 if image_h > 2 else 84.0)
+                            )
+                            if likely_badge and (in_product or in_main):
+                                idx = idx_try
+            if not idx:
+                continue
+            center = self._extract_rect_center(rect)
+            if not center:
+                continue
+            try:
+                cx = float(center[0])
+                cy = float(center[1])
+            except Exception:
+                continue
+            # 仅保留左侧商品列表区域，避免右侧“活动日志 2号链接”污染可见序号带。
+            if image_w > 2 and (cx < image_w * 0.04 or cx > image_w * 0.68):
+                continue
+            if image_h > 2 and (cy < image_h * 0.10 or cy > image_h * 0.94):
+                continue
+            if product_panel:
+                try:
+                    px1 = float(product_panel.get("x1") or 0.0)
+                    px2 = float(product_panel.get("x2") or 0.0)
+                    pw = max(0.0, px2 - px1)
+                    if pw > 6:
+                        # 序号带与商品行文本都在左侧，右半区多为操作按钮和其他面板文本。
+                        right_gate = px1 + pw * 0.82
+                        if cx > right_gate:
+                            continue
+                except Exception:
+                    pass
+            hits.append(
+                {
+                    "idx": int(idx),
+                    "cx": float(cx),
+                    "cy": float(cy),
+                    "text": raw[:64],
+                    "rect": dict(rect or {}),
+                    "in_product": bool(_in_rect(rect, product_panel)) if product_panel else False,
+                    "in_main": bool(_in_rect(rect, main_panel)) if main_panel else False,
+                }
+            )
+        if not hits:
+            return []
+        hits.sort(key=lambda x: (float(x.get("cy") or 0.0), int(x.get("idx") or 0)))
+        return hits
+
+    def _infer_visible_link_index_band(self, ocr):
+        hits = self._collect_visible_link_index_hits(ocr or {})
+        if not hits:
+            return {}
+        # 进一步按“最左序号列”聚类，去除偶发落入中右区域的误识别文本。
+        image_w = float((ocr or {}).get("image_w") or 0.0)
+        try:
+            min_x = min(float(x.get("cx") or 0.0) for x in hits)
+        except Exception:
+            min_x = 0.0
+        left_span = max(180.0, image_w * 0.13 if image_w > 2 else 220.0)
+        left_cluster = [x for x in hits if float(x.get("cx") or 0.0) <= (min_x + left_span)]
+        if len(left_cluster) >= 2:
+            hits = left_cluster
+        values = [int(x["idx"]) for x in hits]
+        return {
+            "min": int(min(values)),
+            "max": int(max(values)),
+            "top": int(hits[0]["idx"]),
+            "bottom": int(hits[-1]["idx"]),
+            "count": int(len(hits)),
+            "sample": [f"{int(x['idx'])}:{x['text']}" for x in hits[:4]],
+        }
+
+    def _extract_pinned_link_index_hint(self, ocr):
+        """
+        从 OCR 文本中提取“当前已置顶序号”提示，用于可见序号带缺失时的滚动方向兜底。
+        """
+        text_blob = str((ocr or {}).get("text") or "")
+        if text_blob:
+            m = re.search(r"(?:已置顶|当前置顶|置顶中)\s*(?:第)?\s*([0-9]{1,3})\s*(?:号|#)?", text_blob, re.IGNORECASE)
+            if m:
+                try:
+                    idx = int(m.group(1))
+                except Exception:
+                    idx = 0
+                if 1 <= idx <= 300:
+                    return idx
+            m2 = re.search(
+                r"(?:currently|now)?\s*(?:pinned|pinning)\s*(?:link|item|product)?\s*#?\s*([0-9]{1,3})",
+                text_blob,
+                re.IGNORECASE,
+            )
+            if m2:
+                try:
+                    idx = int(m2.group(1))
+                except Exception:
+                    idx = 0
+                if 1 <= idx <= 300:
+                    return idx
+        for ln in list((ocr or {}).get("lines") or [])[:40]:
+            if not isinstance(ln, dict):
+                continue
+            raw = str((ln or {}).get("text") or "").strip()
+            if (not raw) or self._is_streamlit_panel_noise_text(raw):
+                continue
+            m = re.search(r"(?:已置顶|当前置顶|置顶中)\s*(?:第)?\s*([0-9]{1,3})\s*(?:号|#)?", raw, re.IGNORECASE)
+            if m:
+                try:
+                    idx = int(m.group(1))
+                except Exception:
+                    idx = 0
+                if 1 <= idx <= 300:
+                    return idx
+        return 0
+
+    def _build_anchor_from_visible_index_hits(self, ocr, target_idx):
+        """
+        目标序号已经进入可见区间但 OCR 行锚点缺失时，
+        基于左右邻近序号插值出一条“行锚点”供固定行点击链路使用。
+        """
+        idx = self._normalize_link_index(target_idx)
+        if not idx:
+            return None
+        hits = self._collect_visible_link_index_hits(ocr or {})
+        if not hits:
+            return None
+
+        exact_hits = [h for h in hits if int(h.get("idx") or 0) == int(idx)]
+        if exact_hits:
+            hit = exact_hits[0]
+            rect = dict(hit.get("rect") or {})
+            if isinstance(rect, dict) and rect:
+                return {
+                    "text": str(idx),
+                    "rect": rect,
+                    "source": "visible_index_exact",
+                }
+
+        lower_hits = sorted(
+            [h for h in hits if int(h.get("idx") or 0) < int(idx)],
+            key=lambda h: int(h.get("idx") or 0),
+            reverse=True,
+        )
+        upper_hits = sorted(
+            [h for h in hits if int(h.get("idx") or 0) > int(idx)],
+            key=lambda h: int(h.get("idx") or 0),
+        )
+        if (not lower_hits) or (not upper_hits):
+            return None
+        lower = lower_hits[0]
+        upper = upper_hits[0]
+        lo = int(lower.get("idx") or 0)
+        hi = int(upper.get("idx") or 0)
+        if lo <= 0 or hi <= 0 or hi <= lo:
+            return None
+        if (hi - lo) > 4:
+            return None
+        try:
+            ratio = (float(idx) - float(lo)) / max(1.0, float(hi - lo))
+            lx = float(lower.get("cx") or 0.0)
+            ly = float(lower.get("cy") or 0.0)
+            ux = float(upper.get("cx") or 0.0)
+            uy = float(upper.get("cy") or 0.0)
+            cx = lx + (ux - lx) * ratio
+            cy = ly + (uy - ly) * ratio
+
+            lr = dict(lower.get("rect") or {})
+            ur = dict(upper.get("rect") or {})
+            lw = max(12.0, float(lr.get("x2") or 0.0) - float(lr.get("x1") or 0.0))
+            lh = max(18.0, float(lr.get("y2") or 0.0) - float(lr.get("y1") or 0.0))
+            uw = max(12.0, float(ur.get("x2") or 0.0) - float(ur.get("x1") or 0.0))
+            uh = max(18.0, float(ur.get("y2") or 0.0) - float(ur.get("y1") or 0.0))
+            rw = max(12.0, (lw + uw) / 2.0)
+            rh = max(18.0, (lh + uh) / 2.0)
+            rect = {
+                "x1": float(cx - rw / 2.0),
+                "y1": float(cy - rh / 2.0),
+                "x2": float(cx + rw / 2.0),
+                "y2": float(cy + rh / 2.0),
+            }
+            return {
+                "text": str(idx),
+                "rect": rect,
+                "source": "visible_index_interpolate",
+                "neighbors": {"lower": lo, "upper": hi},
+            }
+        except Exception:
+            return None
+
+    def _infer_pin_button_column_x(self, action, ocr, row_anchor=None):
+        if action not in {"pin_product", "unpin_product"}:
+            return None, ""
+        lines = list((ocr or {}).get("lines") or [])
+        if not lines:
+            return None, ""
+        product_panel = self._pick_primary_block_rect(ocr or {}, "product_panel") or {}
+        main_panel = self._pick_primary_block_rect(ocr or {}, "main_content") or {}
+
+        def _in_rect(line_rect, panel_rect):
+            if not (isinstance(line_rect, dict) and isinstance(panel_rect, dict) and panel_rect):
+                return False
+            try:
+                lx1 = float(line_rect.get("x1") or 0.0)
+                ly1 = float(line_rect.get("y1") or 0.0)
+                lx2 = float(line_rect.get("x2") or 0.0)
+                ly2 = float(line_rect.get("y2") or 0.0)
+                px1 = float(panel_rect.get("x1") or 0.0)
+                py1 = float(panel_rect.get("y1") or 0.0)
+                px2 = float(panel_rect.get("x2") or 0.0)
+                py2 = float(panel_rect.get("y2") or 0.0)
+                ix1 = max(lx1, px1)
+                iy1 = max(ly1, py1)
+                ix2 = min(lx2, px2)
+                iy2 = min(ly2, py2)
+                return (ix2 - ix1) > 2.0 and (iy2 - iy1) > 2.0
+            except Exception:
+                return False
+
+        row_center = self._extract_rect_center((row_anchor or {}).get("rect") or {}) if isinstance(row_anchor, dict) else None
+        row_h = 0.0
+        if isinstance(row_anchor, dict):
+            try:
+                r = (row_anchor or {}).get("rect") or {}
+                row_h = max(0.0, float((r or {}).get("y2") or 0.0) - float((r or {}).get("y1") or 0.0))
+            except Exception:
+                row_h = 0.0
+        near_row = []
+        all_x = []
+        for ln in lines:
+            if not isinstance(ln, dict):
+                continue
+            raw = str((ln or {}).get("text") or "").strip()
+            rect = (ln or {}).get("rect") or {}
+            if (not raw) or (not isinstance(rect, dict)):
+                continue
+            if self._is_streamlit_panel_noise_text(raw) or self._is_browser_chrome_noise_text(raw) or self._is_command_like_text(raw):
+                continue
+            if not self._match_pin_unpin_target_text(raw, action):
+                continue
+            if self._is_noisy_non_button_text(raw):
+                continue
+            if product_panel and (not _in_rect(rect, product_panel)):
+                if main_panel and (not _in_rect(rect, main_panel)):
+                    continue
+            center = self._extract_rect_center(rect)
+            if not center:
+                continue
+            all_x.append(float(center[0]))
+            if row_center:
+                y_gate = max(36.0, row_h * 2.2)
+                if abs(float(center[1]) - float(row_center[1])) <= y_gate:
+                    near_row.append(float(center[0]))
+
+        sample = near_row if near_row else all_x
+        if not sample:
+            return None, ""
+        sample.sort()
+        mid = sample[len(sample) // 2]
+        return float(mid), ("button_column_near_row" if near_row else "button_column_global")
+
     def _build_fixed_row_click_candidate(self, action, row_anchor, ocr, link_index=None):
         if (not self._ocr_pin_fixed_row_click_enabled) or action not in {"pin_product", "unpin_product"}:
             return None
@@ -1156,9 +1632,13 @@ class OperationsAgent:
         x = None
         x_source = "unknown"
         panel_rect = self._pick_primary_block_rect(ocr, "product_panel")
+        btn_x, btn_source = self._infer_pin_button_column_x(action, ocr, row_anchor=row_anchor)
+        if btn_x is not None:
+            x = float(btn_x)
+            x_source = str(btn_source or "button_column")
 
         ratio = float(self._ocr_pin_fixed_row_click_x_ratio or 0.0)
-        if img_w > 2 and 0.05 <= ratio <= 0.95:
+        if (x is None) and img_w > 2 and 0.05 <= ratio <= 0.95:
             x = img_w * ratio
             x_source = "x_ratio"
 
@@ -1240,7 +1720,7 @@ class OperationsAgent:
         const ttl = Math.max(800, Math.min(12000, Number(arguments[2] || 1800)));
         try {
           const old = document.getElementById('__ocr_click_test_toast__');
-          if (old && old.parentNode) old.parentNode.removeChild(old);
+          if (old && old.remove) old.remove();
           const palette = {
             info: { bg: 'rgba(17,24,39,0.92)', fg: '#f8fafc' },
             success: { bg: 'rgba(21,128,61,0.95)', fg: '#f0fdf4' },
@@ -1270,7 +1750,7 @@ class OperationsAgent:
             box.style.transform = 'translateY(6px)';
           }, Math.max(300, ttl - 220));
           setTimeout(() => {
-            if (box && box.parentNode) box.parentNode.removeChild(box);
+            if (box && box.remove) box.remove();
           }, ttl);
           return {ok:true};
         } catch (e) {
@@ -1416,7 +1896,8 @@ class OperationsAgent:
           borderX: Number(borderX || 0),
           borderY: Number(borderY || 0),
           vvLeft: Number(vv.offsetLeft || 0),
-          vvTop: Number(vv.offsetTop || 0)
+          vvTop: Number(vv.offsetTop || 0),
+          dpr: Number(window.devicePixelRatio || 1)
         };
         """
         try:
@@ -1426,8 +1907,17 @@ class OperationsAgent:
         if not isinstance(info, dict):
             return None
         try:
-            abs_x = float(info.get("screenX") or 0) + float(info.get("borderX") or 0) + float(info.get("vvLeft") or 0) + float(vx)
-            abs_y = float(info.get("screenY") or 0) + float(info.get("borderY") or 0) + float(info.get("vvTop") or 0) + float(vy)
+            sx = float(info.get("screenX") or 0.0)
+            sy = float(info.get("screenY") or 0.0)
+            vv_left = float(info.get("vvLeft") or 0.0)
+            vv_top = float(info.get("vvTop") or 0.0)
+            if self._viewport_screen_use_border_comp:
+                sx += float(info.get("borderX") or 0.0)
+                sy += float(info.get("borderY") or 0.0)
+            base_x = sx + vv_left + float(vx)
+            base_y = sy + vv_top + float(vy)
+            abs_x = base_x * float(self._viewport_screen_scale) + float(self._viewport_screen_offset_x)
+            abs_y = base_y * float(self._viewport_screen_scale) + float(self._viewport_screen_offset_y)
             return int(round(abs_x)), int(round(abs_y))
         except Exception:
             return None
@@ -1451,14 +1941,34 @@ class OperationsAgent:
             sw = float(getattr(size, "width", 0) or 0)
             sh = float(getattr(size, "height", 0) or 0)
             meta["mouse_screen"] = {"w": int(sw), "h": int(sh)}
-            if sw <= 1 or sh <= 1:
-                return int(round(mx)), int(round(my)), meta
 
             cap_w = float((ocr or {}).get("screen_width") or (ocr or {}).get("image_w") or 0)
             cap_h = float((ocr or {}).get("screen_height") or (ocr or {}).get("image_h") or 0)
             left = float((ocr or {}).get("screen_left") or 0)
             top = float((ocr or {}).get("screen_top") or 0)
             meta["capture_rect"] = {"left": int(left), "top": int(top), "w": int(cap_w), "h": int(cap_h)}
+
+            browser_dpr = 1.0
+            inner_w = 0.0
+            inner_h = 0.0
+            try:
+                js = """
+                return {
+                  dpr: Number(window.devicePixelRatio || 1),
+                  innerW: Number(window.innerWidth || 0),
+                  innerH: Number(window.innerHeight || 0)
+                };
+                """
+                _, browser_info = self._run_js_in_contexts(js)
+                if isinstance(browser_info, dict):
+                    browser_dpr = max(1.0, float(browser_info.get("dpr") or 1.0))
+                    inner_w = max(0.0, float(browser_info.get("innerW") or 0.0))
+                    inner_h = max(0.0, float(browser_info.get("innerH") or 0.0))
+            except Exception:
+                pass
+            meta["browser"] = {"dpr": round(float(browser_dpr), 3), "inner_w": int(inner_w), "inner_h": int(inner_h)}
+
+            scaled_applied = False
 
             need_scale = cap_w > sw * 1.15 or cap_h > sh * 1.15
             if need_scale and cap_w > 1 and cap_h > 1:
@@ -1471,6 +1981,57 @@ class OperationsAgent:
                 my = (top * sy) + (local_y * sy)
                 meta["scaled"] = True
                 meta["scale"] = {"sx": round(sx, 4), "sy": round(sy, 4)}
+                scaled_applied = True
+            if (
+                (not scaled_applied)
+                and self._screen_ocr_mac_retina_half_scale_fallback
+                and platform.system().lower() == "darwin"
+                and browser_dpr >= 1.4
+                and cap_w > 1
+                and cap_h > 1
+            ):
+                # 优先使用浏览器 DPR 做映射，避免 pyautogui.size 在受限环境返回异常导致坐标不缩放。
+                ratio = 1.0 / float(browser_dpr)
+                local_x = mx - left
+                local_y = my - top
+                mx = left + (local_x * ratio)
+                my = top + (local_y * ratio)
+                meta["scaled"] = True
+                meta["scale"] = {"sx": round(ratio, 4), "sy": round(ratio, 4), "fallback": "browser_dpr"}
+                scaled_applied = True
+            if (
+                (not scaled_applied)
+                and inner_w > 200
+                and inner_h > 120
+                and cap_w > (inner_w * 1.15)
+                and cap_h > (inner_h * 1.15)
+            ):
+                # 兜底：直接按浏览器可视区与 OCR 画布比例缩放，规避 DPR 获取异常。
+                sx = inner_w / cap_w
+                sy = inner_h / cap_h
+                local_x = mx - left
+                local_y = my - top
+                mx = left + (local_x * sx)
+                my = top + (local_y * sy)
+                meta["scaled"] = True
+                meta["scale"] = {"sx": round(sx, 4), "sy": round(sy, 4), "fallback": "inner_ratio"}
+                scaled_applied = True
+            elif (
+                (not scaled_applied)
+                and self._screen_ocr_mac_retina_half_scale_fallback
+                and platform.system().lower() == "darwin"
+                and cap_w >= 2200
+                and cap_h >= 1200
+            ):
+                # 某些 macOS Retina 环境中，采集分辨率与鼠标系同时返回“物理像素”，
+                # 但 pyautogui 点击实际按“点坐标”解释，导致点击整体偏右下。
+                ratio = float(self._screen_ocr_mac_retina_half_scale_ratio or 0.5)
+                local_x = mx - left
+                local_y = my - top
+                mx = left + (local_x * ratio)
+                my = top + (local_y * ratio)
+                meta["scaled"] = True
+                meta["scale"] = {"sx": round(ratio, 4), "sy": round(ratio, 4), "fallback": "mac_retina_half"}
 
             # 最终边界保护：避免落到系统自动夹紧后的右下角。
             cx = max(1.0, min(sw - 2.0, mx))
@@ -1524,7 +2085,8 @@ class OperationsAgent:
                 logger.info(
                     f"screen_ocr点击映射: in=({int(vx)},{int(vy)}) -> out=({int(tx)},{int(ty)}), "
                     f"scaled={bool(map_meta.get('scaled'))}, clamped={bool(map_meta.get('clamped'))}, "
-                    f"capture={map_meta.get('capture_rect')}, screen={map_meta.get('mouse_screen')}"
+                    f"scale={map_meta.get('scale')}, capture={map_meta.get('capture_rect')}, "
+                    f"screen={map_meta.get('mouse_screen')}, browser={map_meta.get('browser')}"
                 )
                 self._human_action_delay("screen_click_pre")
                 human_click(int(tx), int(ty), jitter_px=self._human_click_jitter)
@@ -1728,9 +2290,52 @@ class OperationsAgent:
             })
         if not norm_lines:
             return None, None
+        product_panel_rect = self._pick_primary_block_rect(ocr or {}, "product_panel") or {}
 
         def _has_any(s, keys):
             return any(k in s for k in keys)
+        def _is_row_anchor_text(raw_text, idx_value, rect=None):
+            try:
+                idx_num = int(idx_value or 0)
+            except Exception:
+                idx_num = 0
+            if idx_num <= 0:
+                return False
+            raw = str(raw_text or "").strip()
+            if not raw:
+                return False
+            if self._is_command_like_text(raw):
+                return False
+            hit_idx = self._extract_link_index_from_line(
+                raw,
+                rect=rect,
+                product_panel_rect=product_panel_rect,
+            )
+            if int(hit_idx or 0) == idx_num:
+                return True
+            n = self._norm_ocr_text(raw)
+            idx_s = str(idx_num)
+            exact_forms = {
+                idx_s,
+                f"#{idx_s}",
+                f"no{idx_s}",
+                f"number{idx_s}",
+                f"第{idx_s}",
+                f"序号{idx_s}",
+                f"{idx_s}号",
+                f"{idx_s}号链接",
+                f"{idx_s}号商品",
+                f"link{idx_s}",
+                f"item{idx_s}",
+                f"product{idx_s}",
+            }
+            if n in exact_forms:
+                return True
+            if re.search(rf"(?:序号|第|link|item|product|#)\s*{idx_s}(?!\d)", raw, re.IGNORECASE):
+                return True
+            if re.search(rf"(?<!\d){idx_s}(?!\d)\s*(?:号|#)(?!\s*(?:链接|连接|商品|橱窗))", raw, re.IGNORECASE):
+                return True
+            return False
 
         preferred_norm = self._norm_ocr_text(preferred_text)
         preferred_role = str(preferred_role or "").strip().lower()
@@ -1810,32 +2415,57 @@ class OperationsAgent:
             return None, None
 
         if action in {"pin_product", "unpin_product"}:
-            target_words = (
-                ["取消置顶", "unpin", "pinned"] if action == "unpin_product"
-                else ["置顶", "pin", "top"]
-            )
             row_anchor = None
             anchor_pool = norm_lines
             if role_gate:
                 gated = [ln for ln in norm_lines if ln.get(role_flag)]
                 if gated:
                     anchor_pool = gated
+            actionish_anchor_pool = [
+                ln for ln in anchor_pool
+                if (ln.get("in_actionish") or ln.get("in_strict_action"))
+                and (not self._is_browser_chrome_noise_text(ln.get("text") or ""))
+            ]
+            if actionish_anchor_pool:
+                anchor_pool = actionish_anchor_pool
             idx = self._normalize_link_index(link_index)
             if idx:
                 anchor_keys = [
                     f"序号{idx}", f"{idx}号链接", f"第{idx}", f"link{idx}", f"item{idx}", f"product{idx}",
                 ]
                 for ln in anchor_pool:
+                    if self._is_command_like_text(ln.get("text") or ""):
+                        continue
+                    ext_idx = self._extract_link_index_from_line(
+                        ln.get("text") or "",
+                        rect=ln.get("rect") or {},
+                        product_panel_rect=product_panel_rect,
+                    )
+                    if int(ext_idx or 0) == int(idx):
+                        row_anchor = ln
+                        break
+                for ln in anchor_pool:
+                    if row_anchor is not None:
+                        break
+                    if self._is_command_like_text(ln.get("text") or ""):
+                        continue
                     if _has_any(ln["norm"], [self._norm_ocr_text(k) for k in anchor_keys]):
                         row_anchor = ln
                         break
                 if not row_anchor:
-                    row_pat = re.compile(
-                        rf"(序号|第|link|item|product|#)?\s*{idx}(?:号|no|number)?",
-                        re.IGNORECASE,
-                    )
                     for ln in anchor_pool:
-                        if row_pat.search(ln["text"]):
+                        if self._is_command_like_text(ln.get("text") or ""):
+                            continue
+                        if _is_row_anchor_text(ln.get("text") or "", idx, rect=ln.get("rect") or {}):
+                            row_anchor = ln
+                            break
+                if not row_anchor:
+                    for ln in norm_lines:
+                        if self._is_browser_chrome_noise_text(ln.get("text") or ""):
+                            continue
+                        if self._is_command_like_text(ln.get("text") or ""):
+                            continue
+                        if _is_row_anchor_text(ln.get("text") or "", idx, rect=ln.get("rect") or {}):
                             row_anchor = ln
                             break
                 if row_anchor is None:
@@ -1849,8 +2479,14 @@ class OperationsAgent:
                     continue
                 if role_gate and (not ln.get(role_flag)):
                     continue
-                s = ln["norm"]
-                if not _has_any(s, [self._norm_ocr_text(k) for k in target_words]):
+                raw_text = ln.get("text") or ""
+                if not self._match_pin_unpin_target_text(raw_text, action):
+                    continue
+                if self._is_noisy_non_button_text(raw_text):
+                    continue
+                if strict_action_blocks and (not ln.get("in_strict_action")):
+                    continue
+                if (not strict_action_blocks) and (not ln.get("in_actionish")):
                     continue
                 if row_anchor is not None:
                     dy = abs(ln["cy"] - row_anchor["cy"])
@@ -1860,7 +2496,7 @@ class OperationsAgent:
                     score = 10 + ln["cx"] * 0.01
                 if ln.get("in_actionish"):
                     score += 1.0
-                if preferred_norm and preferred_norm in s:
+                if preferred_norm and preferred_norm in ln["norm"]:
                     score += 6.0
                 candidates.append((score, ln))
             if candidates:
@@ -1940,7 +2576,8 @@ class OperationsAgent:
         if line:
             return line, anchor
         if action in {"pin_product", "unpin_product"} and self._normalize_link_index(link_index):
-            return None, None
+            # 固定行点击模式下，保留 row_anchor 供后续直接点行内固定坐标。
+            return None, anchor
         line = self._pick_ocr_target_from_action_candidates(
             action,
             ocr=ocr,
@@ -2069,117 +2706,90 @@ class OperationsAgent:
         blocks.sort(key=lambda x: x[0], reverse=True)
         return dict(blocks[0][1] or {})
 
-    def _scroll_operation_surface(self, direction="down", ocr=None, region_rect=None):
+    def _scroll_operation_surface(self, direction="down", ocr=None, region_rect=None, scroll_pixels=None):
         direction = str(direction or "down").strip().lower()
         if direction not in {"down", "up"}:
             return {"ok": False, "reason": "invalid_direction", "direction": direction}
 
-        delta = int(abs(self._nav_scroll_pixels))
+        delta_base = int(abs(scroll_pixels if scroll_pixels is not None else self._nav_scroll_pixels))
+        delta = max(40, delta_base)
         if direction == "up":
             delta = -delta
 
-        vx = vy = -1
-        if isinstance(region_rect, dict):
-            center = self._extract_rect_center(region_rect)
-            if center and (not self._is_screen_ocr_info_mode()):
-                vp = self._map_ocr_point_to_viewport(center[0], center[1], ocr or {})
-                if vp:
-                    vx, vy = int(vp[0]), int(vp[1])
-
-        script = """
-        const delta = Number(arguments[0] || 0);
-        const ax = Number(arguments[1] || -1);
-        const ay = Number(arguments[2] || -1);
-        const isVisible = (el) => {
-          if (!el) return false;
-          const r = el.getBoundingClientRect();
-          const s = window.getComputedStyle(el);
-          return r.width > 24 && r.height > 24 && s.display !== 'none' && s.visibility !== 'hidden';
-        };
-        const isScrollable = (el) => {
-          if (!el || !isVisible(el)) return false;
-          const st = window.getComputedStyle(el);
-          const oy = String(st.overflowY || '').toLowerCase();
-          const canScroll = (el.scrollHeight - el.clientHeight) > 24;
-          return canScroll && (oy.includes('auto') || oy.includes('scroll') || oy.includes('overlay'));
-        };
-        const nearestScrollable = (node) => {
-          let cur = node || null;
-          while (cur && cur !== document.body) {
-            if (isScrollable(cur)) return cur;
-            cur = cur.parentElement;
-          }
-          return null;
-        };
-
-        let anchor = null;
-        if (ax >= 0 && ay >= 0) {
-          try { anchor = document.elementFromPoint(ax, ay); } catch (e) {}
-        }
-        let scroller = nearestScrollable(anchor);
-        if (!scroller) {
-          const cands = Array.from(document.querySelectorAll('div,section,main,aside,ul,ol,table,tbody,[role="list"],[data-e2e*="product"],[class*="list"],[class*="panel"]'))
-            .filter(el => isScrollable(el));
-          let best = null;
-          let bestScore = -1e9;
-          for (const el of cands) {
-            const r = el.getBoundingClientRect();
-            const area = Math.max(1, r.width * r.height);
-            const centerY = (r.top + r.bottom) / 2;
-            const centerX = (r.left + r.right) / 2;
-            let score = Math.log(area);
-            score += Math.max(0, 1.2 - Math.abs(centerY - window.innerHeight * 0.56) / 420);
-            score += Math.max(0, 0.8 - Math.abs(centerX - window.innerWidth * 0.45) / 560);
-            if (score > bestScore) {
-              bestScore = score;
-              best = el;
-            }
-          }
-          scroller = best;
-        }
-        if (scroller) {
-          const before = Number(scroller.scrollTop || 0);
-          try { scroller.scrollBy({ top: delta, behavior: 'instant' }); } catch (e) { scroller.scrollTop = before + delta; }
-          const after = Number(scroller.scrollTop || 0);
-          const moved = after - before;
-          return {ok: Math.abs(moved) >= 1, source: 'container', moved: moved, tag: String(scroller.tagName || '')};
-        }
-        const beforeWin = Number(window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0);
-        try { window.scrollBy({ top: delta, behavior: 'instant' }); } catch (e) { window.scrollBy(0, delta); }
-        const afterWin = Number(window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0);
-        const movedWin = afterWin - beforeWin;
-        return {ok: Math.abs(movedWin) >= 1, source: 'window', moved: movedWin};
-        """
-
-        dom_fail = None
-        if (not self._is_screen_ocr_info_mode()) and self._dom_fallback_enabled():
-            for ctx_name, ctx in self._iter_contexts():
-                try:
-                    result = ctx.run_js(script, int(delta), int(vx), int(vy))
-                except Exception:
-                    continue
-                if isinstance(result, dict):
-                    payload = dict(result)
-                    payload["ctx"] = ctx_name
-                    payload["driver"] = "dom_scroll"
-                    payload["direction"] = direction
-                    payload["delta"] = int(delta)
-                    if bool(payload.get("ok")):
-                        return payload
-                    if dom_fail is None:
-                        dom_fail = payload
+        def _to_screen_anchor_from_ocr_point(ox, oy):
+            vp = self._map_ocr_point_to_viewport(float(ox), float(oy), ocr or {})
+            if not vp:
+                return None
+            if self._is_screen_ocr_info_mode():
+                sx, sy, _ = self._normalize_screen_click_point(vp[0], vp[1], ocr=ocr or {})
+                return int(sx), int(sy)
+            return self._viewport_to_screen_point(vp[0], vp[1])
 
         screen_anchor = None
+        anchor_source = ""
         if isinstance(region_rect, dict):
-            center = self._extract_rect_center(region_rect)
-            if center:
-                vp = self._map_ocr_point_to_viewport(center[0], center[1], ocr or {})
-                if vp:
-                    if self._is_screen_ocr_info_mode():
-                        sx, sy, _ = self._normalize_screen_click_point(vp[0], vp[1], ocr=ocr or {})
-                        screen_anchor = (int(sx), int(sy))
-                    else:
-                        screen_anchor = self._viewport_to_screen_point(vp[0], vp[1])
+            try:
+                rx1 = float(region_rect.get("x1") or 0.0)
+                ry1 = float(region_rect.get("y1") or 0.0)
+                rx2 = float(region_rect.get("x2") or 0.0)
+                ry2 = float(region_rect.get("y2") or 0.0)
+                rw = max(0.0, rx2 - rx1)
+                rh = max(0.0, ry2 - ry1)
+            except Exception:
+                rw = rh = 0.0
+                rx1 = ry1 = rx2 = ry2 = 0.0
+            if rw > 8 and rh > 8:
+                if rw >= 420 and rh >= 160:
+                    ox = rx1 + rw * 0.32
+                    oy = ry1 + rh * 0.72
+                    anchor_source = "nav_region_left_lower"
+                else:
+                    ox = rx1 + rw * 0.50
+                    oy = ry1 + rh * 0.55
+                    anchor_source = "nav_region_center"
+                sp = _to_screen_anchor_from_ocr_point(ox, oy)
+                if isinstance(sp, tuple) and len(sp) >= 2:
+                    screen_anchor = (int(sp[0]), int(sp[1]))
+        if screen_anchor is None and self._is_screen_ocr_info_mode():
+            panel_rect = self._pick_primary_block_rect(ocr or {}, "product_panel")
+            if isinstance(panel_rect, dict) and panel_rect:
+                try:
+                    px1 = float(panel_rect.get("x1") or 0.0)
+                    py1 = float(panel_rect.get("y1") or 0.0)
+                    px2 = float(panel_rect.get("x2") or 0.0)
+                    py2 = float(panel_rect.get("y2") or 0.0)
+                    pw = max(0.0, px2 - px1)
+                    ph = max(0.0, py2 - py1)
+                except Exception:
+                    pw = ph = 0.0
+                    px1 = py1 = 0.0
+                if pw > 12 and ph > 12:
+                    ox = px1 + pw * 0.32
+                    oy = py1 + ph * 0.72
+                    sp = _to_screen_anchor_from_ocr_point(ox, oy)
+                    if isinstance(sp, tuple) and len(sp) >= 2:
+                        screen_anchor = (int(sp[0]), int(sp[1]))
+                        anchor_source = "product_panel_left_lower"
+        if screen_anchor is None and self._is_screen_ocr_info_mode():
+            hits = self._collect_visible_link_index_hits(ocr or {})
+            if hits:
+                img_w = float((ocr or {}).get("image_w") or 0.0)
+                img_h = float((ocr or {}).get("image_h") or 0.0)
+                target_y = img_h * 0.70 if img_h > 2 else float(hits[len(hits) // 2].get("cy") or 0.0)
+                chosen = min(hits, key=lambda h: abs(float(h.get("cy") or 0.0) - target_y))
+                cx = float(chosen.get("cx") or 0.0)
+                cy = float(chosen.get("cy") or 0.0)
+                drift_x = max(160.0, min(420.0, img_w * 0.16 if img_w > 2 else 220.0))
+                ox = cx + drift_x
+                if img_w > 2:
+                    ox = max(img_w * 0.18, min(img_w * 0.58, ox))
+                oy = cy + 12.0
+                if img_h > 2:
+                    oy = max(img_h * 0.24, min(img_h * 0.90, oy))
+                sp = _to_screen_anchor_from_ocr_point(ox, oy)
+                if isinstance(sp, tuple) and len(sp) >= 2:
+                    screen_anchor = (int(sp[0]), int(sp[1]))
+                    anchor_source = "index_band_infer"
         if screen_anchor is None and self._is_screen_ocr_info_mode():
             try:
                 left = int((ocr or {}).get("screen_left") or 0)
@@ -2187,13 +2797,21 @@ class OperationsAgent:
                 sw = int((ocr or {}).get("screen_width") or (ocr or {}).get("image_w") or 0)
                 sh = int((ocr or {}).get("screen_height") or (ocr or {}).get("image_h") or 0)
                 if sw > 20 and sh > 20:
-                    screen_anchor = (int(left + sw * 0.45), int(top + sh * 0.60))
+                    # 兜底优先落在左侧商品列表区域，避免滚轮落到视频/聊天面板导致不滚动。
+                    sp = _to_screen_anchor_from_ocr_point(
+                        float(left + sw * 0.32),
+                        float(top + sh * 0.72),
+                    )
+                    if isinstance(sp, tuple) and len(sp) >= 2:
+                        screen_anchor = (int(sp[0]), int(sp[1]))
+                        anchor_source = "screen_left_panel_fallback"
             except Exception:
                 screen_anchor = None
+                anchor_source = ""
 
-        wheel_units = -abs(int(self._nav_scroll_pixels))
+        wheel_units = -abs(int(delta))
         if direction == "up":
-            wheel_units = abs(int(self._nav_scroll_pixels))
+            wheel_units = abs(int(delta))
         try:
             self._human_action_delay("nav_scroll_pre")
             if isinstance(screen_anchor, tuple) and len(screen_anchor) >= 2:
@@ -2206,16 +2824,17 @@ class OperationsAgent:
                 "driver": "physical_scroll",
                 "direction": direction,
                 "wheel_units": int(wheel_units),
+                "delta": int(abs(delta)),
                 "anchor": {"x": int(screen_anchor[0]), "y": int(screen_anchor[1])} if isinstance(screen_anchor, tuple) else {},
-                "dom_fail": dom_fail or {},
+                "anchor_source": str(anchor_source or ""),
             }
         except Exception as e:
             return {
                 "ok": False,
                 "driver": "physical_scroll_failed",
                 "direction": direction,
+                "delta": int(abs(delta)),
                 "reason": str(e),
-                "dom_fail": dom_fail or {},
             }
 
     def _resolve_ocr_target_with_navigation(self, action, link_index=None, preferred_text=""):
@@ -2228,7 +2847,17 @@ class OperationsAgent:
         llm_calls = 0
         stagnant_rounds = 0
         last_sig = self._build_ocr_scan_signature(ocr)
-        max_rounds = int(self._nav_max_scroll_rounds) if self._nav_llm_enabled else 0
+        is_pin_unpin = str(action or "").strip().lower() in {"pin_product", "unpin_product"}
+        link_idx = self._normalize_link_index(link_index)
+        force_scroll_for_index = bool(is_pin_unpin and link_idx)
+        max_rounds = int(self._nav_max_scroll_rounds) if (self._nav_llm_enabled or force_scroll_for_index) else 0
+        anchor_for_fixed_fallback = None
+        in_range_rescan_budget = 1
+        empty_band_rounds = 0
+        last_non_empty_visible_band = {}
+        effective_scroll_cooldown = float(self._nav_scroll_cooldown)
+        if force_scroll_for_index:
+            effective_scroll_cooldown = max(0.05, effective_scroll_cooldown * 0.55)
 
         for round_idx in range(max(0, max_rounds) + 1):
             role_hint = str((nav_hint or {}).get("region_role") or "").strip().lower()
@@ -2241,6 +2870,8 @@ class OperationsAgent:
                 preferred_text=merged_preferred,
                 preferred_role=role_hint,
             )
+            if isinstance(anchor, dict):
+                anchor_for_fixed_fallback = anchor
             if line:
                 self._last_nav_trace = {
                     "ok": True,
@@ -2257,11 +2888,33 @@ class OperationsAgent:
                     "nav_trace": nav_trace,
                     "nav_hint": nav_hint,
                 }
+            if (
+                is_pin_unpin
+                and link_idx
+                and self._ocr_pin_fixed_row_click_enabled
+                and isinstance(anchor, dict)
+            ):
+                self._last_nav_trace = {
+                    "ok": True,
+                    "round": int(round_idx),
+                    "hint": dict(nav_hint or {}),
+                    "trace": list(nav_trace or [])[-8:],
+                    "fallback": "row_anchor_only",
+                }
+                return {
+                    "ok": True,
+                    "reason": "row_anchor_found",
+                    "ocr": ocr,
+                    "line": None,
+                    "anchor": anchor,
+                    "nav_trace": nav_trace,
+                    "nav_hint": nav_hint,
+                }
 
             if round_idx >= max_rounds:
                 break
 
-            if self._nav_llm_enabled and llm_calls < self._nav_max_llm_calls:
+            if self._nav_llm_enabled and (not force_scroll_for_index) and llm_calls < self._nav_max_llm_calls:
                 hint = self._llm_build_navigation_hint(
                     action=action,
                     link_index=link_index,
@@ -2280,36 +2933,270 @@ class OperationsAgent:
                         }
                     )
 
+            visible_band = self._infer_visible_link_index_band(ocr) if force_scroll_for_index else {}
             direction = str((nav_hint or {}).get("scroll_direction") or "down").strip().lower()
             if direction not in {"down", "up"}:
                 direction = "down"
-            if bool((nav_hint or {}).get("should_scroll", True)) is False:
+            band_min = 0
+            band_max = 0
+            band_count = 0
+            if force_scroll_for_index and isinstance(visible_band, dict) and visible_band:
+                band_min = int(visible_band.get("min") or 0)
+                band_max = int(visible_band.get("max") or 0)
+                band_count = int(visible_band.get("count") or 0)
+                empty_band_rounds = 0
+                last_non_empty_visible_band = dict(visible_band)
+                if band_max > 0 and int(link_idx or 0) > band_max:
+                    direction = "down"
+                elif band_min > 0 and int(link_idx or 0) < band_min:
+                    direction = "up"
+            elif force_scroll_for_index:
+                empty_band_rounds += 1
+            pinned_hint_idx = 0
+            if force_scroll_for_index:
+                if (not isinstance(visible_band, dict)) or (not visible_band) or band_count <= 0:
+                    pinned_hint_idx = int(self._extract_pinned_link_index_hint(ocr) or 0)
+                    if 1 <= pinned_hint_idx <= 300:
+                        if int(link_idx or 0) < pinned_hint_idx:
+                            direction = "up"
+                        elif int(link_idx or 0) > pinned_hint_idx:
+                            direction = "down"
+                    elif isinstance(last_non_empty_visible_band, dict) and last_non_empty_visible_band:
+                        try:
+                            last_min = int(last_non_empty_visible_band.get("min") or 0)
+                            last_max = int(last_non_empty_visible_band.get("max") or 0)
+                            if last_max > 0 and int(link_idx or 0) > last_max:
+                                direction = "down"
+                            elif last_min > 0 and int(link_idx or 0) < last_min:
+                                direction = "up"
+                        except Exception:
+                            pass
+                    elif round_idx > 0 and stagnant_rounds >= 1:
+                        # 可见带长期缺失时，避免始终单向滚动；翻转一次尝试恢复。
+                        direction = "up" if direction == "down" else "down"
+            target_in_visible_band = bool(
+                force_scroll_for_index
+                and band_count >= 1
+                and band_min > 0
+                and band_max >= band_min
+                and int(link_idx or 0) >= band_min
+                and int(link_idx or 0) <= band_max
+            )
+            if target_in_visible_band and (not isinstance(anchor, dict)):
+                recovered_anchor = self._build_anchor_from_visible_index_hits(ocr, link_idx)
+                if isinstance(recovered_anchor, dict):
+                    self._last_nav_trace = {
+                        "ok": True,
+                        "round": int(round_idx),
+                        "hint": dict(nav_hint or {}),
+                        "trace": list(nav_trace or [])[-8:],
+                        "fallback": str(recovered_anchor.get("source") or "visible_index_recover"),
+                    }
+                    return {
+                        "ok": True,
+                        "reason": str(recovered_anchor.get("source") or "row_anchor_found"),
+                        "ocr": ocr,
+                        "line": None,
+                        "anchor": recovered_anchor,
+                        "nav_trace": nav_trace,
+                        "nav_hint": nav_hint,
+                    }
+                if in_range_rescan_budget > 0:
+                    in_range_rescan_budget -= 1
+                    nav_trace.append(
+                        {
+                            "round": int(round_idx + 1),
+                            "phase": "in_range_rescan",
+                            "visible_band": dict(visible_band or {}),
+                            "target": int(link_idx or 0),
+                        }
+                    )
+                    time.sleep(max(0.05, float(effective_scroll_cooldown) * 0.55))
+                    ocr = self._ocr_extract_page_text(use_cache=False)
+                    last_sig = self._build_ocr_scan_signature(ocr)
+                    continue
+            should_scroll = bool((nav_hint or {}).get("should_scroll", True))
+            if force_scroll_for_index and round_idx < max_rounds:
+                should_scroll = True
+            if target_in_visible_band:
+                should_scroll = False
+            if (
+                force_scroll_for_index
+                and (not target_in_visible_band)
+                and empty_band_rounds >= 2
+                and int(pinned_hint_idx or 0) <= 0
+                and (not isinstance(anchor, dict))
+            ):
+                should_scroll = False
+                nav_trace.append(
+                    {
+                        "round": int(round_idx + 1),
+                        "phase": "empty_band_fast_fail",
+                        "target": int(link_idx or 0),
+                        "empty_band_rounds": int(empty_band_rounds),
+                    }
+                )
+            if force_scroll_for_index:
+                logger.info(
+                    f"OCR导航滚动决策: action={action}, target={int(link_idx or 0)}, "
+                    f"round={int(round_idx + 1)}/{int(max_rounds + 1)}, direction={direction}, "
+                    f"visible_band={dict(visible_band or {})}, pinned_hint={int(pinned_hint_idx or 0)}, "
+                    f"stagnant={int(stagnant_rounds)}, should_scroll={bool(should_scroll)}"
+                )
+            if not should_scroll:
                 break
 
             region_rect = self._resolve_nav_region_rect(ocr, nav_hint)
-            scroll_res = self._scroll_operation_surface(direction=direction, ocr=ocr, region_rect=region_rect)
+            if force_scroll_for_index and (not isinstance(region_rect, dict)):
+                region_rect = self._pick_primary_block_rect(ocr or {}, "product_panel")
+            if force_scroll_for_index and (not isinstance(region_rect, dict)):
+                region_rect = self._pick_primary_block_rect(ocr or {}, "main_content")
+            scroll_pixels = int(self._nav_scroll_pixels)
+            if force_scroll_for_index:
+                # 置顶序号导航采用“静态微步优先”，避免近距离越过目标。
+                scroll_pixels = int(max(70, min(scroll_pixels, 180)))
+                distance = 0
+                if band_min > 0 and band_max >= band_min:
+                    if int(link_idx or 0) > band_max:
+                        distance = int(link_idx or 0) - band_max
+                    elif int(link_idx or 0) < band_min:
+                        distance = band_min - int(link_idx or 0)
+                elif int(pinned_hint_idx or 0) > 0:
+                    distance = abs(int(link_idx or 0) - int(pinned_hint_idx or 0))
+                if distance > 0:
+                    if distance <= 1:
+                        scroll_pixels = min(scroll_pixels, 55)
+                    elif distance <= 2:
+                        scroll_pixels = min(scroll_pixels, 70)
+                    elif distance <= 4:
+                        scroll_pixels = min(scroll_pixels, 85)
+                    elif distance <= 8:
+                        scroll_pixels = min(scroll_pixels, 105)
+                    else:
+                        scroll_pixels = min(scroll_pixels, 125)
+                if stagnant_rounds > 0:
+                    # 卡住时只做小幅增量，不允许大步跳跃。
+                    scroll_pixels = int(min(140, max(scroll_pixels, scroll_pixels + 10 * int(stagnant_rounds))))
+                near_target = bool(distance > 0 and distance <= 2)
+            scroll_res = self._scroll_operation_surface(
+                direction=direction,
+                ocr=ocr,
+                region_rect=region_rect,
+                scroll_pixels=scroll_pixels,
+            )
             nav_trace.append(
                 {
                     "round": int(round_idx + 1),
                     "phase": "scroll",
                     "direction": direction,
-                    "region_role": str((nav_hint or {}).get("region_role") or ""),
+                    "region_role": str((nav_hint or {}).get("region_role") or ("product_panel" if force_scroll_for_index else "")),
+                    "visible_band": dict(visible_band or {}),
                     "scroll": dict(scroll_res or {}),
                 }
             )
             if not bool((scroll_res or {}).get("ok")):
                 break
 
-            time.sleep(float(self._nav_scroll_cooldown))
+            time.sleep(float(effective_scroll_cooldown))
             ocr_next = self._ocr_extract_page_text(use_cache=False)
             next_sig = self._build_ocr_scan_signature(ocr_next)
+            next_visible_band = self._infer_visible_link_index_band(ocr_next) if force_scroll_for_index else {}
+            reversed_scroll = False
+            if force_scroll_for_index and isinstance(visible_band, dict) and isinstance(next_visible_band, dict):
+                try:
+                    prev_min = int(visible_band.get("min") or 0)
+                    prev_max = int(visible_band.get("max") or 0)
+                    next_min = int(next_visible_band.get("min") or 0)
+                    next_max = int(next_visible_band.get("max") or 0)
+                    if prev_min > 0 and prev_max >= prev_min and next_min > 0 and next_max >= next_min:
+                        prev_mid = (float(prev_min) + float(prev_max)) / 2.0
+                        next_mid = (float(next_min) + float(next_max)) / 2.0
+                        moved = next_mid - prev_mid
+                        reversed_scroll = (
+                            (direction == "up" and moved > 0.8)
+                            or (direction == "down" and moved < -0.8)
+                        )
+                        if reversed_scroll:
+                            nav_trace.append(
+                                {
+                                    "round": int(round_idx + 1),
+                                    "phase": "scroll_direction_mismatch",
+                                    "direction": direction,
+                                    "visible_band_before": dict(visible_band or {}),
+                                    "visible_band_after": dict(next_visible_band or {}),
+                                    "moved": round(float(moved), 3),
+                                }
+                            )
+                except Exception:
+                    reversed_scroll = False
+
+            if reversed_scroll:
+                fix_direction = "down" if direction == "up" else "up"
+                if force_scroll_for_index:
+                    if near_target:
+                        fix_pixels = int(max(40, min(80, scroll_pixels + 8)))
+                    else:
+                        fix_pixels = int(max(45, min(110, scroll_pixels + 18)))
+                else:
+                    fix_pixels = int(max(self._nav_scroll_pixels * 1.28, scroll_pixels + 120))
+                fix_res = self._scroll_operation_surface(
+                    direction=fix_direction,
+                    ocr=ocr_next,
+                    region_rect=region_rect,
+                    scroll_pixels=fix_pixels,
+                )
+                nav_trace.append(
+                    {
+                        "round": int(round_idx + 1),
+                        "phase": "scroll_direction_fix",
+                        "direction": fix_direction,
+                        "scroll": dict(fix_res or {}),
+                    }
+                )
+                if bool((fix_res or {}).get("ok")):
+                    time.sleep(max(0.05, float(effective_scroll_cooldown) * 0.85))
+                    ocr_fix = self._ocr_extract_page_text(use_cache=False)
+                    fix_sig = self._build_ocr_scan_signature(ocr_fix)
+                    if fix_sig:
+                        ocr_next = ocr_fix
+                        next_sig = fix_sig
+                    nav_hint = dict(nav_hint or {})
+                    nav_hint["scroll_direction"] = fix_direction
             if next_sig and next_sig == last_sig:
                 stagnant_rounds += 1
+                if force_scroll_for_index and stagnant_rounds <= 3:
+                    if near_target:
+                        boost_pixels = int(max(45, min(90, scroll_pixels + 10)))
+                    else:
+                        boost_pixels = int(max(55, min(130, scroll_pixels + 22)))
+                    boost_res = self._scroll_operation_surface(
+                        direction=direction,
+                        ocr=ocr,
+                        region_rect=region_rect,
+                        scroll_pixels=boost_pixels,
+                    )
+                    nav_trace.append(
+                        {
+                            "round": int(round_idx + 1),
+                            "phase": "scroll_boost",
+                            "direction": direction,
+                            "visible_band": dict(visible_band or {}),
+                            "scroll": dict(boost_res or {}),
+                        }
+                    )
+                    if bool((boost_res or {}).get("ok")):
+                        time.sleep(max(0.05, float(effective_scroll_cooldown) * 0.75))
+                        ocr_boost = self._ocr_extract_page_text(use_cache=False)
+                        boost_sig = self._build_ocr_scan_signature(ocr_boost)
+                        if boost_sig and boost_sig != last_sig:
+                            ocr_next = ocr_boost
+                            next_sig = boost_sig
+                            stagnant_rounds = 0
             else:
                 stagnant_rounds = 0
-            if stagnant_rounds >= 2 and direction == "down":
+            if stagnant_rounds >= 2:
                 nav_hint = dict(nav_hint or {})
-                nav_hint["scroll_direction"] = "up"
+                nav_hint["scroll_direction"] = "up" if direction == "down" else "down"
             ocr = ocr_next
             last_sig = next_sig
 
@@ -2320,7 +3207,15 @@ class OperationsAgent:
             "hint": dict(nav_hint or {}),
             "trace": list(nav_trace or [])[-8:],
         }
-        return {"ok": False, "reason": reason, "ocr": ocr, "line": None, "anchor": None, "nav_trace": nav_trace, "nav_hint": nav_hint}
+        return {
+            "ok": False,
+            "reason": reason,
+            "ocr": ocr,
+            "line": None,
+            "anchor": anchor_for_fixed_fallback if isinstance(anchor_for_fixed_fallback, dict) else None,
+            "nav_trace": nav_trace,
+            "nav_hint": nav_hint,
+        }
 
     def _perform_action_by_ocr_anchor(self, action, link_index=None, preferred_text=""):
         is_pin_unpin = action in {"pin_product", "unpin_product"}
@@ -2352,6 +3247,22 @@ class OperationsAgent:
         line = target.get("line")
         anchor = target.get("anchor")
         nav_trace = list(target.get("nav_trace") or [])
+        if is_pin_unpin:
+            page_type = str((ocr or {}).get("page_type") or "").strip().lower()
+            scene_tags = set(str(t or "").strip().lower() for t in list((ocr or {}).get("scene_tags") or []))
+            operable = page_type in {"shop_dashboard", "tiktok_live_dashboard"} or bool(
+                scene_tags.intersection({"shop_console", "product_ops", "promo_ops", "product_panel_detected"})
+            )
+            if not operable:
+                return {
+                    "ok": False,
+                    "reason": "non_operable_page_before_click",
+                    "ocr": ocr,
+                    "line": line,
+                    "anchor": anchor,
+                    "nav_trace": nav_trace,
+                }
+        fixed_candidate = self._build_fixed_row_click_candidate(action, anchor, ocr, link_index=link_idx)
         if not line and action in {"start_flash_sale", "stop_flash_sale"}:
             logger.warning(
                 f"OCR秒杀按钮未定位: action={action}, page_type={ocr.get('page_type')}, "
@@ -2359,13 +3270,27 @@ class OperationsAgent:
                 f"cand_count={len(list(ocr.get('action_candidates') or []))}"
             )
         if not line:
-            return {"ok": False, "reason": str(target.get("reason") or "ocr_target_not_found"), "ocr": ocr, "anchor": anchor, "nav_trace": nav_trace}
-        center = self._extract_rect_center(line.get("rect"))
-        if not center:
+            if fixed_candidate:
+                line = {
+                    "text": f"row_anchor_{int(link_idx or 0)}",
+                    "rect": dict((anchor or {}).get("rect") or {}),
+                    "source": "row_anchor_fallback",
+                }
+                logger.info(
+                    f"OCR行锚点兜底点击: action={action}, link_index={int(link_idx or 0)}, "
+                    f"point=({int(fixed_candidate['vx'])},{int(fixed_candidate['vy'])})"
+                )
+            else:
+                return {"ok": False, "reason": str(target.get("reason") or "ocr_target_not_found"), "ocr": ocr, "anchor": anchor, "nav_trace": nav_trace}
+        candidates = []
+        center = self._extract_rect_center(line.get("rect")) if isinstance(line, dict) else None
+        if center:
+            candidates = self._build_ocr_click_candidates(line.get("rect"), ocr, fallback_center=center)
+        elif not fixed_candidate:
             return {"ok": False, "reason": "ocr_rect_invalid", "line": line}
-        candidates = self._build_ocr_click_candidates(line.get("rect"), ocr, fallback_center=center)
-        fixed_candidate = self._build_fixed_row_click_candidate(action, anchor, ocr, link_index=link_idx)
         if is_pin_unpin and self._ocr_pin_fixed_row_click_enabled:
+            if not fixed_candidate:
+                fixed_candidate = self._build_fixed_row_click_candidate(action, anchor, ocr, link_index=link_idx)
             if fixed_candidate:
                 candidates = [fixed_candidate]
                 logger.info(
@@ -2587,12 +3512,23 @@ class OperationsAgent:
         ocr = self._ocr_extract_page_text(use_cache=False)
         if not ocr.get("available"):
             return False, {"ocr": ocr, "reason": "ocr_unavailable"}
+        action_norm = str(action or "").strip().lower()
+        is_pin_unpin = action_norm in {"pin_product", "unpin_product"}
         page_type = str(ocr.get("page_type") or "").strip()
         if page_type in {"shop_dashboard", "tiktok_live_dashboard"}:
             return True, {"ocr": ocr, "reason": "page_type_operable", "page_type": page_type}
         scene_tags = set(str(t or "").strip() for t in list(ocr.get("scene_tags") or []))
         if scene_tags.intersection({"shop_console", "product_ops", "promo_ops", "product_panel_detected"}):
             return True, {"ocr": ocr, "reason": "scene_operable", "scene_tags": list(scene_tags)}
+        if is_pin_unpin:
+            visible_hits = self._collect_visible_link_index_hits(ocr)
+            if visible_hits:
+                return True, {
+                    "ocr": ocr,
+                    "reason": "pin_unpin_visible_index_operable",
+                    "visible_band": self._infer_visible_link_index_band(ocr),
+                    "visible_hits": int(len(visible_hits)),
+                }
         text = str(ocr.get("text") or "").lower().replace(" ", "")
         if not text:
             return False, {"ocr": ocr, "reason": "ocr_empty"}
@@ -2604,6 +3540,10 @@ class OperationsAgent:
         detail = {"ocr": ocr, "keywords": required[:8], "hit": hit, "action": action}
         if hit:
             return True, detail
+        if is_pin_unpin:
+            # pin/unpin 优先视觉序号链路，关键词未命中时避免进入慢速 LLM 判定路径。
+            detail["reason"] = "pin_unpin_required_keywords_miss"
+            return False, detail
         llm_judge = self._llm_judge_operable_page(action, ocr)
         if bool(llm_judge.get("operable")) and float(llm_judge.get("confidence") or 0.0) >= float(self._nav_min_confidence):
             detail["llm_page_judge"] = llm_judge
@@ -5343,22 +6283,6 @@ class OperationsAgent:
             )
             return False
 
-        dom_verify = None
-        if self._dom_fallback_enabled():
-            if action == "pin_product":
-                dom_verify = self._verify_pin_receipt(link_index=idx, timeout_seconds=2.2)
-            else:
-                dom_verify = self._verify_unpin_receipt(link_index=idx, timeout_seconds=2.2)
-            if dom_verify:
-                self._set_action_receipt(
-                    action,
-                    True,
-                    "verify_ocr_anchor",
-                    "ok",
-                    {"link_index": idx, "ocr_try": (ocr_try or {}).get("detail") or {}, "verify": dom_verify},
-                )
-                return True
-
         ocr_verify = self._verify_receipt_by_ocr(action, link_index=idx)
         if ocr_verify:
             self._set_action_receipt(
@@ -5378,74 +6302,19 @@ class OperationsAgent:
             {
                 "link_index": idx,
                 "ocr_try": dict(ocr_try or {}),
-                "verify_dom": dict(dom_verify or {}),
                 "verify_ocr": dict(ocr_verify or {}),
             },
         )
         return False
 
     def pin_product(self, link_index=None):
-        """置顶商品。"""
+        """置顶商品（统一走 OCR 序号导航 + 固定行点击链路）。"""
         self._begin_action_trace("pin_product")
         self._human_action_delay("pin_product_entry")
         self._log_execution_mode("pin_product")
         if not self._ensure_action_page("pin_product"):
             return False
-        if self._pin_unpin_force_fixed_row_click:
-            return self._execute_pin_unpin_fixed_chain("pin_product", link_index=link_index)
-        use_ocr_action = self._is_ocr_vision_mode() or (
-            self._is_ocr_info_only_mode() and (not self._dom_execution_enabled())
-        )
-        if use_ocr_action:
-            ocr_try = self._perform_action_by_ocr_anchor("pin_product", link_index=link_index)
-            if ocr_try.get("ok"):
-                if self._dom_fallback_enabled():
-                    verify = self._verify_pin_receipt(link_index=link_index, timeout_seconds=2.2)
-                    if verify:
-                        self._set_action_receipt(
-                            "pin_product",
-                            True,
-                            "verify_ocr_anchor",
-                            "ok",
-                            {"ocr_try": ocr_try.get("detail") or {}, "verify": verify},
-                        )
-                        return True
-                ocr_verify = self._verify_receipt_by_ocr("pin_product", link_index=link_index)
-                if ocr_verify:
-                    self._set_action_receipt(
-                        "pin_product",
-                        True,
-                        "verify_ocr_anchor",
-                        "ok",
-                        {"ocr_try": ocr_try.get("detail") or {}, "verify": ocr_verify},
-                    )
-                    return True
-            else:
-                logger.debug(f"OCR置顶锚点未命中，转DOM: {ocr_try.get('reason')}")
-            if self._is_ocr_info_only_mode() or (self._is_ocr_vision_mode() and (not self._dom_fallback_enabled())):
-                self._set_action_receipt(
-                    "pin_product",
-                    False,
-                    "verify_ocr_anchor",
-                    "ocr_receipt_not_confirmed_dom_disabled",
-                    {"ocr_try": ocr_try},
-                )
-                return False
-        if self._pin_product_by_dom(link_index=link_index):
-            return True
-        # 指定序号时禁止图片模板兜底，避免点击错误目标。
-        if link_index:
-            self._set_action_receipt(
-                "pin_product",
-                False,
-                "dom",
-                "target_not_found_or_not_clickable",
-                {"link_index": link_index},
-            )
-            return False
-        ok = self.perform_action_by_image("pin_icon.png")
-        self._set_action_receipt("pin_product", ok, "image_fallback", "ok" if ok else "image_fallback_failed")
-        return ok
+        return self._execute_pin_unpin_fixed_chain("pin_product", link_index=link_index)
         
     def start_flash_sale(self):
         """开启秒杀（优先 DOM，图片模板兜底）。"""
@@ -5550,54 +6419,10 @@ class OperationsAgent:
         return ok
 
     def unpin_product(self, link_index=None):
-        """取消置顶。"""
+        """取消置顶（统一走 OCR 序号导航 + 固定行点击链路）。"""
         self._begin_action_trace("unpin_product")
         self._human_action_delay("unpin_product_entry")
         self._log_execution_mode("unpin_product")
         if not self._ensure_action_page("unpin_product"):
             return False
-        if self._pin_unpin_force_fixed_row_click:
-            return self._execute_pin_unpin_fixed_chain("unpin_product", link_index=link_index)
-        use_ocr_action = self._is_ocr_vision_mode() or (
-            self._is_ocr_info_only_mode() and (not self._dom_execution_enabled())
-        )
-        if use_ocr_action:
-            ocr_try = self._perform_action_by_ocr_anchor("unpin_product", link_index=link_index)
-            if ocr_try.get("ok"):
-                if self._dom_fallback_enabled():
-                    verify = self._verify_unpin_receipt(link_index=link_index, timeout_seconds=2.2)
-                    if verify:
-                        self._set_action_receipt(
-                            "unpin_product",
-                            True,
-                            "verify_ocr_anchor",
-                            "ok",
-                            {"ocr_try": ocr_try.get("detail") or {}, "verify": verify},
-                        )
-                        return True
-                ocr_verify = self._verify_receipt_by_ocr("unpin_product", link_index=link_index)
-                if ocr_verify:
-                    self._set_action_receipt(
-                        "unpin_product",
-                        True,
-                        "verify_ocr_anchor",
-                        "ok",
-                        {"ocr_try": ocr_try.get("detail") or {}, "verify": ocr_verify},
-                    )
-                    return True
-            else:
-                logger.debug(f"OCR取消置顶锚点未命中，转DOM: {ocr_try.get('reason')}")
-            if self._is_ocr_info_only_mode() or (self._is_ocr_vision_mode() and (not self._dom_fallback_enabled())):
-                self._set_action_receipt(
-                    "unpin_product",
-                    False,
-                    "verify_ocr_anchor",
-                    "ocr_receipt_not_confirmed_dom_disabled",
-                    {"ocr_try": ocr_try},
-                )
-                return False
-        ok = self._unpin_product_by_dom(link_index=link_index)
-        if not ok:
-            reason = "dom_unpin_failed" if self._dom_fallback_enabled() else "dom_disabled_no_ocr_confirm"
-            self._set_action_receipt("unpin_product", False, "dom", reason, {"link_index": link_index})
-        return ok
+        return self._execute_pin_unpin_fixed_chain("unpin_product", link_index=link_index)

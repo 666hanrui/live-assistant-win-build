@@ -662,22 +662,48 @@ class VisionAgent:
         best_score, best_type, best_tab = candidates[0]
         return best_tab, best_type, best_score
 
+    def _activate_tab_best_effort(self, tab):
+        """尽力激活目标标签页，兼容不同 DrissionPage 版本 API。"""
+        if tab is None:
+            return False
+        try:
+            setter = getattr(tab, "set", None)
+            activate = getattr(setter, "activate", None) if setter is not None else None
+            if callable(activate):
+                activate()
+                return True
+        except Exception:
+            pass
+        for method in ("activate", "set_active", "focus"):
+            try:
+                fn = getattr(tab, method, None)
+                if callable(fn):
+                    fn()
+                    return True
+            except Exception:
+                continue
+        try:
+            if hasattr(tab, "run_js"):
+                tab.run_js("window.focus && window.focus();")
+                return True
+        except Exception:
+            pass
+        return False
+
     def ensure_action_page(self, action):
         """
         保障执行页：
         1) 当前页可执行则直接通过
         2) 否则在浏览器标签页中切到最优可执行页
         """
-        if self._is_screen_ocr_mode():
+        screen_ocr_mode = self._is_screen_ocr_mode()
+        if screen_ocr_mode:
             ctx = self.get_page_context()
             if self._is_operable_page_for_action(ctx.get("page_type"), action):
                 return True
-            logger.warning(
-                f"screen_ocr 页面不可执行动作: action={action}, page_type={ctx.get('page_type')}"
-            )
-            return False
-
-        if not self.ensure_connection():
+            # screen_ocr 模式下，仍尝试建立浏览器上下文并切换到最佳执行标签页。
+            self.ensure_browser_page_connection(force=True)
+        elif not self.ensure_connection():
             return False
 
         cur = self.get_page_context()
@@ -702,6 +728,10 @@ class VisionAgent:
                 f"执行页切换: action={action}, page_type={best_type}, "
                 f"score={best_score}, title={getattr(self.page, 'title', '')}"
             )
+            if screen_ocr_mode:
+                activated = self._activate_tab_best_effort(self.page)
+                if activated:
+                    time.sleep(0.22)
             if self._action_requires_shop_dashboard(action) and best_type == "tiktok_live_dashboard":
                 self._try_open_shop_dashboard()
         except Exception as e:
@@ -711,6 +741,10 @@ class VisionAgent:
         ctx = self.get_page_context()
         if self._is_operable_page_for_action(ctx.get("page_type"), action):
             return True
+        if screen_ocr_mode:
+            logger.warning(
+                f"screen_ocr 页面不可执行动作: action={action}, page_type={ctx.get('page_type')}"
+            )
         logger.warning(
             f"当前页面不可执行动作: action={action}, page_type={ctx.get('page_type')}, url={ctx.get('url')}"
         )

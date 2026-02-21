@@ -593,11 +593,163 @@ class LiveAssistant:
         command = self._parse_operation_command_text(text)
         if not command:
             return {"ok": False, "error": "no_command_detected", "has_wake": has_wake}
-        ok = self._execute_operation_command(command, trigger_source=source)
+        page_ready = self._prepare_action_page_for_command(command, trigger_source=source)
+        if not bool(page_ready.get("ok")):
+            return {
+                "ok": False,
+                "has_wake": has_wake,
+                "command": command,
+                "error": "action_page_not_ready",
+                "page_prepare": page_ready,
+            }
+        ok = self._execute_operation_command(command, trigger_source=source, skip_page_prepare=True)
         return {
             "ok": bool(ok),
             "has_wake": has_wake,
             "command": command,
+            "page_prepare": page_ready,
+        }
+
+    def apply_pin_click_stable_defaults(self, persist=True):
+        """
+        固化“置顶链路”稳定默认配置（非 DOM，screen_ocr + 物理链路）。
+        """
+        op_mode = self.set_operation_execution_mode("ocr_vision", persist=False, explicit=False)
+        web_mode = self.set_web_info_source_mode("screen_ocr", persist=False, explicit=False)
+        human_cfg = self.set_human_like_settings(
+            {
+                "force_full_physical_chain": True,
+                "ocr_physical_click_enabled": True,
+                "ocr_vision_allow_dom_fallback": False,
+                "pin_click_test_confirm_popup": True,
+            },
+            persist=False,
+        )
+        if persist:
+            self._save_runtime_state()
+        return {
+            "ok": True,
+            "operation_execution_mode": str(op_mode or ""),
+            "web_info_source_mode": str(web_mode or ""),
+            "human_like_settings": dict(human_cfg or {}),
+        }
+
+    def run_pin_click_regression_check(
+        self,
+        link_index=9,
+        command_text="",
+        source="pin_click_regression_check",
+        apply_stable_defaults=True,
+    ):
+        """
+        置顶回归自检：
+        - 可选先固化稳定默认配置
+        - 触发“助播，置顶N号链接”
+        - 返回执行结果、回执和关键运行态
+        """
+        try:
+            idx = int(link_index)
+        except Exception:
+            idx = 9
+        if idx <= 0:
+            idx = 9
+
+        defaults_result = {}
+        if apply_stable_defaults:
+            defaults_result = self.apply_pin_click_stable_defaults(persist=True)
+
+        cmd = str(command_text or "").strip()
+        if not cmd:
+            cmd = f"助播，置顶{idx}号链接"
+        execute_result = self.execute_manual_voice_text(cmd, source=source)
+
+        receipt = {}
+        op_status = {}
+        web_status = {}
+        try:
+            if hasattr(self.operations, "get_last_action_receipt"):
+                receipt = self.operations.get_last_action_receipt() or {}
+        except Exception:
+            receipt = {}
+        try:
+            if hasattr(self.operations, "get_mode_status"):
+                op_status = self.operations.get_mode_status() or {}
+        except Exception:
+            op_status = {}
+        try:
+            if hasattr(self.vision, "get_info_source_status"):
+                web_status = self.vision.get_info_source_status() or {}
+        except Exception:
+            web_status = {}
+
+        receipt_reason = str((receipt or {}).get("reason") or "")
+        return {
+            "ok": bool(execute_result.get("ok")),
+            "command_text": cmd,
+            "link_index": int(idx),
+            "receipt_reason": receipt_reason,
+            "defaults_applied": dict(defaults_result or {}),
+            "execute_result": dict(execute_result or {}),
+            "action_receipt": dict(receipt or {}),
+            "operation_status": {
+                "mode": str((op_status or {}).get("mode") or ""),
+                "last_click_driver": str((op_status or {}).get("last_click_driver") or ""),
+                "last_click_point": dict((op_status or {}).get("last_click_point") or {}),
+                "last_click_error": str((op_status or {}).get("last_click_error") or ""),
+                "last_fixed_row_click": dict((op_status or {}).get("last_fixed_row_click") or {}),
+                "nav_last_trace": dict((op_status or {}).get("nav_last_trace") or {}),
+            },
+            "web_status": {
+                "mode": str((web_status or {}).get("mode") or self.get_web_info_source_mode()),
+                "ocr_page_type": str((web_status or {}).get("ocr_page_type") or ""),
+                "ocr_error": str((web_status or {}).get("ocr_error") or ""),
+            },
+        }
+
+    def _prepare_action_page_for_command(self, command, trigger_source=""):
+        """
+        执行动作前先确保在可执行页面：
+        1) 优先在已连接/已打开标签页中切到可执行页；
+        2) 对手动触发链路，必要时兜底连接内置 Mock 可执行页。
+        """
+        action = str((command or {}).get("action") or "").strip().lower()
+        if action not in {"pin_product", "unpin_product", "repin_product", "start_flash_sale", "stop_flash_sale"}:
+            return {"ok": True, "skipped": True, "reason": "non_action_command"}
+
+        ensure_action_page = getattr(self.vision, "ensure_action_page", None)
+        if callable(ensure_action_page):
+            try:
+                if bool(ensure_action_page(action)):
+                    return {"ok": True, "reason": "vision_action_page_ready"}
+            except Exception as e:
+                logger.warning(f"执行前页面准备失败(action_page_check): action={action}, err={e}")
+
+        source = str(trigger_source or "").strip().lower()
+        allow_mock_fallback = any(tok in source for tok in ["manual", "pin_click_test", "typing_trigger"])
+        if allow_mock_fallback and hasattr(self, "connect_mock_shop"):
+            try:
+                if bool(self.connect_mock_shop(view="dashboard_live")):
+                    if callable(ensure_action_page):
+                        try:
+                            if bool(ensure_action_page(action)):
+                                return {"ok": True, "reason": "mock_shop_connected"}
+                        except Exception as e:
+                            logger.warning(f"执行前页面准备失败(mock_after_ensure): action={action}, err={e}")
+                    return {"ok": True, "reason": "mock_shop_connected_no_ensure"}
+            except Exception as e:
+                logger.warning(f"执行前页面准备失败(connect_mock_shop): action={action}, err={e}")
+
+        try:
+            ctx = self.vision.get_page_context() if hasattr(self.vision, "get_page_context") else {}
+        except Exception:
+            ctx = {}
+        return {
+            "ok": False,
+            "reason": "operable_page_not_found",
+            "action": action,
+            "page_type": str((ctx or {}).get("page_type") or ""),
+            "url": str((ctx or {}).get("url") or ""),
+            "source": source,
         }
 
     def set_voice_asr_provider(self, provider):
@@ -1030,7 +1182,7 @@ class LiveAssistant:
         normalized = re.sub(r"[，。,.!！?？:：;；、~～]", "", normalized)
         ascii_text = re.sub(r"[^a-z0-9]+", " ", raw_lower).strip()
         ascii_tokens = [tok for tok in ascii_text.split() if tok]
-        en_top_position_hint = bool(re.search(r"(?:totop|twotop|tootop|tothetop|twothetop|toothetop)", normalized))
+        en_top_position_hint = bool(re.search(r"(?:totop|ontop|twotop|tootop|tothetop|onthetop|twothetop|toothetop)", normalized))
         cn_digit_map = {
             "零": 0, "〇": 0,
             "一": 1, "壹": 1, "幺": 1,
@@ -1129,6 +1281,9 @@ class LiveAssistant:
         def _parse_index(raw):
             if not raw:
                 return None
+            raw = str(raw).strip()
+            if raw.startswith("#"):
+                raw = raw[1:]
             if raw.isdigit():
                 idx_val = int(raw)
                 return idx_val if idx_val > 0 else None
@@ -1181,17 +1336,17 @@ class LiveAssistant:
                 + en_num_token
             )
             hint_forward = [
-                rf"(?:link|item|product)(?:number|no)?({idx_token})",
-                rf"(?:number|no)({idx_token})",
+                rf"(?:link|item|product)(?:number|no|#)?({idx_token})",
+                rf"(?:number|no|#)({idx_token})",
                 rf"(?:第)({idx_token})",
                 rf"(?:第)?({idx_token})(?:个)?(?:链接|连接|商品|橱窗)",
                 rf"(?:第)?({idx_token})(?:号|#|个)(?:链接|连接|商品|橱窗)?",
                 rf"(?:第)?({idx_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)?(?:秒杀|活动)",
             ]
             hint_reverse = [
-                rf"({idx_token})(?:号|#)?(?:link|item|product|链接|连接|商品|橱窗)",
+                rf"(#?{idx_token})(?:号|#)?(?:link|item|product|链接|连接|商品|橱窗)",
                 rf"(?:第)?({idx_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)",
-                rf"(?:link|item|product)(?:number|no)?(?:the)?({idx_token})",
+                rf"(?:link|item|product)(?:number|no|#)?(?:the)?({idx_token})",
             ]
             for pattern in hint_forward + hint_reverse:
                 m = re.search(pattern, normalized)
@@ -1305,11 +1460,11 @@ class LiveAssistant:
 
         # 取消置顶后重新置顶：支持“pop the link again / repin link / 取消置顶并重新置顶”
         repin_patterns = [
-            rf"(?:repin|pinagain|pinitagain|pinback)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token}|[0-9]+)",
-            rf"(?:repin|pinagain|pinitagain|pinback)(?:the)?(?:link|item|product)(?:number|no)?([0-9]+)",
-            rf"(?:repin|pop)(?:the)?(?:link|item|product)(?:number|no)?({en_num_token}|[0-9]+)(?:again)?",
-            rf"(?:unpin)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token}|[0-9]+)(?:and|then)?(?:pin|repin)",
-            rf"(?:pin|repin)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token}|[0-9]+)(?:again|back)",
+            rf"(?:repin|pinagain|pinitagain|pinback|restick|refeature)(?:the)?(?:link|item|product)?(?:number|no|#)?({en_num_token}|[0-9]+)",
+            rf"(?:repin|pinagain|pinitagain|pinback|restick|refeature)(?:the)?(?:link|item|product)(?:number|no|#)?([0-9]+)",
+            rf"(?:repin|pop)(?:the)?(?:link|item|product)(?:number|no|#)?({en_num_token}|[0-9]+)(?:again)?",
+            rf"(?:unpin|depin|untop)(?:the)?(?:link|item|product)?(?:number|no|#)?({en_num_token}|[0-9]+)(?:and|then)?(?:pin|repin)",
+            rf"(?:pin|repin)(?:the)?(?:link|item|product)?(?:number|no|#)?({en_num_token}|[0-9]+)(?:again|back)",
             rf"(?:取消置顶并重新置顶|取消置顶后重新置顶|取消置顶再置顶|重新置顶)(?:第)?([0-9]+|{cn_num_token})(?:号|个)?(?:链接|连接|商品|橱窗)?",
         ]
         for pattern in repin_patterns:
@@ -1334,6 +1489,8 @@ class LiveAssistant:
                 "repinlink",
                 "unpinandpin",
                 "unpinthenpin",
+                "restick",
+                "refeature",
             ]
         )
         if repin_intent:
@@ -1347,12 +1504,13 @@ class LiveAssistant:
             rf"(?:将|把)?([0-9]+|{cn_num_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)?(?:取消置顶|取消顶置|撤销置顶|去掉置顶|下掉置顶|取消pin)",
             rf"(?:取消|撤销|去掉|下掉)(?:第)?([0-9]+|{cn_num_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)?(?:置顶|顶置|pin)?",
             rf"(?:取消置顶|取消顶置|撤销置顶|去掉置顶|下掉置顶)(?:第)?([0-9]+|{cn_num_token})(?:(?:号|#|个)(?:链接|连接|商品|橱窗)?|(?:链接|连接|商品|橱窗))",
-            rf"(?:unpin|unset|unstick|unfeature)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token})",
-            rf"(?:remove|cancel)(?:the)?pin(?:from)?(?:link|item|product)?(?:number|no)?({en_num_token})",
-            rf"(?:link|item|product)(?:number|no)?({en_num_token})(?:unpin|unset|remove(?:the)?pin)",
+            rf"(?:unpin|depin|untop|unset|unstick|unfeature|takeofftop|takefromtop)(?:the)?(?:link|item|product)?(?:number|no|#)?({en_num_token}|[0-9]+)",
+            rf"(?:remove|cancel)(?:the)?pin(?:from)?(?:link|item|product)?(?:number|no|#)?({en_num_token}|[0-9]+)",
+            rf"(?:take|move|remove)(?:the)?(?:link|item|product)?(?:number|no|#)?({en_num_token}|[0-9]+)(?:off|from)?top",
+            rf"(?:link|item|product)(?:number|no|#)?({en_num_token}|[0-9]+)(?:unpin|depin|untop|unset|remove(?:the)?pin|removefromtop)",
             # 纯数字口令需要带索引语义，避免误判。
-            rf"(?:unpin|unset|unstick|unfeature)(?:the)?(?:link|item|product)(?:number|no)?([0-9]+)",
-            rf"(?:remove|cancel)(?:the)?pin(?:from)?(?:link|item|product)(?:number|no)?([0-9]+)",
+            rf"(?:unpin|depin|untop|unset|unstick|unfeature)(?:the)?(?:link|item|product)(?:number|no|#)?([0-9]+)",
+            rf"(?:remove|cancel)(?:the)?pin(?:from)?(?:link|item|product)(?:number|no|#)?([0-9]+)",
         ]
         for pattern in unpin_patterns:
             m = re.search(pattern, normalized)
@@ -1371,11 +1529,16 @@ class LiveAssistant:
                 "下掉置顶",
                 "移除置顶",
                 "unpin",
+                "depin",
+                "untop",
                 "removepin",
                 "cancelpin",
                 "unsetpin",
                 "unstick",
                 "unfeature",
+                "removefromtop",
+                "takeofftop",
+                "takefromtop",
             ]
         )
         # 兼容“取消链接置顶/撤销链接置顶”等中间夹有目标词的口令。
@@ -1418,16 +1581,17 @@ class LiveAssistant:
             rf"(?:将|把)?([0-9]+|{cn_num_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)?(?:置顶|顶一下|顶上去|顶上|置上去|pin|top)",
             rf"(?:置顶|pin|top)(?:第)?([0-9]+|{cn_num_token})(?:(?:号|#|个)(?:链接|连接|商品|橱窗)?|(?:链接|连接|商品|橱窗))",
             rf"(?:把|将)?(?:第)?([0-9]+|{cn_num_token})(?:号|#|个)?(?:链接|连接|商品|橱窗)(?:给我)?(?:置顶|顶上去|顶一下)",
-            rf"(?:pin|top|feature|stick)(?:the)?(?:number|no)?({en_num_token})(?:link|item|product)?",
-            rf"(?:pin|pick|top|feature|stick|choose|select)(?:the)?({en_num_token})(?:to|two|too)?(?:the)?top",
+            rf"(?:pin|top|feature|stick|highlight)(?:the)?(?:number|no|#)?({en_num_token}|[0-9]+)(?:link|item|product)?",
+            rf"(?:pin|pick|top|feature|stick|highlight|choose|select)(?:the)?({en_num_token}|[0-9]+)(?:to|two|too)?(?:the)?top",
             r"(?:link|item|product)([0-9]+)(?:pin|top)",
-            rf"(?:link|item|product)(?:number|no)?({en_num_token})(?:please)?(?:pin|top|feature|stick)",
-            rf"(?:pin|top|feature|stick)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token})",
-            rf"(?:put|set|move|bring)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token})(?:on)?top",
-            rf"(?:make)(?:the)?(?:link|item|product)?(?:number|no)?({en_num_token})(?:at)?top",
+            rf"(?:link|item|product)(?:number|no|#)?({en_num_token}|[0-9]+)(?:please)?(?:pin|top|feature|stick|highlight)",
+            rf"(?:pin|top|feature|stick|highlight)(?:the)?(?:link|item|product)?(?:number|no|#)?({en_num_token}|[0-9]+)",
+            rf"(?:put|set|move|bring)(?:the)?(?:link|item|product)?(?:number|no|#)?({en_num_token}|[0-9]+)(?:on|to|into)?top",
+            rf"(?:make)(?:the)?(?:link|item|product)?(?:number|no|#)?({en_num_token}|[0-9]+)(?:at|on)?top",
+            rf"(?:link|item|product)(?:number|no|#)?({en_num_token}|[0-9]+)(?:to|into|on)?top",
             # 数字口令必须带索引语义，避免把 "top1 / topic3" 误判为置顶命令。
-            rf"(?:pin|top|feature|stick)(?:the)?(?:link|item|product)(?:number|no)?([0-9]+)",
-            rf"(?:pin|top|feature|stick)(?:number|no)([0-9]+)",
+            rf"(?:pin|top|feature|stick|highlight)(?:the)?(?:link|item|product)(?:number|no|#)?([0-9]+)",
+            rf"(?:pin|top|feature|stick|highlight)(?:number|no|#)([0-9]+)",
             rf"(?:bring|move)(?:link|item|product)?([0-9]+)(?:totop|on?top)",
         ]
         for pattern in pin_patterns:
@@ -1439,8 +1603,8 @@ class LiveAssistant:
 
         # 语音识别常见漏词兜底：只要出现“置顶/pin/top”并带数字，就执行置顶
         en_command_word = (
-            bool(re.search(r"(^|[^a-z])(pin|top|feature|stick)([^a-z]|$)", raw_lower))
-            or _has_token_like(["pin", "top", "feature", "stick"])
+            bool(re.search(r"(^|[^a-z])(pin|top|feature|stick|highlight)([^a-z]|$)", raw_lower))
+            or _has_token_like(["pin", "top", "feature", "stick", "highlight"])
         )
         en_target_hint = _has_token_like(["link", "item", "product", "number", "no"])
         en_top_hint = _has_token_like(["top"])
@@ -1493,13 +1657,26 @@ class LiveAssistant:
 
         return None
 
-    def _execute_operation_command(self, command, trigger_source="", log_entry=None):
+    def _execute_operation_command(self, command, trigger_source="", log_entry=None, skip_page_prepare=False):
         if not command:
             return False
 
         action = command.get("action")
         receipt = {}
         reconnect_reason = ""
+        source = trigger_source or "unknown"
+
+        if not bool(skip_page_prepare):
+            page_ready = self._prepare_action_page_for_command(command, trigger_source=source)
+            if not bool(page_ready.get("ok")):
+                reason = str(page_ready.get("reason") or "operable_page_not_found")
+                logger.warning(f"运营动作取消执行: source={source}, action={action}, reason={reason}")
+                if log_entry is not None:
+                    log_entry["action"] = str(action or "unknown")
+                    log_entry["status"] = "action_failed"
+                    log_entry["action_receipt"] = reason
+                return False
+
         screen_ocr_mode = self.get_web_info_source_mode() == "screen_ocr"
 
         if not self.vision.ensure_connection():
@@ -1510,7 +1687,6 @@ class LiveAssistant:
                     self.connect_browser()
 
         if (not screen_ocr_mode) and (not self.vision.page):
-            source = trigger_source or "unknown"
             logger.warning(f"运营动作取消执行: source={source}, reason=browser_not_connected")
             if log_entry is not None:
                 log_entry["action"] = str(action or "unknown")
@@ -1518,7 +1694,6 @@ class LiveAssistant:
                 log_entry["action_receipt"] = "browser_not_connected"
             return False
         if screen_ocr_mode and (not self.vision.ensure_connection()):
-            source = trigger_source or "unknown"
             logger.warning(f"运营动作取消执行: source={source}, reason=screen_capture_unavailable")
             if log_entry is not None:
                 log_entry["action"] = str(action or "unknown")
@@ -1599,7 +1774,6 @@ class LiveAssistant:
                     except Exception:
                         receipt = {}
 
-        source = trigger_source or "unknown"
         logger.info(
             f"运营动作触发: source={source}, action={action_name}, ok={ok}, "
             f"receipt_reason={receipt.get('reason') if isinstance(receipt, dict) else ''}"
