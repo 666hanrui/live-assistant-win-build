@@ -716,16 +716,47 @@ class LiveAssistant:
         if action not in {"pin_product", "unpin_product", "repin_product", "start_flash_sale", "stop_flash_sale"}:
             return {"ok": True, "skipped": True, "reason": "non_action_command"}
 
+        source = str(trigger_source or "").strip().lower()
+        allow_mock_fallback = any(tok in source for tok in ["manual", "pin_click_test", "typing_trigger"])
+
+        strict_ocr_detail = {}
+        strict_ocr_reason = ""
+
+        def _strict_ocr_operable_check():
+            ops = getattr(self, "operations", None)
+            checker = getattr(ops, "_is_ocr_operable_page", None)
+            if not callable(checker):
+                return None, {}
+            try:
+                ocr_ok, ocr_detail = checker(action)
+            except Exception as e:
+                logger.warning(f"执行前页面准备失败(strict_ocr_check): action={action}, err={e}")
+                return None, {"reason": "strict_ocr_check_exception", "error": str(e)}
+            detail = ocr_detail if isinstance(ocr_detail, dict) else {}
+            return bool(ocr_ok), detail
+
         ensure_action_page = getattr(self.vision, "ensure_action_page", None)
         if callable(ensure_action_page):
             try:
                 if bool(ensure_action_page(action)):
-                    return {"ok": True, "reason": "vision_action_page_ready"}
+                    if allow_mock_fallback and self.get_web_info_source_mode() == "screen_ocr":
+                        strict_ok, strict_detail = _strict_ocr_operable_check()
+                        if strict_ok is False:
+                            strict_ocr_detail = dict(strict_detail or {})
+                            strict_ocr_reason = str(strict_ocr_detail.get("reason") or "strict_ocr_non_operable")
+                            logger.warning(
+                                f"执行前页面准备二次门禁未通过: action={action}, reason={strict_ocr_reason}"
+                            )
+                        else:
+                            return {
+                                "ok": True,
+                                "reason": "vision_action_page_ready_strict_ocr" if strict_ok is True else "vision_action_page_ready",
+                            }
+                    else:
+                        return {"ok": True, "reason": "vision_action_page_ready"}
             except Exception as e:
                 logger.warning(f"执行前页面准备失败(action_page_check): action={action}, err={e}")
 
-        source = str(trigger_source or "").strip().lower()
-        allow_mock_fallback = any(tok in source for tok in ["manual", "pin_click_test", "typing_trigger"])
         if allow_mock_fallback and hasattr(self, "connect_mock_shop"):
             try:
                 if bool(self.connect_mock_shop(view="dashboard_live")):
@@ -745,11 +776,12 @@ class LiveAssistant:
             ctx = {}
         return {
             "ok": False,
-            "reason": "operable_page_not_found",
+            "reason": strict_ocr_reason or "operable_page_not_found",
             "action": action,
             "page_type": str((ctx or {}).get("page_type") or ""),
             "url": str((ctx or {}).get("url") or ""),
             "source": source,
+            "strict_ocr_detail": dict(strict_ocr_detail or {}),
         }
 
     def set_voice_asr_provider(self, provider):

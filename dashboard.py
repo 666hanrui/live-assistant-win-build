@@ -53,29 +53,34 @@ def _resolve_env_file_path():
         if key in seen:
             continue
         seen.add(key)
-        if candidate.exists():
+        if candidate.exists() and candidate.is_file():
             return candidate
     return candidates[0]
 
 
-def _save_env_values(updates):
-    env_path = _resolve_env_file_path()
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    if env_path.exists():
-        lines = env_path.read_text(encoding="utf-8").splitlines()
-    else:
-        lines = []
-
-    normalized = {}
-    for key, value in (updates or {}).items():
-        k = str(key or "").strip()
-        if not k:
+def _fallback_env_candidates():
+    candidates = []
+    if os.name == "nt":
+        local_app_data = str(os.getenv("LOCALAPPDATA", "") or "").strip()
+        if local_app_data:
+            candidates.append(Path(local_app_data) / "AI_Live_Assistant" / ".env")
+    candidates.append(Path.home() / "AI_Live_Assistant" / ".env")
+    out = []
+    seen = set()
+    for item in candidates:
+        try:
+            p = Path(item).expanduser()
+        except Exception:
             continue
-        normalized[k] = str(value or "").strip()
+        key = str(p).strip().lower()
+        if (not key) or key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
 
-    if not normalized:
-        return env_path
 
+def _merge_env_lines(lines, normalized):
     output = []
     seen_keys = set()
     for line in lines:
@@ -93,9 +98,132 @@ def _save_env_values(updates):
     for k, v in normalized.items():
         if k not in seen_keys:
             output.append(f"{k}={v}")
+    return output
 
-    env_path.write_text("\n".join(output) + "\n", encoding="utf-8")
-    return env_path
+
+def _try_relax_env_permissions(env_path, aggressive=False):
+    path = Path(env_path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    if path.exists() and path.is_dir():
+        return False
+    if path.exists():
+        try:
+            os.chmod(path, path.stat().st_mode | 0o600)
+        except Exception:
+            pass
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["attrib", "-R", "-S", "-H", str(path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=1.5,
+                )
+            except Exception:
+                pass
+            if aggressive:
+                username = str(os.getenv("USERNAME", "") or "").strip()
+                if username:
+                    grant_target = username
+                    if "\\" not in grant_target:
+                        domain = str(os.getenv("USERDOMAIN", "") or "").strip()
+                        if domain:
+                            grant_target = f"{domain}\\{grant_target}"
+                    try:
+                        subprocess.run(
+                            ["icacls", str(path), "/grant:r", f"{grant_target}:(F)"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                            timeout=2.5,
+                        )
+                    except Exception:
+                        pass
+    try:
+        if path.exists():
+            with path.open("a", encoding="utf-8"):
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def _try_save_env_to_path(env_path, normalized):
+    path = Path(env_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.is_dir():
+        return False, "target_is_directory"
+    lines = []
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+    output = _merge_env_lines(lines, normalized)
+    payload = "\n".join(output) + "\n"
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(payload, encoding="utf-8")
+    os.replace(tmp_path, path)
+    return True, ""
+
+
+def _save_env_values(updates):
+    preferred_env_path = _resolve_env_file_path()
+    normalized = {}
+    for key, value in (updates or {}).items():
+        k = str(key or "").strip()
+        if not k:
+            continue
+        normalized[k] = str(value or "").strip()
+
+    if not normalized:
+        return preferred_env_path
+
+    candidates = [preferred_env_path] + _fallback_env_candidates()
+    write_errors = []
+    seen = set()
+    for candidate in candidates:
+        try:
+            path = Path(candidate).expanduser()
+        except Exception as e:
+            write_errors.append(f"{candidate}: {e}")
+            continue
+        key = str(path).strip().lower()
+        if (not key) or (key in seen):
+            continue
+        seen.add(key)
+        _try_relax_env_permissions(path, aggressive=False)
+        for attempt in range(2):
+            try:
+                ok, reason = _try_save_env_to_path(path, normalized)
+                if ok:
+                    if path != preferred_env_path:
+                        os.environ["LIVE_ASSISTANT_ENV"] = str(path)
+                    return path
+                write_errors.append(f"{path}: {reason or 'save_failed'}")
+                break
+            except PermissionError as e:
+                if attempt == 0:
+                    _try_relax_env_permissions(path, aggressive=True)
+                    continue
+                write_errors.append(f"{path}: {e}")
+                break
+            except OSError as e:
+                if attempt == 0:
+                    _try_relax_env_permissions(path, aggressive=True)
+                    continue
+                write_errors.append(f"{path}: {e}")
+                break
+            except Exception as e:
+                write_errors.append(f"{path}: {e}")
+                break
+
+    st.error(
+        "保存 .env 失败（已尝试自动修复权限与回退路径）。"
+        f"请检查文件权限后重试。detail={'; '.join(write_errors[:3])}"
+    )
+    return preferred_env_path
 
 
 def _reload_runtime_settings():

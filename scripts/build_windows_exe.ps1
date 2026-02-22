@@ -110,6 +110,33 @@ function Ensure-EnvDefault([string]$EnvFile, [string]$Key, [string]$DefaultValue
   }
 }
 
+function Ensure-WritableFile([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace([string]$Path)) {
+    return $false
+  }
+  if (!(Test-Path $Path -PathType Leaf)) {
+    return $false
+  }
+  try {
+    attrib -R -S -H "$Path" 2>$null | Out-Null
+  } catch {
+  }
+  try {
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item -and $item.IsReadOnly) {
+      $item.IsReadOnly = $false
+    }
+  } catch {
+  }
+  try {
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+    $stream.Close()
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 function Normalize-Name([string]$Name, [string]$Fallback) {
   $clean = [Regex]::Replace([string]$Name, "[^A-Za-z0-9._-]", "_")
   if ([string]::IsNullOrWhiteSpace($clean)) {
@@ -132,6 +159,36 @@ function Invoke-External([string]$Label, [string]$FilePath, [string[]]$CommandAr
   }
   if ($code -ne 0) {
     throw "$Label failed (exit code $code)"
+  }
+}
+
+function Assert-SourceMarkers([string]$RootDir) {
+  $mainFile = Join-Path $RootDir "main.py"
+  if (!(Test-Path $mainFile -PathType Leaf)) {
+    throw "Source guard failed: main.py not found at $mainFile"
+  }
+  $raw = Get-Content -Path $mainFile -Raw -Encoding UTF8
+  $requiredMarkers = @(
+    "vision_action_page_ready_strict_ocr",
+    "strict_ocr_detail"
+  )
+  foreach ($marker in $requiredMarkers) {
+    if ($raw -notmatch [Regex]::Escape($marker)) {
+      throw "Source guard failed: missing marker '$marker' in main.py. Ensure latest source is pushed before packaging."
+    }
+  }
+  Write-Host "Source guard passed: typing-trigger strict OCR fix detected in main.py"
+}
+
+function Get-FileSha256([string]$Path) {
+  if (!(Test-Path $Path -PathType Leaf)) {
+    return ""
+  }
+  try {
+    $hash = Get-FileHash -Path $Path -Algorithm SHA256 -ErrorAction Stop
+    return [string]$hash.Hash
+  } catch {
+    return ""
   }
 }
 
@@ -249,6 +306,7 @@ if ($UseHostPythonDirectly) {
 }
 
 Write-Host "[2/6] Installing runtime dependencies..."
+Assert-SourceMarkers $Root
 Invoke-External "Upgrade pip toolchain" $VenvPython @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
 Try-PreinstallWheel $VenvPython "PyAudio==0.2.14"
 Try-PreinstallWheel $VenvPython "pocketsphinx==5.0.4"
@@ -428,6 +486,9 @@ $EnvTarget = Join-Path $BundleDir ".env"
 if (Test-Path $EnvSource) {
   Copy-Item $EnvSource $EnvTarget -Force
 }
+if (!(Ensure-WritableFile $EnvTarget)) {
+  throw "Packaged .env is not writable: $EnvTarget"
+}
 
 # 确保发布包内包含语音回采模式所需关键配置（仅在缺失时补默认值，不覆盖用户已有设置）。
 Ensure-EnvDefault $EnvTarget "VOICE_COMMAND_ENABLED" "true"
@@ -575,9 +636,12 @@ try {
 } catch {
   $BuildCommit = ""
 }
+$MainSourceHash = Get-FileSha256 (Join-Path $Root "main.py")
 $BuildInfo = @(
   "build_time_utc=$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')",
-  "build_commit=$BuildCommit"
+  "build_commit=$BuildCommit",
+  "main_py_sha256=$MainSourceHash",
+  "source_guard=typing_trigger_strict_ocr_v1"
 )
 Set-Content -Path $BuildInfoFile -Value $BuildInfo -Encoding ASCII
 

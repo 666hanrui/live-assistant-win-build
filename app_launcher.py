@@ -13,6 +13,10 @@ import traceback
 from pathlib import Path
 
 
+def _env_fallback_path(runtime_root: Path) -> Path:
+    return runtime_root / "user_data" / ".env"
+
+
 def _bundle_root() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(getattr(sys, "_MEIPASS")).resolve()
@@ -212,18 +216,67 @@ def _bootstrap_windows_runtime(runtime_root: Path) -> None:
     _append_boot_log(runtime_root, f"windows_dpi_awareness={dpi_mode}")
 
 
+def _clear_readonly_attributes(path: Path) -> None:
+    if os.name != "nt":
+        return
+    try:
+        import subprocess
+
+        subprocess.run(
+            ["attrib", "-R", "-S", "-H", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=2.0,
+        )
+    except Exception:
+        pass
+
+
+def _ensure_file_writable(path: Path) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return False
+    if path.exists() and path.is_dir():
+        return False
+    if path.exists():
+        _clear_readonly_attributes(path)
+        try:
+            os.chmod(path, path.stat().st_mode | 0o600)
+        except Exception:
+            pass
+    try:
+        with path.open("a", encoding="utf-8"):
+            pass
+        return True
+    except Exception:
+        return False
+
+
 def _copy_if_missing(src: Path, dst: Path) -> bool:
     if not src.exists() or not src.is_file() or dst.exists():
         return False
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
+    # copyfile avoids inheriting read-only metadata from template files on Windows.
+    shutil.copyfile(src, dst)
+    _clear_readonly_attributes(dst)
+    try:
+        os.chmod(dst, dst.stat().st_mode | 0o600)
+    except Exception:
+        pass
     return True
 
 
-def _bootstrap_runtime_env(bundle_root: Path, runtime_root: Path) -> None:
+def _bootstrap_runtime_env(bundle_root: Path, runtime_root: Path) -> Path:
     target_env = runtime_root / ".env"
     target_example = runtime_root / ".env.example"
     env_hint = os.getenv("LIVE_ASSISTANT_ENV_TEMPLATE", "").strip()
+    fallback_env = _env_fallback_path(runtime_root)
+
+    if target_env.exists() and target_env.is_dir():
+        _append_boot_log(runtime_root, f"runtime_env_is_dir={target_env}; fallback={fallback_env}")
+        target_env = fallback_env
 
     source_envs = []
     source_examples = []
@@ -259,6 +312,15 @@ def _bootstrap_runtime_env(bundle_root: Path, runtime_root: Path) -> None:
             target_env.write_text("", encoding="utf-8")
             _append_boot_log(runtime_root, "seed_runtime_env_from=empty_template")
 
+    if not _ensure_file_writable(target_env):
+        _append_boot_log(runtime_root, f"runtime_env_not_writable={target_env}")
+        target_env = fallback_env
+        if not target_env.exists():
+            target_env.parent.mkdir(parents=True, exist_ok=True)
+            target_env.write_text("", encoding="utf-8")
+            _append_boot_log(runtime_root, f"seed_runtime_env_from=fallback_empty:{target_env}")
+        _ensure_file_writable(target_env)
+
     if not target_example.exists():
         for src in source_examples:
             try:
@@ -267,6 +329,9 @@ def _bootstrap_runtime_env(bundle_root: Path, runtime_root: Path) -> None:
                     break
             except Exception:
                 continue
+    if target_example.exists() and target_example.is_file():
+        _ensure_file_writable(target_example)
+    return target_env
 
 
 def _inject_bundle_site_packages(bundle_root: Path) -> list[str]:
@@ -345,7 +410,7 @@ def main() -> int:
     runtime_root = _runtime_root()
     _ensure_runtime_dirs(runtime_root)
     _bootstrap_windows_runtime(runtime_root)
-    _bootstrap_runtime_env(bundle_root=bundle_root, runtime_root=runtime_root)
+    env_path = _bootstrap_runtime_env(bundle_root=bundle_root, runtime_root=runtime_root)
     os.chdir(runtime_root)
     _append_boot_log(runtime_root, f"boot: bundle_root={bundle_root}")
     _append_boot_log(runtime_root, f"boot: runtime_root={runtime_root}")
@@ -353,7 +418,7 @@ def main() -> int:
     if injected_paths:
         _append_boot_log(runtime_root, f"injected_site_packages={injected_paths}")
 
-    os.environ.setdefault("LIVE_ASSISTANT_ENV", str(runtime_root / ".env"))
+    os.environ.setdefault("LIVE_ASSISTANT_ENV", str(env_path))
     os.environ.setdefault("PYTHONUTF8", "1")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     os.environ.setdefault("PYTHONUNBUFFERED", "1")

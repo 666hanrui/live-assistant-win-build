@@ -66,6 +66,23 @@ jobs:
           }
           Write-Host "Mock page verification passed: $hit"
 
+      - name: Verify source guard metadata
+        if: success()
+        shell: pwsh
+        run: |
+          $buildInfo = "dist/AI_Live_Assistant/build_info.txt"
+          if (!(Test-Path $buildInfo -PathType Leaf)) {
+            throw "build_info.txt not found: $buildInfo"
+          }
+          $raw = Get-Content -Path $buildInfo -Raw -Encoding UTF8
+          if ($raw -notmatch "source_guard=typing_trigger_strict_ocr_v1") {
+            throw "source_guard marker missing in build_info.txt"
+          }
+          if ($raw -notmatch "main_py_sha256=[A-Fa-f0-9]{64}") {
+            throw "main_py_sha256 missing or invalid in build_info.txt"
+          }
+          Write-Host "Source guard metadata verification passed: $buildInfo"
+
       - name: Pack distributable zip
         if: success()
         shell: pwsh
