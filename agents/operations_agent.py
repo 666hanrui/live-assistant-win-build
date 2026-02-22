@@ -3249,14 +3249,11 @@ class OperationsAgent:
         nav_trace = list(target.get("nav_trace") or [])
         if is_pin_unpin:
             page_type = str((ocr or {}).get("page_type") or "").strip().lower()
-            scene_tags = set(str(t or "").strip().lower() for t in list((ocr or {}).get("scene_tags") or []))
-            operable = page_type in {"shop_dashboard", "tiktok_live_dashboard"} or bool(
-                scene_tags.intersection({"shop_console", "product_ops", "promo_ops", "product_panel_detected"})
-            )
+            operable = self._is_shop_dashboard_page_type(page_type)
             if not operable:
                 return {
                     "ok": False,
-                    "reason": "non_operable_page_before_click",
+                    "reason": "non_operable_page_before_click_shop_dashboard_required",
                     "ocr": ocr,
                     "line": line,
                     "anchor": anchor,
@@ -3506,6 +3503,20 @@ class OperationsAgent:
             logger.warning(f"LLM页面判定失败: {e}")
             return {}
 
+    def _is_pin_unpin_action(self, action):
+        return str(action or "").strip().lower() in {"pin_product", "unpin_product", "repin_product"}
+
+    def _is_shop_dashboard_page_type(self, page_type):
+        return str(page_type or "").strip().lower() == "shop_dashboard"
+
+    def _is_ctx_operable_for_action(self, action, ctx):
+        page_type = str((ctx or {}).get("page_type") or "").strip().lower()
+        if self._is_pin_unpin_action(action):
+            return self._is_shop_dashboard_page_type(page_type)
+        if bool((ctx or {}).get("is_operable")):
+            return True
+        return page_type in {"shop_dashboard", "tiktok_live_dashboard"}
+
     def _is_ocr_operable_page(self, action):
         if not bool(getattr(settings, "OCR_VISION_PRECHECK_ENABLED", True)):
             return True, {"skipped": True}
@@ -3513,22 +3524,26 @@ class OperationsAgent:
         if not ocr.get("available"):
             return False, {"ocr": ocr, "reason": "ocr_unavailable"}
         action_norm = str(action or "").strip().lower()
-        is_pin_unpin = action_norm in {"pin_product", "unpin_product"}
+        is_pin_unpin = self._is_pin_unpin_action(action_norm)
         page_type = str(ocr.get("page_type") or "").strip()
+        if is_pin_unpin:
+            if self._is_shop_dashboard_page_type(page_type):
+                return True, {"ocr": ocr, "reason": "page_type_shop_dashboard", "page_type": page_type}
+            scene_tags = set(str(t or "").strip() for t in list(ocr.get("scene_tags") or []))
+            visible_hits = self._collect_visible_link_index_hits(ocr)
+            return False, {
+                "ocr": ocr,
+                "reason": "pin_unpin_requires_shop_dashboard",
+                "page_type": page_type,
+                "scene_tags": list(scene_tags)[:10],
+                "visible_band": self._infer_visible_link_index_band(ocr) if visible_hits else {},
+                "visible_hits": int(len(visible_hits)),
+            }
         if page_type in {"shop_dashboard", "tiktok_live_dashboard"}:
             return True, {"ocr": ocr, "reason": "page_type_operable", "page_type": page_type}
         scene_tags = set(str(t or "").strip() for t in list(ocr.get("scene_tags") or []))
         if scene_tags.intersection({"shop_console", "product_ops", "promo_ops", "product_panel_detected"}):
             return True, {"ocr": ocr, "reason": "scene_operable", "scene_tags": list(scene_tags)}
-        if is_pin_unpin:
-            visible_hits = self._collect_visible_link_index_hits(ocr)
-            if visible_hits:
-                return True, {
-                    "ocr": ocr,
-                    "reason": "pin_unpin_visible_index_operable",
-                    "visible_band": self._infer_visible_link_index_band(ocr),
-                    "visible_hits": int(len(visible_hits)),
-                }
         text = str(ocr.get("text") or "").lower().replace(" ", "")
         if not text:
             return False, {"ocr": ocr, "reason": "ocr_empty"}
@@ -3540,10 +3555,6 @@ class OperationsAgent:
         detail = {"ocr": ocr, "keywords": required[:8], "hit": hit, "action": action}
         if hit:
             return True, detail
-        if is_pin_unpin:
-            # pin/unpin 优先视觉序号链路，关键词未命中时避免进入慢速 LLM 判定路径。
-            detail["reason"] = "pin_unpin_required_keywords_miss"
-            return False, detail
         llm_judge = self._llm_judge_operable_page(action, ocr)
         if bool(llm_judge.get("operable")) and float(llm_judge.get("confidence") or 0.0) >= float(self._nav_min_confidence):
             detail["llm_page_judge"] = llm_judge
@@ -4582,12 +4593,155 @@ class OperationsAgent:
         )
         return bool(ok)
 
-    def _verify_receipt_from_ocr_text(self, action, text_norm, link_index=None):
+    def _link_index_hint_tokens(self, idx):
+        try:
+            idx_val = int(idx or 0)
+        except Exception:
+            idx_val = 0
+        if idx_val <= 0:
+            return []
+        raw_tokens = [
+            f"序号{idx_val}",
+            f"第{idx_val}",
+            f"{idx_val}号",
+            f"{idx_val}号链接",
+            f"{idx_val}号商品",
+            f"link{idx_val}",
+            f"item{idx_val}",
+            f"product{idx_val}",
+            f"no{idx_val}",
+            f"number{idx_val}",
+            f"#{idx_val}",
+        ]
+        out = []
+        seen = set()
+        for t in raw_tokens:
+            n = self._norm_ocr_text(t)
+            if (not n) or n in seen:
+                continue
+            seen.add(n)
+            out.append(n)
+        return out
+
+    def _verify_pin_unpin_receipt_with_index(self, action, ocr, idx):
+        try:
+            idx_val = int(idx or 0)
+        except Exception:
+            idx_val = 0
+        if idx_val <= 0:
+            return None
+        lines = list((ocr or {}).get("lines") or [])
+        if not lines:
+            return None
+
+        product_panel = self._pick_primary_block_rect(ocr or {}, "product_panel") or {}
+        idx_tokens = self._link_index_hint_tokens(idx_val)
+
+        def _is_pin_success_line(item):
+            n = str(item.get("norm") or "")
+            low = str(item.get("low") or "")
+            if any(k in n for k in ["已置顶", "取消置顶", "置顶成功"]):
+                return True
+            return bool(re.search(r"(?<![a-z])(unpin|pinned|pinsuccess|pinnedsuccess)(?![a-z])", low))
+
+        def _is_unpin_success_line(item):
+            n = str(item.get("norm") or "")
+            low = str(item.get("low") or "")
+            if any(k in n for k in ["取消置顶成功", "已取消置顶", "未置顶商品", "撤销置顶"]):
+                return True
+            return bool(re.search(r"(?<![a-z])(unpinned|unpinsuccess|nopinned)(?![a-z])", low))
+
+        def _looks_like_pin_button_line(item):
+            n = str(item.get("norm") or "")
+            low = str(item.get("low") or "")
+            if ("取消置顶" in n) or bool(re.search(r"(?<![a-z])(unpin|pinned|unpinned)(?![a-z])", low)):
+                return False
+            if "置顶" in n:
+                return True
+            return bool(re.search(r"(?<![a-z])pin(?![a-z])", low))
+
+        parsed_lines = []
+        for ln in lines:
+            if not isinstance(ln, dict):
+                continue
+            raw = str((ln or {}).get("text") or "").strip()
+            if not raw:
+                continue
+            if self._is_streamlit_panel_noise_text(raw) or self._is_browser_chrome_noise_text(raw):
+                continue
+            rect = (ln or {}).get("rect") or {}
+            line_idx = self._extract_link_index_from_line(
+                raw,
+                rect=rect if isinstance(rect, dict) else {},
+                product_panel_rect=product_panel,
+            )
+            norm = self._norm_ocr_text(raw)
+            low = raw.lower()
+            center = self._extract_rect_center(rect) if isinstance(rect, dict) else None
+            cy = float(center[1]) if center else 0.0
+            parsed_lines.append(
+                {
+                    "raw": raw,
+                    "norm": norm,
+                    "low": low,
+                    "rect": rect if isinstance(rect, dict) else {},
+                    "idx": int(line_idx or 0),
+                    "cy": cy,
+                }
+            )
+        if not parsed_lines:
+            return None
+
+        idx_rows = []
+        for item in parsed_lines:
+            has_idx = int(item.get("idx") or 0) == idx_val
+            if (not has_idx) and idx_tokens:
+                has_idx = any(tok in str(item.get("norm") or "") for tok in idx_tokens)
+            if has_idx:
+                idx_rows.append(item)
+        if not idx_rows:
+            return None
+
+        for row in idx_rows:
+            row_rect = row.get("rect") if isinstance(row.get("rect"), dict) else {}
+            try:
+                row_h = max(0.0, float(row_rect.get("y2") or 0.0) - float(row_rect.get("y1") or 0.0))
+            except Exception:
+                row_h = 0.0
+            y_gate = max(42.0, row_h * 1.8)
+            neighborhood = [x for x in parsed_lines if abs(float(x.get("cy") or 0.0) - float(row.get("cy") or 0.0)) <= y_gate]
+
+            if action == "pin_product":
+                if _is_pin_success_line(row):
+                    return {"ok": True, "source": "ocr_index_bound_row_state", "action": action, "idx": idx_val}
+                for item in neighborhood:
+                    if _is_pin_success_line(item):
+                        return {"ok": True, "source": "ocr_index_bound_neighbor_state", "action": action, "idx": idx_val}
+                continue
+
+            if action == "unpin_product":
+                if _is_unpin_success_line(row):
+                    return {"ok": True, "source": "ocr_index_bound_row_state", "action": action, "idx": idx_val}
+                if _looks_like_pin_button_line(row):
+                    return {"ok": True, "source": "ocr_index_bound_row_pin_button", "action": action, "idx": idx_val}
+                for item in neighborhood:
+                    if _is_unpin_success_line(item):
+                        return {"ok": True, "source": "ocr_index_bound_neighbor_state", "action": action, "idx": idx_val}
+                    if _looks_like_pin_button_line(item):
+                        return {"ok": True, "source": "ocr_index_bound_neighbor_pin_button", "action": action, "idx": idx_val}
+        return None
+
+    def _verify_receipt_from_ocr_text(self, action, text_norm, link_index=None, ocr=None):
         text = str(text_norm or "")
         if not text:
             return None
 
         idx = int(link_index or 0) if link_index else 0
+        if action in {"pin_product", "unpin_product"} and idx > 0:
+            bound = self._verify_pin_unpin_receipt_with_index(action, ocr or {}, idx)
+            if bound:
+                return bound
+            return None
 
         if action == "pin_product":
             keys = ["已置顶", "取消置顶", "unpin", "pinned", "置顶成功", "pinsuccess"]
@@ -4635,7 +4789,7 @@ class OperationsAgent:
     def _verify_receipt_by_ocr(self, action, link_index=None):
         ocr = self._ocr_extract_page_text(use_cache=False)
         text = self._norm_ocr_text(ocr.get("text") or "")
-        return self._verify_receipt_from_ocr_text(action, text, link_index=link_index)
+        return self._verify_receipt_from_ocr_text(action, text, link_index=link_index, ocr=ocr)
 
     def _set_action_receipt(self, action, ok, stage, reason="", detail=None):
         payload_detail = dict(detail or {})
@@ -5600,7 +5754,7 @@ class OperationsAgent:
                 ctx = self.vision_agent.get_page_context() or {}
             except Exception:
                 ctx = {}
-            if bool(ctx.get("is_operable")):
+            if self._is_ctx_operable_for_action(action, ctx):
                 return True
             ocr_ok, ocr_detail = self._is_ocr_operable_page(action)
             if ocr_ok:
@@ -5625,7 +5779,7 @@ class OperationsAgent:
                 ctx = self.vision_agent.get_page_context() or {}
             except Exception:
                 ctx = {}
-            if bool(ctx.get("is_operable")):
+            if self._is_ctx_operable_for_action(action, ctx):
                 return True
             ocr_ok, ocr_detail = self._is_ocr_operable_page(action)
             if ocr_ok:

@@ -81,6 +81,9 @@ jobs:
           if ($raw -notmatch "main_py_sha256=[A-Fa-f0-9]{64}") {
             throw "main_py_sha256 missing or invalid in build_info.txt"
           }
+          if ($raw -notmatch "dashboard_py_sha256=[A-Fa-f0-9]{64}") {
+            throw "dashboard_py_sha256 missing or invalid in build_info.txt"
+          }
           Write-Host "Source guard metadata verification passed: $buildInfo"
 
       - name: Pack distributable zip

@@ -274,6 +274,8 @@ if "cloud_asr_bili_test_provider_ui" not in st.session_state:
     st.session_state.cloud_asr_bili_test_provider_ui = "follow_current"
 if "pin_click_test_confirm_popup_sync_pending" not in st.session_state:
     st.session_state.pin_click_test_confirm_popup_sync_pending = False
+if "pin_click_test_confirm_popup_quick_force_on_pending" not in st.session_state:
+    st.session_state.pin_click_test_confirm_popup_quick_force_on_pending = False
 if "pin_click_default_apply_result" not in st.session_state:
     st.session_state.pin_click_default_apply_result = None
 if "pin_click_regression_result" not in st.session_state:
@@ -2368,6 +2370,12 @@ with st.sidebar:
 
     with st.expander("运行控制", expanded=True):
         quick_cfg = _get_human_like_settings(st.session_state.assistant)
+        if st.session_state.get("pin_click_test_confirm_popup_quick_force_on_pending"):
+            # 仅在控件创建前同步，避免 Streamlit 的 “widget key 已实例化后不可写” 异常。
+            st.session_state.pin_click_test_confirm_popup_quick_ui = True
+            st.session_state.pin_click_test_confirm_popup_quick_prev_ui = True
+            st.session_state.pin_click_test_confirm_popup_sync_pending = True
+            st.session_state.pin_click_test_confirm_popup_quick_force_on_pending = False
         if "pin_click_test_confirm_popup_quick_ui" not in st.session_state:
             st.session_state.pin_click_test_confirm_popup_quick_ui = bool(quick_cfg.get("pin_click_test_confirm_popup", False))
         if "pin_click_test_confirm_popup_quick_prev_ui" not in st.session_state:
@@ -2468,9 +2476,7 @@ with st.sidebar:
                 else:
                     if not bool(st.session_state.pin_click_test_confirm_popup_quick_ui):
                         _set_human_like_settings(st.session_state.assistant, {"pin_click_test_confirm_popup": True})
-                        st.session_state.pin_click_test_confirm_popup_quick_ui = True
-                        st.session_state.pin_click_test_confirm_popup_quick_prev_ui = True
-                        st.session_state.pin_click_test_confirm_popup_sync_pending = True
+                        st.session_state.pin_click_test_confirm_popup_quick_force_on_pending = True
                         st.info("已自动开启“置顶点击测试弹窗（即时）”。")
                     result = st.session_state.assistant.execute_manual_voice_text(
                         typed_cmd,

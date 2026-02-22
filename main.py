@@ -1694,6 +1694,30 @@ class LiveAssistant:
             return False
 
         action = command.get("action")
+        if action == "repin_product":
+            idx_raw = command.get("link_index")
+            try:
+                idx_val = int(idx_raw)
+            except Exception:
+                idx_val = 0
+            if idx_val <= 0:
+                if hasattr(self.operations, "_set_action_receipt"):
+                    try:
+                        self.operations._set_action_receipt(
+                            "repin_product",
+                            False,
+                            "precheck",
+                            "repin_requires_link_index",
+                            {"link_index": idx_raw},
+                        )
+                    except Exception:
+                        pass
+                logger.warning(f"运营动作取消执行: source={trigger_source or 'unknown'}, action=repin_product, reason=repin_requires_link_index")
+                if log_entry is not None:
+                    log_entry["action"] = "repin_product"
+                    log_entry["status"] = "action_failed"
+                    log_entry["action_receipt"] = "repin_requires_link_index"
+                return False
         receipt = {}
         reconnect_reason = ""
         source = trigger_source or "unknown"

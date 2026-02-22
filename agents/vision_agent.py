@@ -605,13 +605,13 @@ class VisionAgent:
 
     def _is_operable_page_for_action(self, page_type, action):
         action = (action or "").strip().lower()
-        if action in ("pin_product", "unpin_product", "start_flash_sale"):
+        if action in ("pin_product", "unpin_product", "repin_product", "start_flash_sale"):
             return page_type == "shop_dashboard"
         return page_type in ("shop_dashboard", "tiktok_live_dashboard")
 
     def _action_requires_shop_dashboard(self, action):
         action = (action or "").strip().lower()
-        return action in {"pin_product", "unpin_product", "start_flash_sale"}
+        return action in {"pin_product", "unpin_product", "repin_product", "start_flash_sale"}
 
     def _try_open_shop_dashboard(self):
         page = self.page

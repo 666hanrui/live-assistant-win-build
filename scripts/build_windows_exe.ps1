@@ -177,7 +177,21 @@ function Assert-SourceMarkers([string]$RootDir) {
       throw "Source guard failed: missing marker '$marker' in main.py. Ensure latest source is pushed before packaging."
     }
   }
-  Write-Host "Source guard passed: typing-trigger strict OCR fix detected in main.py"
+  $dashboardFile = Join-Path $RootDir "dashboard.py"
+  if (!(Test-Path $dashboardFile -PathType Leaf)) {
+    throw "Source guard failed: dashboard.py not found at $dashboardFile"
+  }
+  $dashboardRaw = Get-Content -Path $dashboardFile -Raw -Encoding UTF8
+  $dashboardMarkers = @(
+    "pin_click_test_confirm_popup_quick_force_on_pending",
+    "st.session_state.pin_click_test_confirm_popup_quick_force_on_pending = True"
+  )
+  foreach ($marker in $dashboardMarkers) {
+    if ($dashboardRaw -notmatch [Regex]::Escape($marker)) {
+      throw "Source guard failed: missing marker '$marker' in dashboard.py. Ensure latest source is pushed before packaging."
+    }
+  }
+  Write-Host "Source guard passed: typing-trigger strict OCR fix detected in main.py/dashboard.py"
 }
 
 function Get-FileSha256([string]$Path) {
@@ -637,10 +651,12 @@ try {
   $BuildCommit = ""
 }
 $MainSourceHash = Get-FileSha256 (Join-Path $Root "main.py")
+$DashboardSourceHash = Get-FileSha256 (Join-Path $Root "dashboard.py")
 $BuildInfo = @(
   "build_time_utc=$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')",
   "build_commit=$BuildCommit",
   "main_py_sha256=$MainSourceHash",
+  "dashboard_py_sha256=$DashboardSourceHash",
   "source_guard=typing_trigger_strict_ocr_v1"
 )
 Set-Content -Path $BuildInfoFile -Value $BuildInfo -Encoding ASCII
