@@ -5454,7 +5454,10 @@ class OperationsAgent:
             input_box.run_js("this.focus && this.focus();")
         except Exception:
             pass
-        human_select_all_and_delete()
+        self._clear_input_box_content(
+            input_box,
+            allow_system_hotkey=((platform.system() or "").lower() == "darwin"),
+        )
         pasted = False
         if mode in {"paste", "auto"}:
             # auto: 长文本优先粘贴，短文本优先手打。
@@ -5469,6 +5472,39 @@ class OperationsAgent:
         self._human_action_post_delay(reason or "keyboard_input_post")
         typed = self._read_input_text(input_box)
         return self._looks_unsent(typed, text)
+
+    def _clear_input_box_content(self, input_box, allow_system_hotkey=False):
+        try:
+            ok = bool(
+                input_box.run_js(
+                    """
+                    const el = this;
+                    try { el.focus && el.focus(); } catch (e) {}
+                    if (el.isContentEditable) {
+                      el.innerText = '';
+                      el.textContent = '';
+                    } else if ('value' in el) {
+                      el.value = '';
+                    } else {
+                      return false;
+                    }
+                    try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                    try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+                    return true;
+                    """
+                )
+            )
+            if ok:
+                return True
+        except Exception:
+            pass
+        if allow_system_hotkey:
+            try:
+                human_select_all_and_delete()
+                return True
+            except Exception:
+                return False
+        return False
 
     def _input_text(self, input_box, text):
         """兼容 textarea/contenteditable 的输入写入。"""
@@ -5531,7 +5567,10 @@ class OperationsAgent:
                     human_click(int(mid[0]), int(mid[1]), jitter_px=self._human_click_jitter)
             except Exception:
                 pass
-            human_select_all_and_delete()
+            self._clear_input_box_content(
+                input_box,
+                allow_system_hotkey=((platform.system() or "").lower() == "darwin"),
+            )
             human_typewrite(
                 text,
                 min_interval=self._os_key_min_interval,

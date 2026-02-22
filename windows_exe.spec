@@ -44,7 +44,7 @@ hiddenimports = [
     "streamlit.runtime",
 ]
 
-for pkg in ("streamlit", "altair", "pydeck", "pygments", "tiktoken", "watchdog", "mss", "whisper"):
+for pkg in ("streamlit", "altair", "pydeck", "pygments", "tiktoken", "watchdog", "mss", "whisper", "rapidocr_onnxruntime", "onnxruntime"):
     try:
         pkg_datas, pkg_bins, pkg_hidden = collect_all(pkg)
         datas += pkg_datas
@@ -68,6 +68,8 @@ for pkg in (
     "openpyxl",
     "mss",
     "whisper",
+    "rapidocr_onnxruntime",
+    "onnxruntime",
 ):
     try:
         hiddenimports.extend(collect_submodules(pkg))

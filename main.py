@@ -721,6 +721,7 @@ class LiveAssistant:
 
         strict_ocr_detail = {}
         strict_ocr_reason = ""
+        web_mode = self.get_web_info_source_mode()
 
         def _strict_ocr_operable_check():
             ops = getattr(self, "operations", None)
@@ -739,7 +740,7 @@ class LiveAssistant:
         if callable(ensure_action_page):
             try:
                 if bool(ensure_action_page(action)):
-                    if allow_mock_fallback and self.get_web_info_source_mode() == "screen_ocr":
+                    if allow_mock_fallback and web_mode in {"screen_ocr", "ocr_only", "ocr_hybrid"}:
                         strict_ok, strict_detail = _strict_ocr_operable_check()
                         if strict_ok is False:
                             strict_ocr_detail = dict(strict_detail or {})
@@ -747,6 +748,13 @@ class LiveAssistant:
                             logger.warning(
                                 f"执行前页面准备二次门禁未通过: action={action}, reason={strict_ocr_reason}"
                             )
+                            return {
+                                "ok": False,
+                                "reason": strict_ocr_reason,
+                                "action": action,
+                                "source": source,
+                                "strict_ocr_detail": dict(strict_ocr_detail or {}),
+                            }
                         else:
                             return {
                                 "ok": True,

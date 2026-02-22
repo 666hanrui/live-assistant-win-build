@@ -20,6 +20,7 @@ class LocalOcrEngine:
         self._init_provider()
 
     def _init_provider(self):
+        attempt_errors = []
         # rapidocr_onnxruntime
         try:
             from rapidocr_onnxruntime import RapidOCR  # type: ignore
@@ -45,9 +46,10 @@ class LocalOcrEngine:
 
             self.provider = "rapidocr"
             self._runner = _run_rapid
+            self.last_error = ""
             return
-        except Exception:
-            pass
+        except Exception as e:
+            attempt_errors.append(f"rapidocr:{str(e)[:180]}")
 
         # paddleocr
         try:
@@ -85,9 +87,10 @@ class LocalOcrEngine:
 
             self.provider = "paddleocr"
             self._runner = _run_paddle
+            self.last_error = ""
             return
-        except Exception:
-            pass
+        except Exception as e:
+            attempt_errors.append(f"paddleocr:{str(e)[:180]}")
 
         # pytesseract
         try:
@@ -123,9 +126,11 @@ class LocalOcrEngine:
 
             self.provider = "tesseract"
             self._runner = _run_tesseract
+            self.last_error = ""
             return
         except Exception as e:
-            self.last_error = f"ocr_provider_unavailable:{e}"
+            attempt_errors.append(f"pytesseract:{str(e)[:180]}")
+            self.last_error = f"ocr_provider_unavailable:{'; '.join(attempt_errors)}"
 
     def available(self) -> bool:
         return bool(self._runner)

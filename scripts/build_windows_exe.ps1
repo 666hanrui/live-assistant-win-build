@@ -329,6 +329,10 @@ Invoke-External "Install requirements.txt" $VenvPython @("-m", "pip", "install",
 if ($IncludeLocalDeps) {
   Invoke-External "Install requirements-local.txt" $VenvPython @("-m", "pip", "install", "-r", "requirements-local.txt")
 }
+Invoke-External "Preflight local OCR provider" $VenvPython @(
+  "-c",
+  "from utils.ocr_engine import LocalOcrEngine as E; e=E(); print('ocr_provider=', e.provider, 'available=', e.available(), 'error=', e.last_error); import sys; sys.exit(0 if e.available() else 1)"
+)
 
 Write-Host "[3/6] Installing build dependencies..."
 Invoke-External "Install PyInstaller" $VenvPython @("-m", "pip", "install", "pyinstaller>=6.0")
