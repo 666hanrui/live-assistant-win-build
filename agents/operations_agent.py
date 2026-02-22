@@ -45,6 +45,7 @@ class OperationsAgent:
         self._last_ocr_scene_tags = []
         self._last_ocr_action_candidates = []
         self._last_ocr_source = ""
+        self._last_ocr_payload = {}
         self._human_like_enabled = bool(getattr(settings, "HUMAN_LIKE_ACTION_ENABLED", True))
         self._human_delay_min = max(0.0, float(getattr(settings, "HUMAN_LIKE_ACTION_DELAY_MIN_SECONDS", 0.04) or 0.04))
         self._human_delay_max = max(self._human_delay_min, float(getattr(settings, "HUMAN_LIKE_ACTION_DELAY_MAX_SECONDS", 0.20) or 0.20))
@@ -412,26 +413,49 @@ class OperationsAgent:
         self._last_ocr_ms = payload["elapsed_ms"]
         self._last_ocr_at = time.time()
         self._last_ocr_provider = payload["provider"]
+        self._last_ocr_payload = dict(payload)
         return payload
 
     def _ocr_extract_page_text(self, use_cache=True):
         now = time.time()
         expect_screen = self._is_screen_ocr_info_mode()
         cache_valid_source = (self._last_ocr_source == "screen") if expect_screen else (self._last_ocr_source != "screen")
-        if use_cache and cache_valid_source and self._last_ocr_text and (now - self._last_ocr_at <= 0.8):
-            return {
-                "ok": bool(self._last_ocr_text),
-                "text": self._last_ocr_text,
-                "lines": list(self._last_ocr_lines or []),
-                "blocks": list(self._last_ocr_blocks or []),
-                "scene_tags": list(self._last_ocr_scene_tags or []),
-                "action_candidates": list(self._last_ocr_action_candidates or []),
-                "provider": self._last_ocr_provider,
-                "error": self._last_ocr_error,
-                "elapsed_ms": self._last_ocr_ms,
-                "cached": True,
-                "available": self.ocr_engine.available(),
-            }
+        if use_cache and cache_valid_source and (now - self._last_ocr_at <= 0.8):
+            if isinstance(self._last_ocr_payload, dict) and self._last_ocr_payload:
+                cached = dict(self._last_ocr_payload)
+                cached["cached"] = True
+                cached["available"] = bool(cached.get("available", self.ocr_engine.available()))
+                if "text" not in cached:
+                    cached["text"] = self._last_ocr_text
+                if "lines" not in cached:
+                    cached["lines"] = list(self._last_ocr_lines or [])
+                if "blocks" not in cached:
+                    cached["blocks"] = list(self._last_ocr_blocks or [])
+                if "scene_tags" not in cached:
+                    cached["scene_tags"] = list(self._last_ocr_scene_tags or [])
+                if "action_candidates" not in cached:
+                    cached["action_candidates"] = list(self._last_ocr_action_candidates or [])
+                if "provider" not in cached:
+                    cached["provider"] = self._last_ocr_provider
+                if "error" not in cached:
+                    cached["error"] = self._last_ocr_error
+                if "elapsed_ms" not in cached:
+                    cached["elapsed_ms"] = self._last_ocr_ms
+                return cached
+            if self._last_ocr_text:
+                return {
+                    "ok": bool(self._last_ocr_text),
+                    "text": self._last_ocr_text,
+                    "lines": list(self._last_ocr_lines or []),
+                    "blocks": list(self._last_ocr_blocks or []),
+                    "scene_tags": list(self._last_ocr_scene_tags or []),
+                    "action_candidates": list(self._last_ocr_action_candidates or []),
+                    "provider": self._last_ocr_provider,
+                    "error": self._last_ocr_error,
+                    "elapsed_ms": self._last_ocr_ms,
+                    "cached": True,
+                    "available": self.ocr_engine.available(),
+                }
 
         # 纯屏幕 OCR 信息源：不读取浏览器 DOM/截图，仅使用屏幕采集结果。
         if self._is_screen_ocr_info_mode():
@@ -444,6 +468,7 @@ class OperationsAgent:
                 payload = self._build_ocr_payload_from_scan(scan, source_hint="screen_capture")
                 payload["coord_space"] = str(payload.get("coord_space") or "screen")
                 self._last_ocr_source = "screen"
+                self._last_ocr_payload = dict(payload)
                 return payload
             except Exception as e:
                 self._last_ocr_error = str(e)
@@ -470,6 +495,7 @@ class OperationsAgent:
                     payload = self._build_ocr_payload_from_scan(scan, source_hint="page_screenshot")
                     if payload.get("ok") or payload.get("lines") or payload.get("blocks") or payload.get("action_candidates"):
                         self._last_ocr_source = "page_scan"
+                        self._last_ocr_payload = dict(payload)
                         return payload
             except Exception:
                 pass
@@ -551,7 +577,14 @@ class OperationsAgent:
                 pass
             result["cached"] = False
             result["available"] = True
+            if "page_type" not in result:
+                result["page_type"] = ""
+            if "is_operable" not in result:
+                result["is_operable"] = False
+            if "is_monitor_only" not in result:
+                result["is_monitor_only"] = False
             self._last_ocr_source = "page"
+            self._last_ocr_payload = dict(result)
             return result
         except Exception as e:
             self._last_ocr_error = str(e)
@@ -3248,9 +3281,24 @@ class OperationsAgent:
         anchor = target.get("anchor")
         nav_trace = list(target.get("nav_trace") or [])
         if is_pin_unpin:
-            page_type = str((ocr or {}).get("page_type") or "").strip().lower()
-            operable = self._is_shop_dashboard_page_type(page_type)
-            if not operable:
+            for retry_idx in range(2):
+                page_type = self._resolve_ocr_page_type_with_ctx_fallback(ocr)
+                operable = self._is_shop_dashboard_page_type(page_type)
+                if operable:
+                    break
+                if retry_idx == 0 and self._is_screen_ocr_info_mode():
+                    focused = self._focus_action_page_for_screen_ocr(action)
+                    if focused:
+                        target = self._resolve_ocr_target_with_navigation(
+                            action,
+                            link_index=link_idx if link_idx else link_index,
+                            preferred_text=preferred_text,
+                        )
+                        ocr = dict(target.get("ocr") or {})
+                        line = target.get("line")
+                        anchor = target.get("anchor")
+                        nav_trace = list(target.get("nav_trace") or [])
+                        continue
                 return {
                     "ok": False,
                     "reason": "non_operable_page_before_click_shop_dashboard_required",
@@ -3516,6 +3564,44 @@ class OperationsAgent:
         if bool((ctx or {}).get("is_operable")):
             return True
         return page_type in {"shop_dashboard", "tiktok_live_dashboard"}
+
+    def _resolve_ocr_page_type_with_ctx_fallback(self, ocr):
+        page_type = str((ocr or {}).get("page_type") or "").strip().lower()
+        if page_type:
+            return page_type
+        try:
+            ctx = self.vision_agent.get_page_context() or {}
+        except Exception:
+            ctx = {}
+        return str((ctx or {}).get("page_type") or "").strip().lower()
+
+    def _focus_action_page_for_screen_ocr(self, action):
+        """
+        screen_ocr 场景下尝试把浏览器执行页切到前台，避免 OCR 误扫到控制面板窗口。
+        """
+        focused = False
+        ensure_browser = getattr(self.vision_agent, "ensure_browser_page_connection", None)
+        if callable(ensure_browser):
+            try:
+                focused = bool(ensure_browser(force=True)) or focused
+            except Exception:
+                pass
+        ensure_action = getattr(self.vision_agent, "ensure_action_page", None)
+        if callable(ensure_action):
+            try:
+                focused = bool(ensure_action(action)) or focused
+            except Exception:
+                pass
+        page = getattr(self.vision_agent, "page", None)
+        activate = getattr(self.vision_agent, "_activate_tab_best_effort", None)
+        if callable(activate) and page is not None:
+            try:
+                focused = bool(activate(page)) or focused
+            except Exception:
+                pass
+        if focused:
+            time.sleep(0.22)
+        return focused
 
     def _is_ocr_operable_page(self, action):
         if not bool(getattr(settings, "OCR_VISION_PRECHECK_ENABLED", True)):
@@ -5750,15 +5836,17 @@ class OperationsAgent:
     def _ensure_action_page(self, action):
         """页面门禁：仅在可操作页执行运营动作。"""
         if self._is_screen_ocr_info_mode():
-            try:
-                ctx = self.vision_agent.get_page_context() or {}
-            except Exception:
-                ctx = {}
-            if self._is_ctx_operable_for_action(action, ctx):
-                return True
             ocr_ok, ocr_detail = self._is_ocr_operable_page(action)
             if ocr_ok:
                 return True
+            focused = self._focus_action_page_for_screen_ocr(action)
+            if focused:
+                ocr_ok_retry, ocr_detail_retry = self._is_ocr_operable_page(action)
+                if ocr_ok_retry:
+                    logger.info(f"screen_ocr 前台拉起后页面门禁放行: action={action}")
+                    return True
+                if isinstance(ocr_detail_retry, dict):
+                    ocr_detail = ocr_detail_retry
             self._set_action_receipt(action, False, "precheck", "screen_ocr_non_operable_page", ocr_detail)
             logger.warning(
                 f"执行动作失败: action={action}, screen_ocr门禁未通过, reason={getattr(ocr_detail, 'get', lambda *_: '')('reason') if isinstance(ocr_detail, dict) else ''}"
@@ -5779,7 +5867,7 @@ class OperationsAgent:
                 ctx = self.vision_agent.get_page_context() or {}
             except Exception:
                 ctx = {}
-            if self._is_ctx_operable_for_action(action, ctx):
+            if self._is_ctx_operable_for_action(action, ctx) and (not self._is_pin_unpin_action(action)):
                 return True
             ocr_ok, ocr_detail = self._is_ocr_operable_page(action)
             if ocr_ok:
