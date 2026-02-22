@@ -265,6 +265,12 @@ OCR_PIN_FIXED_ROW_CLICK_ENABLED = os.getenv("OCR_PIN_FIXED_ROW_CLICK_ENABLED", "
 PIN_UNPIN_FORCE_FIXED_ROW_CLICK = os.getenv("PIN_UNPIN_FORCE_FIXED_ROW_CLICK", "true").lower() in ("1", "true", "yes", "on")
 # link_index 为空时是否允许执行 pin/unpin：默认必须提供序号，避免误点。
 PIN_UNPIN_REQUIRE_LINK_INDEX = os.getenv("PIN_UNPIN_REQUIRE_LINK_INDEX", "true").lower() in ("1", "true", "yes", "on")
+# pin/unpin 在 OCR 锚点链路失败时，是否允许一次 DOM 索引兜底执行（建议开启，避免 OCR 波动导致动作直接失败）。
+PIN_UNPIN_DOM_RESCUE_ENABLED = os.getenv("PIN_UNPIN_DOM_RESCUE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+PIN_UNPIN_DOM_RESCUE_REASONS = _split_csv_env(
+    "PIN_UNPIN_DOM_RESCUE_REASONS",
+    "ocr_target_not_found_after_scroll,ocr_target_not_found,ocr_no_lines,ocr_unavailable,ocr_rect_invalid,non_operable_page_before_click_shop_dashboard_required",
+)
 OCR_PIN_FIXED_ROW_CLICK_X_RATIO = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_X_RATIO", "0"))
 OCR_PIN_FIXED_ROW_CLICK_RIGHT_PADDING_PX = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_RIGHT_PADDING_PX", "56"))
 OCR_PIN_FIXED_ROW_CLICK_RIGHT_PADDING_RATIO = float(os.getenv("OCR_PIN_FIXED_ROW_CLICK_RIGHT_PADDING_RATIO", "0.06"))

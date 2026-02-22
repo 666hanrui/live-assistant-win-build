@@ -73,6 +73,22 @@ class OperationsAgent:
         self._ocr_pin_fixed_row_click_enabled = bool(getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_ENABLED", True))
         self._pin_unpin_force_fixed_row_click = bool(getattr(settings, "PIN_UNPIN_FORCE_FIXED_ROW_CLICK", True))
         self._pin_unpin_require_link_index = bool(getattr(settings, "PIN_UNPIN_REQUIRE_LINK_INDEX", True))
+        self._pin_unpin_dom_rescue_enabled = bool(getattr(settings, "PIN_UNPIN_DOM_RESCUE_ENABLED", True))
+        _dom_rescue_reasons = list(getattr(settings, "PIN_UNPIN_DOM_RESCUE_REASONS", []) or [])
+        self._pin_unpin_dom_rescue_reasons = {
+            str(x or "").strip().lower()
+            for x in _dom_rescue_reasons
+            if str(x or "").strip()
+        }
+        if not self._pin_unpin_dom_rescue_reasons:
+            self._pin_unpin_dom_rescue_reasons = {
+                "ocr_target_not_found_after_scroll",
+                "ocr_target_not_found",
+                "ocr_no_lines",
+                "ocr_unavailable",
+                "ocr_rect_invalid",
+                "non_operable_page_before_click_shop_dashboard_required",
+            }
         if self._pin_unpin_force_fixed_row_click:
             self._ocr_pin_fixed_row_click_enabled = True
         self._ocr_pin_fixed_row_click_x_ratio = float(getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_X_RATIO", 0.0) or 0.0)
@@ -5886,6 +5902,19 @@ class OperationsAgent:
                     return True
                 if isinstance(ocr_detail_retry, dict):
                     ocr_detail = ocr_detail_retry
+            if self._pin_unpin_dom_rescue_enabled and action in {"pin_product", "unpin_product"}:
+                ensure_action_page = getattr(self.vision_agent, "ensure_action_page", None)
+                dom_page_ready = False
+                if callable(ensure_action_page):
+                    try:
+                        dom_page_ready = bool(ensure_action_page(action))
+                    except Exception:
+                        dom_page_ready = False
+                if dom_page_ready:
+                    logger.warning(
+                        f"screen_ocr门禁OCR未通过，已按DOM兜底放行: action={action}, reason={getattr(ocr_detail, 'get', lambda *_: '')('reason') if isinstance(ocr_detail, dict) else ''}"
+                    )
+                    return True
             self._set_action_receipt(action, False, "precheck", "screen_ocr_non_operable_page", ocr_detail)
             logger.warning(
                 f"执行动作失败: action={action}, screen_ocr门禁未通过, reason={getattr(ocr_detail, 'get', lambda *_: '')('reason') if isinstance(ocr_detail, dict) else ''}"
@@ -5911,6 +5940,19 @@ class OperationsAgent:
             ocr_ok, ocr_detail = self._is_ocr_operable_page(action)
             if ocr_ok:
                 return True
+            if self._pin_unpin_dom_rescue_enabled and action in {"pin_product", "unpin_product"}:
+                ensure_action_page = getattr(self.vision_agent, "ensure_action_page", None)
+                dom_page_ready = False
+                if callable(ensure_action_page):
+                    try:
+                        dom_page_ready = bool(ensure_action_page(action))
+                    except Exception:
+                        dom_page_ready = False
+                if dom_page_ready:
+                    logger.warning(
+                        f"OCR门禁未通过，已按DOM兜底放行: action={action}, reason={getattr(ocr_detail, 'get', lambda *_: '')('reason') if isinstance(ocr_detail, dict) else ''}"
+                    )
+                    return True
             reason = "ocr_non_operable_page" if self._is_ocr_info_only_mode() else "ocr_vision_non_operable_page"
             self._set_action_receipt(action, False, "precheck", reason, ocr_detail)
             logger.warning(
@@ -6161,12 +6203,12 @@ class OperationsAgent:
             time.sleep(random.uniform(0.11, 0.24))
         return None
 
-    def _pin_product_by_dom(self, link_index=None):
+    def _pin_product_by_dom(self, link_index=None, force=False):
         """
         优先基于 DOM 执行置顶动作。
         link_index: 1-based 链接序号（例如 3 表示 3 号链接）
         """
-        if not self._dom_fallback_enabled():
+        if (not force) and (not self._dom_fallback_enabled()):
             return False
         script = """
         const idx = Number(arguments[0] || 0);
@@ -6282,9 +6324,9 @@ class OperationsAgent:
             return False
         return False
 
-    def _unpin_product_by_dom(self, link_index=None):
+    def _unpin_product_by_dom(self, link_index=None, force=False):
         """优先基于 DOM 执行取消置顶动作。"""
-        if not self._dom_fallback_enabled():
+        if (not force) and (not self._dom_fallback_enabled()):
             return False
         script = """
         const idx = Number(arguments[0] || 0);
@@ -6555,12 +6597,48 @@ class OperationsAgent:
 
         ocr_try = self._perform_action_by_ocr_anchor(action, link_index=idx)
         if not bool((ocr_try or {}).get("ok")):
+            ocr_reason = str((ocr_try or {}).get("reason") or "").strip().lower()
+            dom_rescue_ok = False
+            dom_rescue_detail = {}
+            can_rescue = bool(
+                self._pin_unpin_dom_rescue_enabled
+                and action in {"pin_product", "unpin_product"}
+                and idx > 0
+                and ocr_reason in self._pin_unpin_dom_rescue_reasons
+            )
+            if can_rescue:
+                try:
+                    ensure_action_page = getattr(self.vision_agent, "ensure_action_page", None)
+                    if callable(ensure_action_page):
+                        ensure_action_page(action)
+                except Exception:
+                    pass
+                try:
+                    if action == "pin_product":
+                        dom_rescue_ok = bool(self._pin_product_by_dom(link_index=idx, force=True))
+                    else:
+                        dom_rescue_ok = bool(self._unpin_product_by_dom(link_index=idx, force=True))
+                except Exception as e:
+                    dom_rescue_ok = False
+                    dom_rescue_detail = {"error": str(e)}
+                if dom_rescue_ok:
+                    logger.warning(
+                        f"pin/unpin OCR锚点未命中，已DOM兜底成功: action={action}, link_index={idx}, ocr_reason={ocr_reason}"
+                    )
+                    return True
             self._set_action_receipt(
                 action,
                 False,
                 "verify_ocr_anchor",
                 str((ocr_try or {}).get("reason") or "ocr_target_not_found"),
-                {"link_index": idx, "ocr_try": dict(ocr_try or {})},
+                {
+                    "link_index": idx,
+                    "ocr_try": dict(ocr_try or {}),
+                    "dom_rescue_enabled": bool(self._pin_unpin_dom_rescue_enabled),
+                    "dom_rescue_attempted": bool(can_rescue),
+                    "dom_rescue_ok": bool(dom_rescue_ok),
+                    "dom_rescue_detail": dict(dom_rescue_detail or {}),
+                },
             )
             return False
 

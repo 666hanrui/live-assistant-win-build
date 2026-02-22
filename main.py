@@ -745,6 +745,19 @@ class LiveAssistant:
                         if strict_ok is False:
                             strict_ocr_detail = dict(strict_detail or {})
                             strict_ocr_reason = str(strict_ocr_detail.get("reason") or "strict_ocr_non_operable")
+                            allow_dom_rescue_bypass = bool(
+                                action in {"pin_product", "unpin_product"}
+                                and bool(getattr(getattr(self, "operations", None), "_pin_unpin_dom_rescue_enabled", False))
+                            )
+                            if allow_dom_rescue_bypass:
+                                logger.warning(
+                                    f"执行前页面准备二次门禁未通过，已允许DOM兜底继续: action={action}, reason={strict_ocr_reason}"
+                                )
+                                return {
+                                    "ok": True,
+                                    "reason": "vision_action_page_ready_dom_rescue_bypass",
+                                    "strict_ocr_detail": dict(strict_ocr_detail or {}),
+                                }
                             logger.warning(
                                 f"执行前页面准备二次门禁未通过: action={action}, reason={strict_ocr_reason}"
                             )
