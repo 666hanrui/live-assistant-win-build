@@ -1,20 +1,2 @@
-# 本地优先扩展依赖（可选）
-# 用途：尽量减少云端依赖，优先走本地语音/本地检索链路
-#
-# 安装方式：
-#   pip install -r requirements.txt -r requirements-local.txt
-#
-# 语音识别（本地）
-openai-whisper>=20231117
-pocketsphinx>=5.0.3
-
-# 音频编解码常用依赖（whisper 常见配套）
-soundfile>=0.12.1
-
-# Windows 本地麦克风采集
-PyAudio>=0.2.13; platform_system == "Windows"
-
-# OCR（可选，启用 OPERATION_EXECUTION_MODE=ocr_vision 时推荐安装其一）
-rapidocr_onnxruntime>=1.4.4
-# paddleocr>=2.7.0
-# pytesseract>=0.3.10
+# 预留：当前主链路已切换为云端 OCR + 浏览器云端语音识别。
+# 如后续有额外离线工具依赖，可在这里单独维护。

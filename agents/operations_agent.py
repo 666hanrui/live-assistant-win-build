@@ -32,7 +32,7 @@ class OperationsAgent:
         self._full_find_timeout = 0.35
         self.last_action_receipt = {}
         self.execution_mode = self._normalize_execution_mode(OPERATION_EXECUTION_MODE)
-        self._ocr_vision_allow_dom_fallback = bool(getattr(settings, "OCR_VISION_ALLOW_DOM_FALLBACK", False))
+        self._ocr_vision_allow_dom_fallback = False
         self._force_full_physical_chain = bool(getattr(settings, "FORCE_FULL_PHYSICAL_MOUSE_KEYBOARD", False))
         self.ocr_engine = LocalOcrEngine()
         self._last_ocr_text = ""
@@ -73,7 +73,7 @@ class OperationsAgent:
         self._ocr_pin_fixed_row_click_enabled = bool(getattr(settings, "OCR_PIN_FIXED_ROW_CLICK_ENABLED", True))
         self._pin_unpin_force_fixed_row_click = bool(getattr(settings, "PIN_UNPIN_FORCE_FIXED_ROW_CLICK", True))
         self._pin_unpin_require_link_index = bool(getattr(settings, "PIN_UNPIN_REQUIRE_LINK_INDEX", True))
-        self._pin_unpin_dom_rescue_enabled = bool(getattr(settings, "PIN_UNPIN_DOM_RESCUE_ENABLED", True))
+        self._pin_unpin_dom_rescue_enabled = False
         _dom_rescue_reasons = list(getattr(settings, "PIN_UNPIN_DOM_RESCUE_REASONS", []) or [])
         self._pin_unpin_dom_rescue_reasons = {
             str(x or "").strip().lower()
@@ -193,9 +193,6 @@ class OperationsAgent:
             self._os_keyboard_fallback_enabled = True
 
     def _normalize_execution_mode(self, mode):
-        mode = str(mode or "").strip().lower()
-        if mode in {"dom", "ocr_vision"}:
-            return mode
         return "ocr_vision"
 
     def _normalize_keyboard_input_mode(self, mode):
@@ -205,27 +202,17 @@ class OperationsAgent:
         return "type"
 
     def set_execution_mode(self, mode):
-        target = self._normalize_execution_mode(mode)
-        if self._force_full_physical_chain and target == "dom":
-            logger.warning("强制全链路物理键鼠已开启，忽略 dom 执行模式请求，保持 ocr_vision。")
-            target = "ocr_vision"
-        self.execution_mode = target
+        self.execution_mode = "ocr_vision"
         return self.execution_mode
 
     def get_execution_mode(self):
         return self.execution_mode
 
     def _dom_execution_enabled(self):
-        return (not self._force_full_physical_chain) and self.get_execution_mode() == "dom"
+        return False
 
     def _dom_fallback_enabled(self):
-        if self._force_full_physical_chain:
-            return False
-        if self._dom_execution_enabled():
-            return True
-        if self._is_ocr_info_only_mode():
-            return False
-        return self._is_ocr_vision_mode() and bool(self._ocr_vision_allow_dom_fallback)
+        return False
 
     def set_reaction_judge(self, judge_agent=None):
         self._reaction_judge_agent = judge_agent
@@ -361,7 +348,7 @@ class OperationsAgent:
         if "message_keyboard_input_mode" in kwargs:
             self._message_keyboard_input_mode = self._normalize_keyboard_input_mode(kwargs.get("message_keyboard_input_mode"))
         if "ocr_vision_allow_dom_fallback" in kwargs:
-            self._ocr_vision_allow_dom_fallback = bool(kwargs.get("ocr_vision_allow_dom_fallback"))
+            self._ocr_vision_allow_dom_fallback = False
         if "force_full_physical_chain" in kwargs:
             self._force_full_physical_chain = bool(kwargs.get("force_full_physical_chain"))
         if "pin_click_test_confirm_popup" in kwargs:

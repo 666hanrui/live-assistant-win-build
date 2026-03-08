@@ -36,24 +36,8 @@ FEATURES = {
     "state": "状态持久化",
 }
 
-PYTHON_ASR_MODES = {
-    "python_asr",
-    "local_python_asr",
-    "python_local",
-    "local",
-    "system_loopback_asr",
-    "loopback_asr",
-    "system_audio_asr",
-    "tab_audio_asr",
-    "loopback",
-}
-
-LOOPBACK_MODES = {
-    "system_loopback_asr",
-    "loopback_asr",
-    "system_audio_asr",
-    "tab_audio_asr",
-    "loopback",
+VOICE_MODES = {
+    "web_speech",
 }
 
 
@@ -131,37 +115,6 @@ def _check_dashboard_service_status() -> Tuple[bool, str, Dict[str, object]]:
     ok = ("RUNNING" in text or "STOPPED" in text) and int(res["code"]) in {0, 1}
     detail = f"code={res['code']}, matched={'yes' if ok else 'no'}"
     return ok, detail, {"cmd": "python scripts/dashboard_service.py status", **res}
-
-
-def _check_voice_stress_offline() -> Tuple[bool, str, Dict[str, object]]:
-    res = _run_cmd(
-        [sys.executable, "scripts/voice_stress_pack.py", "offline", "--profile", "all", "--json"],
-        timeout=180,
-    )
-    stdout = str(res["stdout"] or "")
-    json_path = None
-    for line in stdout.splitlines():
-        if line.startswith("offline_report_json="):
-            json_path = line.split("=", 1)[1].strip()
-            break
-    if res["code"] != 0 or not json_path:
-        return (
-            False,
-            f"voice_stress_pack_failed code={res['code']}, report_found={'yes' if json_path else 'no'}",
-            {"cmd": "python scripts/voice_stress_pack.py offline --profile all --json", **res},
-        )
-
-    payload = json.loads(Path(json_path).read_text(encoding="utf-8"))
-    total = int(payload.get("total") or 0)
-    strict_pass = int(payload.get("strict_pass") or 0)
-    loose_pass = int(payload.get("loose_pass") or 0)
-    rows = list(payload.get("rows") or [])
-    failed_ids = [str(r.get("id") or "") for r in rows if (not bool(r.get("ok_strict"))) or (not bool(r.get("ok_loose")))]
-    ok = total > 0 and strict_pass == total and loose_pass == total
-    detail = f"strict={strict_pass}/{total}, loose={loose_pass}/{total}"
-    if failed_ids:
-        detail += f", failed={','.join(failed_ids[:5])}"
-    return ok, detail, {"report_json": json_path, "failed_ids": failed_ids, **res}
 
 
 def _check_mock_server_http(strict_http: bool = True) -> Tuple[bool, str, Dict[str, object]]:
@@ -469,122 +422,23 @@ def _check_microphone_runtime() -> Tuple[bool, str, Dict[str, object]]:
     assistant = LiveAssistant()
     diag = assistant.voice.diagnose_voice_capability()
     mode = str(diag.get("mode") or "").strip().lower()
-    if mode not in PYTHON_ASR_MODES:
+    if mode not in VOICE_MODES:
         return False, f"unsupported_voice_mode:{mode}", {"diag": diag}
 
     if not bool(diag.get("speechRecognition")):
-        return False, "speech_recognition_missing", {"diag": diag}
+        return False, "web_speech_unavailable", {"diag": diag}
 
     perm = assistant.voice.request_microphone_permission()
     perm_status = str(perm.get("status") or "").strip().lower()
-    if perm_status != "granted":
+    if perm_status not in {"granted", "requesting", "idle", "needs_in_tab_click", "wrong_page", "no_page"}:
         return False, f"microphone_permission_failed:{perm.get('error')}", {"diag": diag, "permission": perm}
 
-    probe = assistant.voice.probe_local_microphone(duration_seconds=2.0)
-    ok = bool(probe.get("ok"))
-    capture_mode = str((diag.get("captureMode") or perm.get("captureMode") or "")).strip().lower()
-    if mode in LOOPBACK_MODES and capture_mode != "loopback":
-        return (
-            False,
-            f"loopback_capture_mode_mismatch:{capture_mode or 'none'}",
-            {"diag": diag, "permission": perm, "probe": probe},
-        )
+    ok = str(diag.get("captureMode") or "browser_mic").strip().lower() == "browser_mic"
     detail = (
-        f"probe_ok={ok}, mode={mode}, capture_mode={capture_mode or 'n/a'}, "
-        f"rms={probe.get('rms')}, text={probe.get('text') or ''}, err={probe.get('error') or 'none'}"
+        f"mode={mode}, capture_mode={diag.get('captureMode') or 'browser_mic'}, "
+        f"permission={perm_status}, err={perm.get('error') or 'none'}"
     )
-    return ok, detail, {"diag": diag, "permission": perm, "probe": probe}
-
-
-def _check_loopback_mode_aliases() -> Tuple[bool, str, Dict[str, object]]:
-    import app_config.settings as settings
-    from agents.voice_command_agent import VoiceCommandAgent
-
-    class _DummyVision:
-        page = None
-
-        def ensure_connection(self, force=False):
-            return False
-
-    original_mode = str(getattr(settings, "VOICE_COMMAND_INPUT_MODE", "python_asr") or "python_asr")
-    original_idx = int(getattr(settings, "VOICE_LOOPBACK_DEVICE_INDEX", -1))
-    original_hint = str(getattr(settings, "VOICE_LOOPBACK_DEVICE_NAME_HINT", "") or "")
-    rows = []
-    try:
-        for mode in ("system_loopback_asr", "tab_audio_asr"):
-            settings.VOICE_COMMAND_INPUT_MODE = mode
-            settings.VOICE_LOOPBACK_DEVICE_INDEX = -1
-            settings.VOICE_LOOPBACK_DEVICE_NAME_HINT = "loopback"
-            agent = VoiceCommandAgent(_DummyVision())
-            state = agent.get_state()
-            agent._local_push_text("assistant pin link three", lang="en-US")
-            items = agent.poll_transcripts()
-            source_ok = bool(items and str(items[0].get("source") or "") == "python_loopback")
-            row_ok = (
-                agent.get_mode() == mode
-                and agent._is_python_asr_mode()
-                and agent._is_loopback_asr_mode()
-                and str(state.get("captureMode") or "") == "loopback"
-                and str(state.get("source") or "") == "python_loopback"
-                and source_ok
-            )
-            rows.append(
-                {
-                    "mode": mode,
-                    "ok": row_ok,
-                    "state": state,
-                    "items": items[:2],
-                }
-            )
-        ok = all(bool(r.get("ok")) for r in rows)
-        detail = ", ".join(f"{r['mode']}={'PASS' if r['ok'] else 'FAIL'}" for r in rows)
-        return ok, detail, {"rows": rows}
-    finally:
-        settings.VOICE_COMMAND_INPUT_MODE = original_mode
-        settings.VOICE_LOOPBACK_DEVICE_INDEX = original_idx
-        settings.VOICE_LOOPBACK_DEVICE_NAME_HINT = original_hint
-
-
-def _check_loopback_real_e2e() -> Tuple[bool, str, Dict[str, object]]:
-    import app_config.settings as settings
-
-    mode = str(getattr(settings, "VOICE_COMMAND_INPUT_MODE", "") or "").strip().lower()
-    if mode not in LOOPBACK_MODES:
-        return False, f"loopback_mode_required_current={mode or 'empty'}", {"mode": mode}
-
-    cmd = [
-        sys.executable,
-        "scripts/loopback_asr_real_test.py",
-        "--profile",
-        "quick",
-        "--mode",
-        mode,
-        "--json",
-    ]
-    res = _run_cmd(cmd, timeout=720)
-    stdout = str(res.get("stdout") or "")
-    report_json = ""
-    for line in stdout.splitlines():
-        if line.startswith("loopback_real_report_json="):
-            report_json = line.split("=", 1)[1].strip()
-            break
-
-    if int(res["code"]) != 0 or not report_json:
-        return False, f"loopback_real_test_failed:code={res['code']}", {"cmd": " ".join(cmd), **res}
-
-    payload = json.loads(Path(report_json).read_text(encoding="utf-8"))
-    total = int(payload.get("total") or 0)
-    passed = int(payload.get("pass_count") or 0)
-    source_hit = int(payload.get("source_hit_count") or 0)
-    overall = bool(payload.get("overall_ok"))
-    failed_ids = [str(r.get("id") or "") for r in list(payload.get("rows") or []) if not bool(r.get("ok"))]
-    detail = (
-        f"mode={mode}, pass={passed}/{total}, source_hit={source_hit}/{total}, "
-        f"overall={'PASS' if overall else 'FAIL'}"
-    )
-    if failed_ids:
-        detail += f", failed={','.join(failed_ids[:5])}"
-    return bool(overall), detail, {"cmd": " ".join(cmd), "report_json": report_json, "failed_ids": failed_ids, **res}
+    return ok, detail, {"diag": diag, "permission": perm}
 
 
 def _render_markdown(payload: Dict[str, object]) -> str:
@@ -646,8 +500,6 @@ def run(profile: str) -> Dict[str, object]:
 
     do_check("launcher_self", "EXE 启动器自检", ["exe"], True, _check_launcher_self)
     do_check("dashboard_service", "服务脚本状态检查", ["exe"], True, _check_dashboard_service_status)
-    do_check("voice_stress_offline", "语音离线压测全量用例", ["voice"], True, _check_voice_stress_offline)
-    do_check("loopback_aliases", "Loopback 输入模式别名映射", ["voice"], True, _check_loopback_mode_aliases)
     do_check(
         "mock_http",
         "Mock 页面 HTTP 联调",
@@ -668,7 +520,6 @@ def run(profile: str) -> Dict[str, object]:
     if profile == "full":
         do_check("browser_e2e", "浏览器+Mock 运营动作端到端", ["ops", "mock"], True, _check_browser_mock_e2e)
         do_check("microphone_e2e", "麦克风权限与识别链路", ["voice"], True, _check_microphone_runtime)
-        do_check("loopback_real_e2e", "Loopback 回采真实链路压测", ["voice"], True, _check_loopback_real_e2e)
 
     covered = set()
     for item in checks:

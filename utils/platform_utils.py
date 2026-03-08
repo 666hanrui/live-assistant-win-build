@@ -290,24 +290,3 @@ def get_microphone_permission_guide(browser_name="浏览器"):
     if key == "windows":
         return f"Windows：设置 -> 隐私和安全性 -> 麦克风，开启“麦克风访问”和“允许桌面应用访问麦克风”，并确认 {browser_name} 有权限。"
     return f"Linux：在系统音频/隐私设置中允许 {browser_name} 与当前终端访问麦克风。"
-
-
-def get_python_asr_install_guide():
-    key = get_platform_key()
-    if key == "windows":
-        return [
-            "python -m pip install -U pip",
-            "python -m pip install SpeechRecognition",
-            "python -m pip install PyAudio",
-            "若 PyAudio 安装失败：python -m pip install pipwin && pipwin install pyaudio",
-        ]
-    if key == "macos":
-        return [
-            "python -m pip install SpeechRecognition",
-            "brew install portaudio",
-            "python -m pip install PyAudio",
-        ]
-    return [
-        "python -m pip install SpeechRecognition",
-        "请按发行版安装 PortAudio 开发包后再执行：python -m pip install PyAudio",
-    ]

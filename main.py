@@ -38,19 +38,15 @@ class LiveAssistant:
         if hasattr(self.operations, "set_operation_navigator"):
             self.operations.set_operation_navigator(self.knowledge)
         self.operation_execution_mode = "ocr_vision"
-        self.dom_operation_mode_explicit = False
         if hasattr(self.operations, "set_execution_mode"):
             self.operation_execution_mode = self.operations.set_execution_mode(
                 getattr(settings, "OPERATION_EXECUTION_MODE", "ocr_vision")
             )
-        self.dom_operation_mode_explicit = self.operation_execution_mode == "dom"
-        self.web_info_source_mode = "ocr_only"
-        self.dom_web_info_mode_explicit = False
+        self.web_info_source_mode = "screen_ocr"
         if hasattr(self.vision, "set_info_source_mode"):
             self.web_info_source_mode = self.vision.set_info_source_mode(
-                getattr(settings, "WEB_INFO_SOURCE_MODE", "ocr_only")
+                getattr(settings, "WEB_INFO_SOURCE_MODE", "screen_ocr")
             )
-        self.dom_web_info_mode_explicit = self.web_info_source_mode == "dom"
         self.voice = VoiceCommandAgent(self.vision)
         self.analytics = AnalyticsAgent()
         self._thread = None
@@ -80,8 +76,7 @@ class LiveAssistant:
         self.last_voice_poll_at = 0.0
         self.last_voice_health_log_at = 0.0
         self.last_voice_forced_restart_at = 0.0
-        self._google_voice_error_streak = 0
-        self._google_voice_error_last_at = 0.0
+        self.cloud_asr_test_enabled = False
         self.last_llm_query_at = 0.0
         self.last_report_check_at = 0.0
         self._start_lock = threading.Lock()
@@ -90,13 +85,6 @@ class LiveAssistant:
         self.last_start_detail = ""
         self.last_start_at = 0.0
         self._last_browser_rebind_attempt_at = 0.0
-        self.cloud_asr_test_enabled = False
-        self.cloud_asr_test_url = "https://www.bilibili.com/"
-        self._cloud_asr_test_prev_provider = ""
-        self._cloud_asr_test_prev_input_mode = ""
-        self._cloud_asr_test_prev_mic_index = None
-        self._cloud_asr_test_prev_mic_hint = ""
-        self.cloud_asr_test_log = deque(maxlen=240)
         self._load_runtime_state()
 
     def _get_active_language(self):
@@ -272,25 +260,8 @@ class LiveAssistant:
             voice_enabled = data.get("voice_command_enabled")
             voice_mic_index = data.get("voice_mic_device_index")
             voice_mic_name_hint = data.get("voice_mic_name_hint")
-            voice_input_mode = str(data.get("voice_input_mode") or "").strip().lower()
-            voice_asr_provider = str(data.get("voice_asr_provider") or "").strip().lower()
-            provider_aliases = {
-                "dashscope": "dashscope_funasr",
-                "aliyun_funasr": "dashscope_funasr",
-                "funasr": "dashscope_funasr",
-                "hybrid": "hybrid_local_cloud",
-                "local_cloud": "hybrid_local_cloud",
-                "cloud_local": "hybrid_local_cloud",
-            }
-            voice_asr_provider = provider_aliases.get(voice_asr_provider, voice_asr_provider)
             operation_execution_mode = str(data.get("operation_execution_mode") or "").strip().lower()
             web_info_source_mode = str(data.get("web_info_source_mode") or "").strip().lower()
-            dom_operation_mode_explicit = data.get("dom_operation_mode_explicit")
-            if dom_operation_mode_explicit is None:
-                dom_operation_mode_explicit = data.get("dom_mode_opt_in")
-            dom_web_info_mode_explicit = data.get("dom_web_info_mode_explicit")
-            if dom_web_info_mode_explicit is None:
-                dom_web_info_mode_explicit = data.get("dom_info_mode_opt_in")
             human_like_settings = data.get("human_like_settings") or data.get("human_like") or {}
 
             if language in set(settings.REPLY_LANGUAGES.values()):
@@ -310,43 +281,20 @@ class LiveAssistant:
                         name_hint=voice_mic_name_hint,
                         restart_if_running=False,
                     )
-            mode_aliases = {
-                "tab_media": "tab_audio_asr",
-                "tab_media_asr": "tab_audio_asr",
-                "system_audio": "system_audio_asr",
-            }
-            voice_input_mode = mode_aliases.get(voice_input_mode, voice_input_mode)
-            if voice_input_mode in {
-                "python_asr",
-                "local_python_asr",
-                "python_local",
-                "local",
-                "system_loopback_asr",
-                "loopback_asr",
-                "system_audio_asr",
-                "tab_audio_asr",
-                "loopback",
-                "web_speech",
-            }:
-                self.voice.input_mode = voice_input_mode
-                if hasattr(self.voice, "_sync_capture_mode"):
-                    self.voice._sync_capture_mode()
-            if voice_asr_provider in {"google", "auto", "sphinx", "whisper_local", "dashscope_funasr", "hybrid_local_cloud"}:
-                settings.VOICE_PYTHON_ASR_PROVIDER = voice_asr_provider
+            # cloud-only：运行态统一回到浏览器 Web Speech，避免旧状态把本地 ASR 再带回来。
+            self.voice.input_mode = "web_speech"
             if operation_execution_mode:
                 op_mode = operation_execution_mode
-                explicit_dom_op = bool(dom_operation_mode_explicit) if isinstance(dom_operation_mode_explicit, bool) else False
-                if op_mode == "dom" and not explicit_dom_op:
-                    logger.info("运行态配置未显式授权 DOM 操作模式，自动降级为 ocr_vision。")
+                if op_mode == "dom":
+                    logger.info("已禁用 DOM 操作模式，运行态自动保持 ocr_vision。")
                     op_mode = "ocr_vision"
-                self.set_operation_execution_mode(op_mode, persist=False, explicit=explicit_dom_op)
+                self.set_operation_execution_mode(op_mode, persist=False)
             if web_info_source_mode:
                 info_mode = web_info_source_mode
-                explicit_dom_info = bool(dom_web_info_mode_explicit) if isinstance(dom_web_info_mode_explicit, bool) else False
-                if info_mode == "dom" and not explicit_dom_info:
-                    logger.info("运行态配置未显式授权 DOM 信息源，自动降级为 ocr_only。")
-                    info_mode = "ocr_only"
-                self.set_web_info_source_mode(info_mode, persist=False, explicit=explicit_dom_info)
+                if info_mode in {"dom", "ocr_hybrid"}:
+                    logger.info("已禁用 DOM/混合信息源，运行态自动保持 screen_ocr。")
+                    info_mode = "screen_ocr"
+                self.set_web_info_source_mode(info_mode, persist=False)
             if isinstance(human_like_settings, dict) and human_like_settings:
                 self.set_human_like_settings(human_like_settings, persist=False)
 
@@ -372,11 +320,9 @@ class LiveAssistant:
             "reply_enabled": bool(self.reply_enabled),
             "proactive_enabled": bool(self.proactive_enabled),
             "voice_command_enabled": bool(self.voice_command_enabled),
-            "voice_input_mode": str(getattr(self.voice, "input_mode", getattr(settings, "VOICE_COMMAND_INPUT_MODE", "python_asr")) or "python_asr"),
+            "voice_input_mode": "web_speech",
             "operation_execution_mode": self.get_operation_execution_mode(),
-            "dom_operation_mode_explicit": bool(self.dom_operation_mode_explicit),
             "web_info_source_mode": self.get_web_info_source_mode(),
-            "dom_web_info_mode_explicit": bool(self.dom_web_info_mode_explicit),
             "human_like_settings": self.get_human_like_settings(),
         }
         if hasattr(self.voice, "get_preferred_microphone"):
@@ -386,7 +332,7 @@ class LiveAssistant:
                 payload["voice_mic_name_hint"] = mic_cfg.get("nameHint") or ""
             except Exception:
                 pass
-        payload["voice_asr_provider"] = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local")
+        payload["voice_asr_provider"] = "browser_web_speech"
         try:
             self._runtime_state_file.parent.mkdir(parents=True, exist_ok=True)
             self._runtime_state_file.write_text(
@@ -457,19 +403,12 @@ class LiveAssistant:
                 target = self.operations.set_execution_mode(target)
             except Exception:
                 target = "ocr_vision"
-        if target not in {"dom", "ocr_vision"}:
+        if target != "ocr_vision":
             target = "ocr_vision"
         self.operation_execution_mode = target
-        if explicit is None:
-            self.dom_operation_mode_explicit = target == "dom"
-        else:
-            self.dom_operation_mode_explicit = bool(explicit) and target == "dom"
         if persist:
             self._save_runtime_state()
-        logger.info(
-            f"运营执行模式已更新: {target}, "
-            f"dom_explicit={'on' if self.dom_operation_mode_explicit else 'off'}"
-        )
+        logger.info(f"运营执行模式已更新: {target}")
         return target
 
     def get_operation_mode_status(self):
@@ -521,28 +460,21 @@ class LiveAssistant:
                     self.web_info_source_mode = str(mode)
             except Exception:
                 pass
-        return str(self.web_info_source_mode or "ocr_only")
+        return str(self.web_info_source_mode or "screen_ocr")
 
     def set_web_info_source_mode(self, mode, persist=True, explicit=None):
         target = str(mode or "").strip().lower()
-        if target not in {"dom", "ocr_hybrid", "ocr_only", "screen_ocr"}:
-            target = "ocr_only"
+        if target not in {"ocr_only", "screen_ocr"}:
+            target = "screen_ocr"
         if hasattr(self.vision, "set_info_source_mode"):
             try:
                 target = self.vision.set_info_source_mode(target)
             except Exception:
-                target = "ocr_only"
+                target = "screen_ocr"
         self.web_info_source_mode = target
-        if explicit is None:
-            self.dom_web_info_mode_explicit = target == "dom"
-        else:
-            self.dom_web_info_mode_explicit = bool(explicit) and target == "dom"
         if persist:
             self._save_runtime_state()
-        logger.info(
-            f"网页信息源模式已更新: {target}, "
-            f"dom_explicit={'on' if self.dom_web_info_mode_explicit else 'off'}"
-        )
+        logger.info(f"网页信息源模式已更新: {target}")
         return target
 
     def get_web_info_source_status(self):
@@ -740,24 +672,11 @@ class LiveAssistant:
         if callable(ensure_action_page):
             try:
                 if bool(ensure_action_page(action)):
-                    if allow_mock_fallback and web_mode in {"screen_ocr", "ocr_only", "ocr_hybrid"}:
+                    if allow_mock_fallback and web_mode in {"screen_ocr", "ocr_only"}:
                         strict_ok, strict_detail = _strict_ocr_operable_check()
                         if strict_ok is False:
                             strict_ocr_detail = dict(strict_detail or {})
                             strict_ocr_reason = str(strict_ocr_detail.get("reason") or "strict_ocr_non_operable")
-                            allow_dom_rescue_bypass = bool(
-                                action in {"pin_product", "unpin_product"}
-                                and bool(getattr(getattr(self, "operations", None), "_pin_unpin_dom_rescue_enabled", False))
-                            )
-                            if allow_dom_rescue_bypass:
-                                logger.warning(
-                                    f"执行前页面准备二次门禁未通过，已允许DOM兜底继续: action={action}, reason={strict_ocr_reason}"
-                                )
-                                return {
-                                    "ok": True,
-                                    "reason": "vision_action_page_ready_dom_rescue_bypass",
-                                    "strict_ocr_detail": dict(strict_ocr_detail or {}),
-                                }
                             logger.warning(
                                 f"执行前页面准备二次门禁未通过: action={action}, reason={strict_ocr_reason}"
                             )
@@ -806,61 +725,19 @@ class LiveAssistant:
         }
 
     def set_voice_asr_provider(self, provider):
-        provider = str(provider or "").strip().lower()
-        provider_aliases = {
-            "dashscope": "dashscope_funasr",
-            "aliyun_funasr": "dashscope_funasr",
-            "funasr": "dashscope_funasr",
-            "hybrid": "hybrid_local_cloud",
-            "local_cloud": "hybrid_local_cloud",
-            "cloud_local": "hybrid_local_cloud",
-        }
-        provider = provider_aliases.get(provider, provider)
-        if provider not in {"google", "auto", "sphinx", "whisper_local", "dashscope_funasr", "hybrid_local_cloud"}:
-            return False
-        settings.VOICE_PYTHON_ASR_PROVIDER = provider
-        if bool(getattr(self.voice, "_local_running", False)):
-            try:
-                self.voice.stop()
-                active_language = self._get_active_language()
-                fallback_languages = self._get_voice_fallback_languages(active_language)
-                self.voice.start(language=active_language, fallback_languages=fallback_languages)
-            except Exception:
-                pass
-        self._save_runtime_state()
-        return True
+        # cloud-only：语音统一使用浏览器 Web Speech，不再切换本地 provider。
+        return False
 
     def set_voice_input_mode(self, mode):
         target = str(mode or "").strip().lower()
-        aliases = {
-            "tab_media": "tab_audio_asr",
-            "tab_media_asr": "tab_audio_asr",
-            "system_audio": "system_audio_asr",
-        }
-        target = aliases.get(target, target)
-        allowed = {
-            "python_asr",
-            "local_python_asr",
-            "python_local",
-            "local",
-            "system_loopback_asr",
-            "loopback_asr",
-            "system_audio_asr",
-            "tab_audio_asr",
-            "loopback",
-            "web_speech",
-        }
-        if target not in allowed:
+        if target != "web_speech":
             return False
         try:
-            self.voice.input_mode = target
-            if hasattr(self.voice, "_sync_capture_mode"):
-                self.voice._sync_capture_mode()
-            if bool(getattr(self.voice, "_local_running", False)) or bool(getattr(self.voice, "_tab_audio_running", False)):
-                self.voice.stop()
-                active_language = self._get_active_language()
-                fallback_languages = self._get_voice_fallback_languages(active_language)
-                self.voice.start(language=active_language, fallback_languages=fallback_languages)
+            self.voice.input_mode = "web_speech"
+            self.voice.stop()
+            active_language = self._get_active_language()
+            fallback_languages = self._get_voice_fallback_languages(active_language)
+            self.voice.start(language=active_language, fallback_languages=fallback_languages)
             self._save_runtime_state()
             return True
         except Exception:
@@ -2072,31 +1949,6 @@ class LiveAssistant:
                 f"provider={state.get('provider') if isinstance(state, dict) else None}"
             )
             self.last_voice_health_log_at = now
-        if isinstance(voice_err, str) and "google_network_error" in voice_err.lower():
-            if now - self._google_voice_error_last_at > 120:
-                self._google_voice_error_streak = 0
-            self._google_voice_error_streak += 1
-            self._google_voice_error_last_at = now
-            current_provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local").lower()
-            if (
-                current_provider == "google"
-                and self._google_voice_error_streak >= 2
-                and bool(getattr(settings, "VOICE_ASR_AUTO_SWITCH_ON_TIMEOUT", False))
-            ):
-                switched = self.set_voice_asr_provider("whisper_local")
-                if switched:
-                    logger.warning("检测到 Google ASR 持续超时，已自动切换到 whisper_local。")
-                    self._append_voice_input_log(
-                        source="system",
-                        text="",
-                        lang=active_language,
-                        status="provider_switch",
-                        note="google_timeout->whisper_local",
-                        command=None,
-                    )
-                    self._google_voice_error_streak = 0
-        else:
-            self._google_voice_error_streak = 0
         silence_too_long = False
         if last_result_at:
             try:
@@ -2742,207 +2594,31 @@ class LiveAssistant:
             return False
 
     def start_cloud_asr_bilibili_test(self, url=None, language=None, provider=None):
-        """
-        启用“流式 ASR 对比测试”：
-        - 打开 bilibili 页面用于播放测试音频
-        - 使用浏览器内媒体流抓取（不录屏、不录麦）
-        - 将媒体流音频送入当前 ASR Provider（本地/云端均可）
-        """
-        target_url = self._normalize_cloud_test_url(url)
-        active_language = str(language or self._get_active_language() or settings.DEFAULT_REPLY_LANGUAGE)
-        test_languages = self._build_cloud_test_languages(active_language)
-        fallback_languages = test_languages[1:]
-        selected_provider = str(provider or "").strip().lower()
-
-        if not self._cloud_asr_test_prev_provider:
-            self._cloud_asr_test_prev_provider = str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "whisper_local") or "whisper_local")
-        if not self._cloud_asr_test_prev_input_mode:
-            self._cloud_asr_test_prev_input_mode = str(getattr(self.voice, "input_mode", "python_asr") or "python_asr")
-        if self._cloud_asr_test_prev_mic_index is None:
-            try:
-                mic_cfg = self.voice.get_preferred_microphone() if hasattr(self.voice, "get_preferred_microphone") else {}
-                self._cloud_asr_test_prev_mic_index = (mic_cfg or {}).get("deviceIndex")
-                self._cloud_asr_test_prev_mic_hint = str((mic_cfg or {}).get("nameHint") or "")
-            except Exception:
-                self._cloud_asr_test_prev_mic_index = None
-                self._cloud_asr_test_prev_mic_hint = ""
-
-        self.cloud_asr_test_enabled = True
-        self.cloud_asr_test_url = target_url
-        self.cloud_asr_test_log.clear()
-
-        if selected_provider:
-            switched = self.set_voice_asr_provider(selected_provider)
-            if not switched:
-                self.cloud_asr_test_enabled = False
-                return {"ok": False, "error": "set_asr_provider_failed", "provider": selected_provider, "url": target_url}
-
-        bilibili_user_data = str((Path(settings.USER_DATA_PATH).expanduser().resolve() / "bilibili_cloud_asr_test"))
-        ready, ready_err = self._ensure_mock_debug_browser(target_url, bilibili_user_data)
-        if not ready:
-            self.cloud_asr_test_enabled = False
-            return {"ok": False, "error": ready_err or "debug_browser_not_ready", "url": target_url}
-
-        opened = self._inject_bilibili_url_into_debug_browser(target_url)
-        if not opened:
-            self.cloud_asr_test_enabled = False
-            return {"ok": False, "error": "bilibili_page_open_failed", "url": target_url}
-
-        try:
-            self.voice.stop()
-        except Exception:
-            pass
-        try:
-            self.voice.input_mode = "tab_audio_asr"
-            if hasattr(self.voice, "_sync_capture_mode"):
-                self.voice._sync_capture_mode()
-        except Exception:
-            pass
-
-        if hasattr(self.voice, "_start_tab_audio_stream_capture"):
-            started = bool(self.voice._start_tab_audio_stream_capture(list(test_languages or [active_language])))
-        else:
-            started = False
-        if not started:
-            info = self.voice.get_start_failure_info() if hasattr(self.voice, "get_start_failure_info") else {}
-            reason = str((info or {}).get("reason") or "")
-            retryable = [
-                "tab_audio_js_no_result",
-                "browser_page_context_unavailable",
-                "media_element_not_found",
-                "capture_stream_unavailable",
-            ]
-            if any(token in reason for token in retryable):
-                logger.info(f"B站播放器流首启失败，执行一次定向重试: reason={reason}")
-                try:
-                    self._inject_bilibili_url_into_debug_browser(target_url)
-                except Exception:
-                    pass
-                ensure_browser_page = getattr(self.vision, "ensure_browser_page_connection", None)
-                if callable(ensure_browser_page):
-                    try:
-                        ensure_browser_page(force=True, prefer_media_tab=True)
-                    except TypeError:
-                        ensure_browser_page(force=True)
-                    except Exception:
-                        pass
-                time.sleep(0.25)
-                if hasattr(self.voice, "_start_tab_audio_stream_capture"):
-                    started = bool(self.voice._start_tab_audio_stream_capture(list(test_languages or [active_language])))
-                info = self.voice.get_start_failure_info() if hasattr(self.voice, "get_start_failure_info") else {}
-            if not started:
-                self.cloud_asr_test_enabled = False
-                return {
-                    "ok": False,
-                    "error": str((info or {}).get("reason") or "voice_start_failed"),
-                    "detail": (info or {}).get("diag"),
-                    "url": target_url,
-                }
-
-        self.last_start_error = ""
-        self.last_start_detail = f"cloud_asr_test_ready:{target_url}"
-        logger.info(
-            f"播放器流 ASR 对比测试已启动: url={target_url}, lang={active_language}, "
-            f"test_langs={test_languages}, provider={getattr(settings, 'VOICE_PYTHON_ASR_PROVIDER', '')}"
-        )
-        return {
-            "ok": True,
-            "url": target_url,
-            "provider": str(getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "")),
-            "mode": "tab_media_stream",
-            "language": active_language,
-            "fallback_languages": fallback_languages,
-            "test_languages": test_languages,
-        }
+        return {"ok": False, "error": "cloud_asr_test_removed", "url": str(url or "").strip()}
 
     def stop_cloud_asr_bilibili_test(self, restore_previous=True):
         self.cloud_asr_test_enabled = False
-        try:
-            if hasattr(self.voice, "_stop_tab_audio_stream_capture"):
-                self.voice._stop_tab_audio_stream_capture()
-            else:
-                self.voice.stop()
-        except Exception:
-            pass
-
-        restored_provider = None
-        restored_mode = None
-        if restore_previous:
-            prev_provider = str(self._cloud_asr_test_prev_provider or "").strip().lower()
-            prev_mode = str(self._cloud_asr_test_prev_input_mode or "").strip().lower()
-            if prev_provider:
-                self.set_voice_asr_provider(prev_provider)
-                restored_provider = prev_provider
-            if prev_mode:
-                try:
-                    self.voice.input_mode = prev_mode
-                    if hasattr(self.voice, "_sync_capture_mode"):
-                        self.voice._sync_capture_mode()
-                    restored_mode = prev_mode
-                except Exception:
-                    pass
-
-        self._cloud_asr_test_prev_provider = ""
-        self._cloud_asr_test_prev_input_mode = ""
-        self._cloud_asr_test_prev_mic_index = None
-        self._cloud_asr_test_prev_mic_hint = ""
         return {
             "ok": True,
-            "restored_provider": restored_provider,
-            "restored_mode": restored_mode,
+            "restored_provider": None,
+            "restored_mode": None,
         }
 
     def poll_cloud_asr_test_transcripts(self, limit=40):
-        if not self.cloud_asr_test_enabled:
-            return []
-        state = self.voice.get_tab_audio_stream_state() if hasattr(self.voice, "get_tab_audio_stream_state") else {}
-        runtime_provider = str((state or {}).get("provider") or getattr(settings, "VOICE_PYTHON_ASR_PROVIDER", "unknown") or "unknown")
-        runtime_type = str((state or {}).get("providerType") or "unknown")
-        if hasattr(self.voice, "poll_tab_audio_stream_transcripts"):
-            try:
-                items = self.voice.poll_tab_audio_stream_transcripts() or []
-            except Exception:
-                items = []
-        else:
-            items = []
-
-        for item in items:
-            text = str(item.get("text") or "").strip()
-            if not text:
-                continue
-            self.cloud_asr_test_log.appendleft(
-                {
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "text": text,
-                    "lang": str(item.get("lang") or ""),
-                    "source": str(item.get("source") or "python_loopback"),
-                    "provider": runtime_provider,
-                    "provider_type": runtime_type,
-                }
-            )
-
-        try:
-            n = max(1, int(limit or 40))
-        except Exception:
-            n = 40
-        return list(self.cloud_asr_test_log)[:n]
+        return []
 
     def get_cloud_asr_test_status(self):
-        if hasattr(self.voice, "get_tab_audio_stream_state"):
-            state = self.voice.get_tab_audio_stream_state() or {}
-        else:
-            state = self.voice.get_state() if hasattr(self.voice, "get_state") else {}
         return {
-            "enabled": bool(self.cloud_asr_test_enabled),
-            "url": self.cloud_asr_test_url,
-            "running": bool((state or {}).get("running", False)),
-            "error": str((state or {}).get("error") or ""),
-            "capture_mode": "tab_media_stream",
-            "device_name": "browser_media_stream",
-            "provider": str((state or {}).get("provider") or "dashscope_funasr"),
-            "provider_type": str((state or {}).get("providerType") or "cloud"),
-            "provider_error": str((state or {}).get("providerError") or ""),
-            "last_text": str((state or {}).get("lastText") or ""),
+            "enabled": False,
+            "url": "",
+            "running": False,
+            "error": "cloud_asr_test_removed",
+            "capture_mode": "web_speech",
+            "device_name": "",
+            "provider": "browser_web_speech",
+            "provider_type": "cloud",
+            "provider_error": "",
+            "last_text": "",
         }
 
     def connect_mock_shop(self, view=None):

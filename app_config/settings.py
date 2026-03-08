@@ -266,7 +266,7 @@ PIN_UNPIN_FORCE_FIXED_ROW_CLICK = os.getenv("PIN_UNPIN_FORCE_FIXED_ROW_CLICK", "
 # link_index 为空时是否允许执行 pin/unpin：默认必须提供序号，避免误点。
 PIN_UNPIN_REQUIRE_LINK_INDEX = os.getenv("PIN_UNPIN_REQUIRE_LINK_INDEX", "true").lower() in ("1", "true", "yes", "on")
 # pin/unpin 在 OCR 锚点链路失败时，是否允许一次 DOM 索引兜底执行（建议开启，避免 OCR 波动导致动作直接失败）。
-PIN_UNPIN_DOM_RESCUE_ENABLED = os.getenv("PIN_UNPIN_DOM_RESCUE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+PIN_UNPIN_DOM_RESCUE_ENABLED = os.getenv("PIN_UNPIN_DOM_RESCUE_ENABLED", "false").lower() in ("1", "true", "yes", "on")
 PIN_UNPIN_DOM_RESCUE_REASONS = _split_csv_env(
     "PIN_UNPIN_DOM_RESCUE_REASONS",
     "ocr_target_not_found_after_scroll,ocr_target_not_found,ocr_no_lines,ocr_unavailable,ocr_rect_invalid,non_operable_page_before_click_shop_dashboard_required",
@@ -329,11 +329,9 @@ OPS_LLM_NAVIGATION_SCROLL_COOLDOWN_SECONDS = float(os.getenv("OPS_LLM_NAVIGATION
 OPS_LLM_NAVIGATION_SCROLL_PIXELS = int(os.getenv("OPS_LLM_NAVIGATION_SCROLL_PIXELS", "180"))
 
 # 网页信息读取模式：
-# - dom: 主要依赖 DOM 信息读取
-# - ocr_hybrid: 优先 OCR（文本+图片特征）读取，必要时回退 DOM
 # - ocr_only: 严格 OCR 信息读取（页面上下文/弹幕抽取/动作回执均不读取 DOM 文本）
 # - screen_ocr: 纯屏幕 OCR 信息读取（完全不读取浏览器 DOM 文本，浏览器仅作为被观察画面）
-WEB_INFO_SOURCE_MODE = os.getenv("WEB_INFO_SOURCE_MODE", "ocr_only").strip().lower()
+WEB_INFO_SOURCE_MODE = os.getenv("WEB_INFO_SOURCE_MODE", "screen_ocr").strip().lower()
 OCR_CHAT_MAX_MESSAGES = int(os.getenv("OCR_CHAT_MAX_MESSAGES", "6"))
 SCREEN_CAPTURE_MONITOR_INDEX = int(os.getenv("SCREEN_CAPTURE_MONITOR_INDEX", "1"))
 # screen_ocr 弹幕固定区域裁剪（相对整屏比例，优先用于聊天抓取）
@@ -361,11 +359,8 @@ SCREEN_OCR_CHAT_ROI_DEBUG_MAX_FILES = int(os.getenv("SCREEN_OCR_CHAT_ROI_DEBUG_M
 
 # 语音口令监听（物理听到主播说话）
 # 模式：
-# - python_asr: 本地 Python 麦克风采集 + ASR（默认，依赖系统麦克风权限，不依赖 TikTok 网页权限）
-# - system_loopback_asr: 本机系统回采（浏览器播放音频）+ ASR（需配置回采设备，如 BlackHole/Stereo Mix/VB-CABLE）
-# - tab_audio_asr / system_audio_asr: 直接抓取当前页面播放器音频流（不录屏、不录麦）
-# - web_speech: 浏览器 Web Speech API（依赖 TikTok 网页权限）
-VOICE_COMMAND_INPUT_MODE = os.getenv("VOICE_COMMAND_INPUT_MODE", "python_asr").strip().lower()
+# - web_speech: 浏览器 Web Speech API（云端识别，依赖 TikTok 网页权限）
+VOICE_COMMAND_INPUT_MODE = os.getenv("VOICE_COMMAND_INPUT_MODE", "web_speech").strip().lower()
 VOICE_COMMAND_ENABLED = os.getenv("VOICE_COMMAND_ENABLED", "false").lower() in ("1", "true", "yes", "on")
 VOICE_COMMAND_POLL_INTERVAL_SECONDS = float(os.getenv("VOICE_COMMAND_POLL_INTERVAL_SECONDS", "0.6"))
 VOICE_COMMAND_COOLDOWN_SECONDS = int(os.getenv("VOICE_COMMAND_COOLDOWN_SECONDS", "6"))
@@ -377,8 +372,8 @@ VOICE_COMMAND_FALLBACK_LANGUAGES = _split_csv_env("VOICE_COMMAND_FALLBACK_LANGUA
 VOICE_COMMAND_CROSS_LANGUAGE_ENABLED = os.getenv("VOICE_COMMAND_CROSS_LANGUAGE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 VOICE_COMMAND_CROSS_LANGUAGE_ORDER = _split_csv_env("VOICE_COMMAND_CROSS_LANGUAGE_ORDER", "zh-CN,en-US")
 VOICE_COMMAND_MAX_LANGS = int(os.getenv("VOICE_COMMAND_MAX_LANGS", "2"))
-# provider: whisper_local / dashscope_funasr / hybrid_local_cloud / auto / google / sphinx
-VOICE_PYTHON_ASR_PROVIDER = os.getenv("VOICE_PYTHON_ASR_PROVIDER", "whisper_local").strip().lower()
+# 兼容旧配置字段；cloud-only 运行时不再依赖本地 Python ASR provider。
+VOICE_PYTHON_ASR_PROVIDER = os.getenv("VOICE_PYTHON_ASR_PROVIDER", "google").strip().lower()
 # dashscope_funasr 仅云上模式时，强制走系统回采（loopback），不走本地实体麦克风。
 VOICE_DASHSCOPE_FORCE_LOOPBACK = os.getenv("VOICE_DASHSCOPE_FORCE_LOOPBACK", "true").lower() in ("1", "true", "yes", "on")
 VOICE_ASR_ALLOW_GOOGLE_FALLBACK = os.getenv("VOICE_ASR_ALLOW_GOOGLE_FALLBACK", "false").lower() in ("1", "true", "yes", "on")
@@ -423,12 +418,12 @@ VOICE_COMMAND_WAKE_WORDS = _split_csv_lower_env(
 # 是否强制要求唤醒词；关闭时“明确命令”可直接触发（更稳）
 VOICE_STRICT_WAKE_WORD = os.getenv("VOICE_STRICT_WAKE_WORD", "false").lower() in ("1", "true", "yes", "on")
 
-# 本地优先模式：仅在用户未显式配置对应项时应用默认覆盖。
+# 本地优先模式：当前保留给 embedding 使用；语音与 OCR 已切换到云端优先。
 if LOCAL_FIRST_MODE:
     if "VOICE_COMMAND_INPUT_MODE" not in os.environ:
-        VOICE_COMMAND_INPUT_MODE = "python_asr"
+        VOICE_COMMAND_INPUT_MODE = "web_speech"
     if "VOICE_PYTHON_ASR_PROVIDER" not in os.environ:
-        VOICE_PYTHON_ASR_PROVIDER = "whisper_local"
+        VOICE_PYTHON_ASR_PROVIDER = "google"
     if "VOICE_ASR_ALLOW_GOOGLE_FALLBACK" not in os.environ:
         VOICE_ASR_ALLOW_GOOGLE_FALLBACK = False
     if "VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK" not in os.environ:
@@ -437,6 +432,19 @@ if LOCAL_FIRST_MODE:
         EMBEDDING_LOCAL_FILES_ONLY = True
     if "EMBEDDING_ENABLE_ONLINE_FALLBACK" not in os.environ:
         EMBEDDING_ENABLE_ONLINE_FALLBACK = False
+
+# Qwen OCR（DashScope HTTP，高精识别 + 坐标）
+QWEN_OCR_ENABLED = os.getenv("QWEN_OCR_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+QWEN_OCR_API_KEY = os.getenv("QWEN_OCR_API_KEY", os.getenv("DASHSCOPE_API_KEY", "")).strip()
+QWEN_OCR_MODEL = os.getenv("QWEN_OCR_MODEL", "qwen-vl-ocr-latest").strip()
+QWEN_OCR_BASE_URL = os.getenv(
+    "QWEN_OCR_BASE_URL",
+    "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+).strip()
+QWEN_OCR_ENABLE_ROTATE = os.getenv("QWEN_OCR_ENABLE_ROTATE", "false").lower() in ("1", "true", "yes", "on")
+QWEN_OCR_MIN_PIXELS = int(os.getenv("QWEN_OCR_MIN_PIXELS", str(32 * 32 * 3)))
+QWEN_OCR_MAX_PIXELS = int(os.getenv("QWEN_OCR_MAX_PIXELS", str(32 * 32 * 8192)))
+QWEN_OCR_TIMEOUT_SECONDS = float(os.getenv("QWEN_OCR_TIMEOUT_SECONDS", "12"))
 
 # LLM 触发策略：仅对“问题类/咨询类”弹幕调用 LLM，避免成本和刷屏
 REPLY_TRIGGER_KEYWORDS = [

@@ -12,7 +12,7 @@ class VisionAgent:
     def __init__(self, port=settings.BROWSER_PORT):
         self.port = port
         self.page = None
-        self.info_source_mode = self._normalize_info_source_mode(getattr(settings, "WEB_INFO_SOURCE_MODE", "ocr_hybrid"))
+        self.info_source_mode = self._normalize_info_source_mode(getattr(settings, "WEB_INFO_SOURCE_MODE", "screen_ocr"))
         self.ocr_reader = PageOCRReader()
         self.last_message_ids = set()
         self.last_reconnect_at = 0.0
@@ -51,9 +51,9 @@ class VisionAgent:
 
     def _normalize_info_source_mode(self, mode):
         mode = str(mode or "").strip().lower()
-        if mode in {"dom", "ocr_hybrid", "ocr_only", "screen_ocr"}:
+        if mode in {"ocr_only", "screen_ocr"}:
             return mode
-        return "ocr_hybrid"
+        return "screen_ocr"
 
     def set_info_source_mode(self, mode):
         self.info_source_mode = self._normalize_info_source_mode(mode)
@@ -63,7 +63,7 @@ class VisionAgent:
         return self.info_source_mode
 
     def _is_ocr_info_enabled(self):
-        return self.info_source_mode in {"ocr_hybrid", "ocr_only", "screen_ocr"}
+        return self.info_source_mode in {"ocr_only", "screen_ocr"}
 
     def _is_ocr_only_info_mode(self):
         return self.info_source_mode == "ocr_only"

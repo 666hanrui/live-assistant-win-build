@@ -25,15 +25,15 @@
 
 1. 弹幕感知：实时抓取新弹幕，去重，过滤系统噪声。
 2. 回复决策：关键词优先，问题类再走知识库/LLM，带多级去重与冷却。
-3. 运营执行：DOM 优先 + 回执校验，避免“点了但没生效”。
-4. 语音触发：本地麦克风采集 + Python ASR（可选 web speech），支持中英文口令。
+3. 运营执行：OCR 视觉执行 + 回执校验，避免“点了但没生效”。
+4. 语音触发：浏览器 Web Speech，支持中英文口令。
 5. 数据分析：弹幕事件持续落盘，自动生成日报与周报，并在控制台图表展示。
 6. 上线交付：支持 Windows EXE 打包与开箱运行。
 
 ### 1.3 当前默认策略（非常重要）
 
-- 本地优先（`LOCAL_FIRST_MODE=true`）：优先走本地 ASR、本地 Embedding，减少云依赖。
-- 语音默认模式：`python_asr`（系统麦克风权限）而不是网页权限模式。
+- 本地优先（`LOCAL_FIRST_MODE=true`）：主要影响本地 Embedding 与离线回退，不再影响语音/OCR 主链路。
+- 语音默认模式：`web_speech`。
 - 统一语言输出：回复/暖场/知识库回答都统一按“统一语言”输出。
 
 ---
@@ -80,21 +80,18 @@ flowchart LR
 ├── agents/
 │   ├── vision_agent.py           # 浏览器连接、标签页评分、弹幕抓取
 │   ├── operations_agent.py       # 发消息、置顶/取消置顶/秒杀动作 + 回执校验
-│   ├── voice_command_agent.py    # Python ASR/Web Speech 双模式
+│   ├── voice_command_agent.py    # 浏览器 Web Speech 语音口令
 │   ├── knowledge_agent.py        # RAG检索、知识导入、统一语言输出
 │   ├── analytics_agent.py        # 事件分析、日报周报、图表数据
 │   └── atmosphere_agent.py       # 关键词回复
 ├── scripts/
 │   ├── dashboard_service.py      # 控制台服务启停/重启/日志
-│   ├── voice_stress_pack.py      # 语音离线压测 + 日志复盘
-│   ├── loopback_asr_real_test.py # 回采模式真实链路压测
-│   ├── voice_audio_runner.py     # 语音样本生成与播放（Win/mac）
 │   ├── mock_shop_server.py       # 本地 Mock 页面 HTTP 服务
 │   ├── build_windows_exe.ps1     # Windows 打包脚本
 │   └── build_windows_exe.bat
 ├── stress/
 │   ├── mock_shop/mock_tiktok_shop.html   # 高仿 TikTok Shop 助播页面
-│   └── voice/                             # 语音压测样本与脚本
+│   └── ...
 ├── docs/
 │   ├── USER_GUIDE.md
 │   └── WINDOWS_EXE_BUILD.md
@@ -117,13 +114,15 @@ flowchart LR
 - Chrome 或 Edge（支持 remote debugging）
 - macOS / Windows（代码已做双平台兼容）
 
-### 4.2 可选依赖（本地语音增强）
+### 4.2 运行依赖说明
 
-- `openai-whisper`
-- `pocketsphinx`
-- `soundfile`
-- Windows：`PyAudio`
-- macOS：建议安装 `portaudio`
+当前主链路固定为：
+
+- 浏览器语音：`web_speech`
+- 页面识别：划定区域 `screen_ocr`
+- OCR Provider：Qwen 云端 OCR
+
+无需额外安装本地 ASR / 本地 OCR 运行时。
 
 ---
 
@@ -148,7 +147,7 @@ python -m pip install -U pip
 python -m pip install -r requirements.txt
 ```
 
-若要尽量本地化（推荐）：
+如需额外离线工具依赖，可选安装：
 
 ```bash
 pip install -r requirements.txt -r requirements-local.txt
@@ -248,7 +247,7 @@ Windows CMD：
 ## 8. 控制台操作流程（建议按此顺序）
 
 1. 左侧点击“连接浏览器”或“启动监听”（会自动连）。
-2. 点击“申请麦克风权限”（Python ASR 模式是系统权限，不是网页权限）。
+2. 点击“申请麦克风权限”（当前为浏览器网页权限链路）。
 3. 打开“启动监听”。
 4. 点击“运行系统自检”。
 5. 在“运行监控”观察：
@@ -292,29 +291,19 @@ Windows CMD：
 
 ## 11. 语音链路（最常见问题区）
 
-### 11.1 模式说明
-
-- `python_asr`（默认，推荐）：
-  - 本地麦克风采集 + Python ASR
-  - 只依赖系统麦克风权限
-  - 不依赖 TikTok 网页的麦克风站点权限
-
-- `system_loopback_asr`（本机直采网页声音）：
-  - 从系统回采输入设备读取浏览器播放音频（如 BlackHole/Stereo Mix/VB-CABLE）
-  - 不走物理麦克风
-  - 仍走 Python ASR 命令解析链路
+### 11.1 当前语音模式
 
 - `web_speech`：
   - 浏览器 Web Speech API
   - 依赖当前网页安全上下文和站点授权
+  - 当前代码库已移除本地 ASR / loopback / tab-audio 主链路
 
-### 11.2 ASR Provider
+### 11.2 当前 OCR 模式
 
-- `whisper_local`：本地识别，稳定，适合中文
-- `dashscope_funasr`：阿里云 FunASR（实时云端识别，需配置 API Key）
-- `google`：在线识别，依赖网络
-- `auto`：按语言与本地优先策略动态链路
-- `sphinx`：离线英文兜底
+- `screen_ocr`：
+  - 划定区域截图
+  - 统一走 Qwen 云端 OCR
+  - 不读取 DOM 文本
 
 ### 11.3 语音口令识别与执行
 
@@ -371,13 +360,14 @@ Windows CMD：
 - 只在可操作页面执行（`shop_dashboard`）
 - 监控页（`shop_overview`）不执行运营动作
 
-### 12.2 DOM 优先 + 回执校验
+### 12.2 OCR 定位 + 回执校验
 
 每个动作采用：
 
-1. DOM 定位按钮并点击
-2. 轮询检测成功回执（toast/按钮状态/行状态）
-3. 必要时重连后重试一次
+1. 划定区域截图并识别按钮/行位置信息
+2. 执行物理点击或键鼠动作
+3. 轮询检测成功回执（toast/按钮状态/行状态）
+4. 必要时重连后重试一次
 
 避免“点击成功但实际上未生效”。
 
@@ -490,48 +480,10 @@ python scripts/mock_shop_server.py --host 127.0.0.1 --port 9100
 
 ---
 
-## 16. 语音压测（强烈建议上线前执行）
+## 16. 语音验证
 
-### 16.1 离线口令解析压测
-
-```bash
-python scripts/voice_stress_pack.py offline --profile quick --json
-python scripts/voice_stress_pack.py offline --profile all --json
-```
-
-### 16.2 日志复盘
-
-```bash
-python scripts/voice_stress_pack.py log-scan --minutes 30
-```
-
-### 16.3 macOS 语音样本生成/播放
-
-```bash
-bash stress/voice/macos_tts_generate.sh quick
-bash stress/voice/macos_playback_loop.sh quick 2 2
-```
-
-### 16.4 Windows 语音样本生成/播放
-
-```powershell
-powershell -ExecutionPolicy Bypass -File stress/voice/windows_tts_generate.ps1 -Profile quick
-powershell -ExecutionPolicy Bypass -File stress/voice/windows_playback_loop.ps1 -Rounds 2 -GapSeconds 2
-```
-
-### 16.5 控制台一键压测
-
-`📈 数据报表` 页底部：`🚀 一键跑本地语音压测`。
-
-### 16.6 回采模式真实链路压测（新增）
-
-```bash
-python scripts/loopback_asr_real_test.py --profile quick --mode system_loopback_asr --json
-python scripts/loopback_asr_real_test.py --profile quick --mode tab_audio_asr --json
-```
-
-- 真实覆盖：音频播放 -> loopback 回采 -> VAD/RMS 门控 -> ASR provider 链 -> `_local_push_text()` -> 命令执行链。
-- 输出报告：`data/reports/voice_stress/loopback_real_*.{md,json}`
+- 当前推荐直接在真实页面验证 `web_speech` 口令链路。
+- 控制台保留“口令链路自测（不走 ASR）”用于验证解析与页面动作。
 
 ### 16.7 全局功能测试（新增）
 
@@ -539,7 +491,7 @@ python scripts/loopback_asr_real_test.py --profile quick --mode tab_audio_asr --
 python scripts/global_feature_test.py --profile full
 ```
 
-- `full`：强制覆盖 EXE 启动链路、Mock 联调、语音链路、运营动作、知识库、报表等核心功能，并包含 loopback 真实链路压测。
+- `full`：强制覆盖 EXE 启动链路、Mock 联调、语音链路、运营动作、知识库、报表等核心功能。
 - `offline`：仅离线验证（不跑浏览器与麦克风端到端）。
 
 输出报告：
@@ -557,13 +509,11 @@ python scripts/global_feature_test.py --profile full
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1
 ```
 
-若需将本地模型一并打包并安装本地增强依赖：
+若需将本地 Embedding 模型一并打包：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
-  -IncludeLocalDeps `
-  -EmbeddingModelDir "D:\models\embedding_model" `
-  -WhisperModelDir "D:\models\whisper_cache"
+  -EmbeddingModelDir "D:\models\embedding_model"
 ```
 
 产物：
@@ -573,12 +523,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 - `dist/AI_Live_Assistant/run_assistant_silent.vbs`（无控制台窗口）
 
 打包脚本会优先复制根目录 `.env`（若不存在则复制 `.env.example`），并按配置自动带入模型目录。
-同时会在发布包内 `.env` 缺失时补齐语音回采默认项（`VOICE_COMMAND_INPUT_MODE=system_loopback_asr` 等），并补齐 FunASR 备用通道基础项（`VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK`/`VOICE_DASHSCOPE_MODEL`/`VOICE_DASHSCOPE_SAMPLE_RATE`）。
+同时会在发布包内 `.env` 缺失时补齐当前默认项：`VOICE_COMMAND_INPUT_MODE=web_speech`、`QWEN_OCR_ENABLED=true`、`QWEN_OCR_MODEL=qwen-vl-ocr-latest`。
 首次上线需确认运行时 `.env`：
 - EXE 目录可写时：`dist/AI_Live_Assistant/.env`
 - EXE 目录不可写时：`%LOCALAPPDATA%\AI_Live_Assistant\.env`
 
 详细见：`docs/WINDOWS_EXE_BUILD.md`
+
+GitHub Actions 自动发布：
+
+- 推送到 `main`：自动构建 Windows EXE 并上传 Actions artifact
+- 推送标签 `v*`：自动构建并发布 GitHub Release
+- 手动触发 `Build And Release Windows EXE`：可选择是否直接发布 Release
 
 ---
 
@@ -680,32 +636,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 - `VOICE_COMMAND_WAKE_WORDS`
 - `VOICE_STRICT_WAKE_WORD`
 
-### 18.8 Python ASR 专项
+### 18.8 语音与 OCR 专项
 
-- `VOICE_PYTHON_ASR_PROVIDER`
+- `VOICE_COMMAND_INPUT_MODE`
 - `VOICE_ASR_ALLOW_GOOGLE_FALLBACK`
-- `VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK`
-- `VOICE_PYTHON_ASR_QUEUE_MAX`
-- `VOICE_PYTHON_LISTEN_TIMEOUT_SECONDS`
-- `VOICE_PYTHON_PHRASE_TIME_LIMIT_SECONDS`
-- `VOICE_PYTHON_AMBIENT_ADJUST_SECONDS`
-- `VOICE_PYTHON_ENERGY_THRESHOLD`
-- `VOICE_PYTHON_DYNAMIC_ENERGY`
-- `VOICE_PYTHON_NO_TEXT_WARN_RMS`
-- `VOICE_PYTHON_MIC_DEVICE_INDEX`
-- `VOICE_PYTHON_MIC_DEVICE_NAME_HINT`
-- `VOICE_LOOPBACK_DEVICE_INDEX`
-- `VOICE_LOOPBACK_DEVICE_NAME_HINT`
-- `VOICE_DASHSCOPE_API_KEY`
-- `VOICE_DASHSCOPE_MODEL`
-- `VOICE_DASHSCOPE_SAMPLE_RATE`
-- `VOICE_DASHSCOPE_BASE_WEBSOCKET_API_URL`
-- `VOICE_DASHSCOPE_LANGUAGE_HINTS`
-- `VOICE_DASHSCOPE_ENABLE_PUNCTUATION`
-- `VOICE_DASHSCOPE_DISABLE_ITN`
-- `VOICE_WHISPER_MODEL`
-- `VOICE_WHISPER_DOWNLOAD_ROOT`
-- `VOICE_WHISPER_MAX_LANGS`
+- `QWEN_OCR_ENABLED`
+- `QWEN_OCR_API_KEY`
+- `QWEN_OCR_MODEL`
+- `QWEN_OCR_BASE_URL`
+- `QWEN_OCR_ENABLE_ROTATE`
+- `QWEN_OCR_TIMEOUT_SECONDS`
 
 ### 18.9 自动暖场与报表
 
@@ -723,11 +663,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 
 ```env
 LOCAL_FIRST_MODE=true
-VOICE_COMMAND_INPUT_MODE=python_asr
-VOICE_PYTHON_ASR_PROVIDER=whisper_local
-VOICE_WHISPER_MAX_LANGS=1
+VOICE_COMMAND_INPUT_MODE=web_speech
+QWEN_OCR_ENABLED=true
+QWEN_OCR_MODEL=qwen-vl-ocr-latest
 VOICE_ASR_ALLOW_GOOGLE_FALLBACK=false
-VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK=false
 EMBEDDING_LOCAL_FILES_ONLY=true
 EMBEDDING_ENABLE_ONLINE_FALLBACK=false
 MAIN_LOOP_BUSY_INTERVAL_SECONDS=0.16
@@ -861,11 +800,9 @@ MAX_MESSAGES_PER_CYCLE=3
 - [ ] `.env` 已配置，且 `LOCAL_FIRST_MODE=true`
 - [ ] 浏览器调试端口正常
 - [ ] 控制台显示：浏览器已连接
-- [ ] 麦克风录音测试有 RMS
-- [ ] 语音口令可触发置顶/取消置顶/秒杀上架
+- [ ] 浏览器麦克风权限已授权
+- [ ] `web_speech` 语音口令可触发置顶/取消置顶/秒杀上架
 - [ ] 报表页可刷新并能生成日报
-- [ ] `scripts/voice_stress_pack.py offline --profile quick --json` 通过
-- [ ] `scripts/loopback_asr_real_test.py --profile quick --mode system_loopback_asr --json` 通过
 - [ ] `scripts/global_feature_test.py --profile full` 通过
 - [ ] 自检通过率满足预期
 

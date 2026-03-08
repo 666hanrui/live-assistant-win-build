@@ -1,8 +1,6 @@
 param(
   [switch]$Clean = $true,
-  [switch]$IncludeLocalDeps = $false,
   [string]$EmbeddingModelDir = "",
-  [string]$WhisperModelDir = "",
   [string[]]$ExtraModelDirs = @()
 )
 
@@ -322,14 +320,9 @@ if ($UseHostPythonDirectly) {
 Write-Host "[2/6] Installing runtime dependencies..."
 Assert-SourceMarkers $Root
 Invoke-External "Upgrade pip toolchain" $VenvPython @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
-Try-PreinstallWheel $VenvPython "PyAudio==0.2.14"
-Try-PreinstallWheel $VenvPython "pocketsphinx==5.0.4"
 Try-PreinstallWheel $VenvPython "opencv-python==4.10.0.84"
 Invoke-External "Install requirements.txt" $VenvPython @("-m", "pip", "install", "-r", "requirements.txt")
-if ($IncludeLocalDeps) {
-  Invoke-External "Install requirements-local.txt" $VenvPython @("-m", "pip", "install", "-r", "requirements-local.txt")
-}
-Invoke-External "Preflight local OCR provider" $VenvPython @(
+Invoke-External "Preflight Qwen OCR provider" $VenvPython @(
   "-c",
   "from utils.ocr_engine import LocalOcrEngine as E; e=E(); print('ocr_provider=', e.provider, 'available=', e.available(), 'error=', e.last_error); import sys; sys.exit(0 if e.available() else 1)"
 )
@@ -508,17 +501,13 @@ if (!(Ensure-WritableFile $EnvTarget)) {
   throw "Packaged .env is not writable: $EnvTarget"
 }
 
-# 确保发布包内包含语音回采模式所需关键配置（仅在缺失时补默认值，不覆盖用户已有设置）。
+# 确保发布包内包含当前云端 OCR + 浏览器语音链路所需关键配置（仅在缺失时补默认值，不覆盖用户已有设置）。
 Ensure-EnvDefault $EnvTarget "VOICE_COMMAND_ENABLED" "true"
-Ensure-EnvDefault $EnvTarget "VOICE_COMMAND_INPUT_MODE" "system_loopback_asr"
-Ensure-EnvDefault $EnvTarget "VOICE_PYTHON_ASR_PROVIDER" "whisper_local"
+Ensure-EnvDefault $EnvTarget "VOICE_COMMAND_INPUT_MODE" "web_speech"
 Ensure-EnvDefault $EnvTarget "VOICE_ASR_ALLOW_GOOGLE_FALLBACK" "false"
-Ensure-EnvDefault $EnvTarget "VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK" "false"
-Ensure-EnvDefault $EnvTarget "VOICE_DASHSCOPE_MODEL" "paraformer-realtime-v2"
-Ensure-EnvDefault $EnvTarget "VOICE_DASHSCOPE_SAMPLE_RATE" "16000"
-Ensure-EnvDefault $EnvTarget "VOICE_WHISPER_MAX_LANGS" "1"
-Ensure-EnvDefault $EnvTarget "VOICE_LOOPBACK_DEVICE_INDEX" "-1"
-Ensure-EnvDefault $EnvTarget "VOICE_LOOPBACK_DEVICE_NAME_HINT" "blackhole,stereo mix,loopback,vb-cable"
+Ensure-EnvDefault $EnvTarget "QWEN_OCR_ENABLED" "true"
+Ensure-EnvDefault $EnvTarget "QWEN_OCR_MODEL" "qwen-vl-ocr-latest"
+Ensure-EnvDefault $EnvTarget "QWEN_OCR_BASE_URL" "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 
 $ModelsDir = Join-Path $BundleDir "models"
 New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
@@ -574,22 +563,15 @@ function Ensure-ModelInBundle([string]$RawPath, [string]$DefaultName, [string]$E
 if ($EmbeddingModelDir) {
   Ensure-ModelInBundle $EmbeddingModelDir "embedding_model" "EMBEDDING_MODEL_NAME" | Out-Null
 }
-if ($WhisperModelDir) {
-  Ensure-ModelInBundle $WhisperModelDir "whisper_cache" "VOICE_WHISPER_DOWNLOAD_ROOT" | Out-Null
-}
 
 $envEmbeddingModel = Get-EnvValue $EnvTarget "EMBEDDING_MODEL_NAME"
 $envEmbeddingCache = Get-EnvValue $EnvTarget "EMBEDDING_CACHE_DIR"
-$envWhisperRoot = Get-EnvValue $EnvTarget "VOICE_WHISPER_DOWNLOAD_ROOT"
 
 if ($envEmbeddingModel) {
   Ensure-ModelInBundle $envEmbeddingModel "embedding_model" "EMBEDDING_MODEL_NAME" | Out-Null
 }
 if ($envEmbeddingCache) {
   Ensure-ModelInBundle $envEmbeddingCache "embedding_cache" "EMBEDDING_CACHE_DIR" | Out-Null
-}
-if ($envWhisperRoot) {
-  Ensure-ModelInBundle $envWhisperRoot "whisper_cache" "VOICE_WHISPER_DOWNLOAD_ROOT" | Out-Null
 }
 
 $idx = 0

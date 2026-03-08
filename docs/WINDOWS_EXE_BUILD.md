@@ -16,13 +16,11 @@
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1
 ```
 
-若需要把本地模型和本地增强依赖一并打进发布包，可使用：
+若需要把本地 Embedding 模型一并打进发布包，可使用：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
-  -IncludeLocalDeps `
-  -EmbeddingModelDir "D:\models\embedding_model" `
-  -WhisperModelDir "D:\models\whisper_cache"
+  -EmbeddingModelDir "D:\models\embedding_model"
 ```
 
 或双击：
@@ -37,6 +35,26 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 5. 在 `dist/AI_Live_Assistant/` 下生成可运行目录
 6. 自动复制配置文件：优先复制根目录 `.env`，否则复制 `.env.example`
 7. 自动包含模型目录（会根据 `.env` 中模型路径和命令行参数复制到 `dist/AI_Live_Assistant/models/`）
+
+## GitHub Actions 自动发布
+
+工作流文件：
+
+`/.github/workflows/build-win-exe.yml`
+
+触发规则：
+
+1. 推送到 `main`
+   - 自动构建 Windows EXE
+   - 自动上传 zip 包到 Actions artifact
+   - 不创建 GitHub Release
+2. 推送标签 `v*`
+   - 自动构建 Windows EXE
+   - 自动打 zip
+   - 自动创建或更新对应 GitHub Release
+3. 手动触发 `workflow_dispatch`
+   - 可选 `publish_release=true`
+   - 发布时需要提供 `tag_name`
 
 ## 运行
 进入：
@@ -61,41 +79,31 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
 3. 根据机器修改浏览器路径（如需）：
    - `CHROME_EXECUTABLE=...`
 
-## 音频输入说明（麦克风/系统回采）
-- 当前语音模式支持：
-  - `python_asr`：物理麦克风采集
-  - `system_loopback_asr`：系统回采（直接识别浏览器播放声音）
+## 语音与 OCR 配置
+- 当前语音链路固定为浏览器 `web_speech`
+- 当前 OCR 链路固定为 Qwen 云端 OCR
 - EXE 打包时会在 `dist/AI_Live_Assistant/.env` 缺省补齐：
-  - `VOICE_COMMAND_INPUT_MODE=system_loopback_asr`
-  - `VOICE_LOOPBACK_DEVICE_INDEX=-1`
-  - `VOICE_LOOPBACK_DEVICE_NAME_HINT=blackhole,stereo mix,loopback,vb-cable`
-  - `VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK=false`
-  - `VOICE_DASHSCOPE_MODEL=paraformer-realtime-v2`
-  - `VOICE_DASHSCOPE_SAMPLE_RATE=16000`
-- 若要启用阿里云 FunASR 兜底，再补充：
-  - `VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK=true`
-  - `VOICE_DASHSCOPE_API_KEY=<你的阿里云 Key>`
+  - `VOICE_COMMAND_INPUT_MODE=web_speech`
+  - `QWEN_OCR_ENABLED=true`
+  - `QWEN_OCR_MODEL=qwen-vl-ocr-latest`
+  - `QWEN_OCR_BASE_URL=https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation`
 - 若语音不可用，先检查：
-  1) Windows 隐私设置中的麦克风/桌面应用音频权限
-  2) 是否安装并正确路由回采设备（Stereo Mix / VB-CABLE / BlackHole 等）
+  1) Windows 隐私设置中的麦克风权限
+  2) 浏览器站点权限中的麦克风授权
   3) 运行时 `.env` 中 `VOICE_COMMAND_ENABLED=true`
+  4) 运行时 `.env` 中 `QWEN_OCR_API_KEY` 已填写
 
 ## 常见问题
-1. `unsupported / missing_speech_recognition`
-   - 说明依赖未安装完全，重新运行打包脚本。
+1. `web_speech_unavailable`
+   - 说明浏览器 Web Speech 不可用，优先检查 Chrome/Edge 版本和站点权限。
 
-2. `missing_pyaudio`
-   - 语音本地采集需要 PyAudio，已在 `requirements.txt` 的 Windows 条件依赖中声明。
-   - 若网络/镜像异常导致安装失败，手动执行：
-     - `.\.venv\Scripts\python.exe -m pip install PyAudio`
-
-3. 启动后访问不到控制台
+2. 启动后访问不到控制台
    - 检查端口占用：`8501`
    - 若双击无反应，先运行 `run_assistant_debug.bat` 查看日志。
    - 若是源码模式运行，再使用：
      - `python scripts/dashboard_service.py restart --force-port`
 
-4. 页面提示 `Connection error / Streamlit server is not responding`
+3. 页面提示 `Connection error / Streamlit server is not responding`
    - 该提示通常是本地 `127.0.0.1:<端口>` 未连通，不是外网故障。
    - 先运行 `run_assistant_debug.bat`，检查：
      - `exe_boot.log`
@@ -103,6 +111,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1 `
    - 确认 `.env` 中 `DASHBOARD_HOST` 与实际访问地址一致（推荐 `127.0.0.1`）。
    - 若机器较慢可增大：`DASHBOARD_OPEN_BROWSER_TIMEOUT_SECONDS=90`
 
-5. 启动慢
+4. 启动慢
    - 已默认启用 Embedding 本地优先 + 快速降级策略；
    - 首次加载仍可能受机器性能影响。

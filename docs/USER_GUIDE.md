@@ -3,19 +3,16 @@
 ## 1. 使用前准备
 
 - 安装依赖：`pip install -r requirements.txt`
-- 本地优先（推荐）：`pip install -r requirements.txt -r requirements-local.txt`
 - 配置环境变量：在项目根目录准备 `.env`
 - 启动浏览器调试模式（Chrome/Edge）并登录 TikTok 直播页（系统会按 Chrome -> Edge 自动回退）
 
-建议在 `.env` 开启本地优先：
+建议在 `.env` 确认当前固定链路：
 
-- `LOCAL_FIRST_MODE=true`
-- `VOICE_COMMAND_INPUT_MODE=python_asr`
-- `VOICE_PYTHON_ASR_PROVIDER=whisper_local`
+- `VOICE_COMMAND_INPUT_MODE=web_speech`
 - `VOICE_ASR_ALLOW_GOOGLE_FALLBACK=false`
-- `VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK=false`
-- `EMBEDDING_LOCAL_FILES_ONLY=true`
-- `EMBEDDING_ENABLE_ONLINE_FALLBACK=false`
+- `QWEN_OCR_ENABLED=true`
+- `QWEN_OCR_MODEL=qwen-vl-ocr-latest`
+- `QWEN_OCR_API_KEY=<你的密钥>`
 
 ## 2. 启动方式（推荐）
 
@@ -50,20 +47,19 @@
 
 ## 5. 语音功能说明
 
-当前支持“本地麦克风采集 + Python ASR”模式：
+当前只支持浏览器 `web_speech` 模式：
 
 - 需要系统麦克风权限
-- 不依赖 TikTok 网页的麦克风权限
-- 若语音状态异常，先检查系统默认输入设备是否存在
-- 推荐 `ASR Provider=whisper_local`，可减少云端语音请求
-- 若要阿里云兜底：设置 `VOICE_ASR_ALLOW_DASHSCOPE_FALLBACK=true` 并配置 `VOICE_DASHSCOPE_API_KEY`
+- 需要浏览器站点麦克风授权
+- 不再使用本地 Python ASR / loopback / tab audio
+- 若语音状态异常，优先检查浏览器权限与当前页面上下文
 
 常见状态解释：
 
 - `idle`：可用，等待输入
 - `running`：监听中
-- `denied/not-allowed`：系统权限未允许
-- `unsupported`：本地语音依赖缺失
+- `denied/not-allowed`：系统或浏览器权限未允许
+- `unsupported`：当前页面或浏览器不支持 Web Speech
 
 ## 6. 常见故障排查
 
@@ -97,7 +93,6 @@
 - 视觉调试：浏览器连接与页面元素识别
 - 场控调试：模拟弹幕触发完整链路
 - 数据报表：日报/周报生成与历史查看
-- 本地语音压测（一键）：Win/mac 一键执行离线校验、语音生成、播放与日志复盘
 - 全局功能测试：一条命令串行验证主链路能力并输出测试报告
 - 系统自检：一键检查关键链路
 
@@ -108,18 +103,8 @@ python scripts/global_feature_test.py --profile full
 ```
 
 - `full`：包含浏览器 + Mock + 麦克风能力检查，未通过即视为不可上线。
-- `full`：在 `VOICE_COMMAND_INPUT_MODE=system_loopback_asr/tab_audio_asr` 时，会额外执行回采真实链路压测。
 - `offline`：仅离线能力检查（适合本地快速回归）。
 - 报告目录：`data/reports/global_feature_test/`
-
-## 9. 回采模式真实链路压测（推荐）
-
-```bash
-python scripts/loopback_asr_real_test.py --profile quick --mode system_loopback_asr --json
-```
-
-- 覆盖路径：音频播放 -> loopback 回采 -> ASR -> `_local_push_text()` -> 命令执行链。
-- 报告目录：`data/reports/voice_stress/`
 
 ## 10. 数据与报告路径
 

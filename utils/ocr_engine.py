@@ -1,203 +1,36 @@
+import base64
+import json
 import time
+import urllib.error
+import urllib.request
 from typing import Dict, Tuple
 
 import cv2
 import numpy as np
 
+import app_config.settings as settings
+
 
 class LocalOcrEngine:
     """
-    本地 OCR 轻量封装（按可用性自动选择）：
-    1) rapidocr_onnxruntime
-    2) paddleocr
-    3) pytesseract
+    OCR 引擎统一接口。
+
+    历史上这里是本地 OCR provider 封装；当前已切换为 Qwen 云端 OCR，
+    继续保留类名以减少上层改动。
     """
 
     def __init__(self):
-        self.provider = None
-        self._runner = None
+        self.provider = "qwen_ocr"
         self.last_error = ""
-        self._init_provider()
-
-    def _init_provider(self):
-        attempt_errors = []
-        # rapidocr_onnxruntime
-        try:
-            from rapidocr_onnxruntime import RapidOCR  # type: ignore
-
-            engine = RapidOCR()
-
-            def _run_rapid(img_bgr):
-                result, _ = engine(img_bgr)
-                parts = []
-                lines = []
-                for item in result or []:
-                    if not item or len(item) < 2:
-                        continue
-                    box = item[0]
-                    text = str(item[1] or "").strip()
-                    score = float(item[2]) if len(item) > 2 and item[2] is not None else None
-                    if text:
-                        parts.append(text)
-                        rect = self._box_to_rect(box)
-                        if rect:
-                            lines.append({"text": text, "score": score, "rect": rect})
-                return {"text": "\n".join(parts), "lines": lines}
-
-            self.provider = "rapidocr"
-            self._runner = _run_rapid
-            self.last_error = ""
-            return
-        except Exception as e:
-            attempt_errors.append(f"rapidocr:{str(e)[:180]}")
-
-        # paddleocr
-        try:
-            from paddleocr import PaddleOCR  # type: ignore
-
-            engine = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
-
-            def _run_paddle(img_bgr):
-                out = engine.ocr(img_bgr, cls=True)
-                parts = []
-                lines = []
-                for block in out or []:
-                    for line in block or []:
-                        if not line or len(line) < 2:
-                            continue
-                        box = line[0]
-                        txt = ""
-                        score = None
-                        seg = line[1]
-                        if isinstance(seg, (list, tuple)) and seg:
-                            txt = str(seg[0] or "").strip()
-                            if len(seg) > 1:
-                                try:
-                                    score = float(seg[1])
-                                except Exception:
-                                    score = None
-                        else:
-                            txt = str(seg or "").strip()
-                        if txt:
-                            parts.append(txt)
-                            rect = self._box_to_rect(box)
-                            if rect:
-                                lines.append({"text": txt, "score": score, "rect": rect})
-                return {"text": "\n".join(parts), "lines": lines}
-
-            self.provider = "paddleocr"
-            self._runner = _run_paddle
-            self.last_error = ""
-            return
-        except Exception as e:
-            attempt_errors.append(f"paddleocr:{str(e)[:180]}")
-
-        # pytesseract
-        try:
-            import pytesseract  # type: ignore
-
-            def _run_tesseract(img_bgr):
-                rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-                data = pytesseract.image_to_data(rgb, lang="eng+chi_sim", output_type=pytesseract.Output.DICT)
-                n = len(data.get("text", []))
-                parts = []
-                lines = []
-                for i in range(n):
-                    txt = str((data.get("text") or [""])[i] or "").strip()
-                    if not txt:
-                        continue
-                    try:
-                        conf = float((data.get("conf") or ["-1"])[i])
-                    except Exception:
-                        conf = None
-                    x = int((data.get("left") or [0])[i])
-                    y = int((data.get("top") or [0])[i])
-                    w = int((data.get("width") or [0])[i])
-                    h = int((data.get("height") or [0])[i])
-                    if w <= 0 or h <= 0:
-                        continue
-                    parts.append(txt)
-                    lines.append({
-                        "text": txt,
-                        "score": conf / 100.0 if conf is not None and conf >= 0 else None,
-                        "rect": {"x1": x, "y1": y, "x2": x + w, "y2": y + h},
-                    })
-                return {"text": "\n".join(parts), "lines": lines}
-
-            self.provider = "tesseract"
-            self._runner = _run_tesseract
-            self.last_error = ""
-            return
-        except Exception as e:
-            attempt_errors.append(f"pytesseract:{str(e)[:180]}")
-            self.last_error = f"ocr_provider_unavailable:{'; '.join(attempt_errors)}"
+        self._available = bool(
+            getattr(settings, "QWEN_OCR_ENABLED", True)
+            and str(getattr(settings, "QWEN_OCR_API_KEY", "") or "").strip()
+        )
+        if not self._available:
+            self.last_error = "qwen_ocr_not_configured"
 
     def available(self) -> bool:
-        return bool(self._runner)
-
-    def _preprocess(self, img_bgr: np.ndarray) -> np.ndarray:
-        # 简单增强：灰度 + 自适应阈值，再转回 BGR
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        thr = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 8
-        )
-        return cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR)
-
-    @staticmethod
-    def _box_to_rect(box):
-        try:
-            if not box:
-                return None
-            pts = np.array(box, dtype=np.float32).reshape(-1, 2)
-            xs = pts[:, 0]
-            ys = pts[:, 1]
-            x1 = int(max(0, np.min(xs)))
-            y1 = int(max(0, np.min(ys)))
-            x2 = int(max(x1 + 1, np.max(xs)))
-            y2 = int(max(y1 + 1, np.max(ys)))
-            return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
-        except Exception:
-            return None
-
-    def recognize(self, img_bgr: np.ndarray, preprocess: bool = True) -> Dict:
-        if img_bgr is None or not isinstance(img_bgr, np.ndarray) or img_bgr.size == 0:
-            return {"ok": False, "text": "", "provider": self.provider or "", "error": "invalid_image"}
-        if not self.available():
-            return {
-                "ok": False,
-                "text": "",
-                "provider": self.provider or "",
-                "error": self.last_error or "ocr_provider_unavailable",
-            }
-
-        start = time.time()
-        try:
-            src = self._preprocess(img_bgr) if preprocess else img_bgr
-            raw = self._runner(src) or {}
-            if isinstance(raw, dict):
-                text = str(raw.get("text") or "").strip()
-                lines = raw.get("lines") or []
-            else:
-                text = str(raw or "").strip()
-                lines = []
-            return {
-                "ok": bool(text),
-                "text": text,
-                "lines": lines if isinstance(lines, list) else [],
-                "provider": self.provider or "",
-                "error": "" if text else "empty_text",
-                "elapsed_ms": int((time.time() - start) * 1000),
-            }
-        except Exception as e:
-            self.last_error = str(e)
-            return {
-                "ok": False,
-                "text": "",
-                "provider": self.provider or "",
-                "error": str(e),
-                "elapsed_ms": int((time.time() - start) * 1000),
-            }
+        return bool(self._available)
 
     @staticmethod
     def decode_png_bytes(png_bytes: bytes) -> Tuple[bool, np.ndarray]:
@@ -206,3 +39,189 @@ class LocalOcrEngine:
         arr = np.frombuffer(png_bytes, np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         return (img is not None), img
+
+    @staticmethod
+    def _location_to_rect(location) -> Dict:
+        if not isinstance(location, (list, tuple)) or len(location) < 8:
+            return {}
+        try:
+            xs = [float(location[i]) for i in range(0, len(location), 2)]
+            ys = [float(location[i]) for i in range(1, len(location), 2)]
+            x1 = int(max(0.0, min(xs)))
+            y1 = int(max(0.0, min(ys)))
+            x2 = int(max(x1 + 1, max(xs)))
+            y2 = int(max(y1 + 1, max(ys)))
+            return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _extract_words_info(payload: Dict):
+        try:
+            choices = (((payload or {}).get("output") or {}).get("choices") or [])
+            if not choices:
+                return []
+            message = (choices[0] or {}).get("message") or {}
+            content = message.get("content") or []
+            if not isinstance(content, list):
+                return []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                ocr_result = item.get("ocr_result") or {}
+                words_info = ocr_result.get("words_info") or []
+                if isinstance(words_info, list):
+                    return words_info
+        except Exception:
+            return []
+        return []
+
+    @staticmethod
+    def _build_lines(words_info) -> Dict:
+        parts = []
+        lines = []
+        for item in words_info or []:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or item.get("word") or "").strip()
+            if not text:
+                continue
+            rect = LocalOcrEngine._location_to_rect(item.get("location"))
+            if not rect:
+                continue
+            parts.append(text)
+            lines.append({"text": text, "score": None, "rect": rect})
+
+        lines.sort(
+            key=lambda line: (
+                float(((line or {}).get("rect") or {}).get("y1") or 0.0),
+                float(((line or {}).get("rect") or {}).get("x1") or 0.0),
+            )
+        )
+        return {"text": "\n".join(parts), "lines": lines}
+
+    @staticmethod
+    def _encode_png_data_uri(img_bgr: np.ndarray) -> str:
+        ok, buf = cv2.imencode(".png", img_bgr)
+        if not ok:
+            raise RuntimeError("png_encode_failed")
+        b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+        return f"data:image/png;base64,{b64}"
+
+    def _request_qwen_ocr(self, img_bgr: np.ndarray) -> Dict:
+        if not self.available():
+            raise RuntimeError(self.last_error or "qwen_ocr_not_available")
+
+        image_data_uri = self._encode_png_data_uri(img_bgr)
+        body = {
+            "model": str(getattr(settings, "QWEN_OCR_MODEL", "qwen-vl-ocr-latest") or "qwen-vl-ocr-latest"),
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "image": image_data_uri,
+                                "min_pixels": int(getattr(settings, "QWEN_OCR_MIN_PIXELS", 32 * 32 * 3) or (32 * 32 * 3)),
+                                "max_pixels": int(getattr(settings, "QWEN_OCR_MAX_PIXELS", 32 * 32 * 8192) or (32 * 32 * 8192)),
+                            },
+                            {"text": "OCR"},
+                        ],
+                    }
+                ]
+            },
+            "parameters": {
+                "temperature": 0,
+                "top_p": 0.01,
+                "result_format": "message",
+                "ocr_options": {
+                    "task": "advanced_recognition",
+                    "enable_rotate": bool(getattr(settings, "QWEN_OCR_ENABLE_ROTATE", False)),
+                },
+            },
+        }
+
+        req = urllib.request.Request(
+            str(getattr(settings, "QWEN_OCR_BASE_URL", "") or "").strip(),
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {str(getattr(settings, 'QWEN_OCR_API_KEY', '') or '').strip()}",
+            },
+            method="POST",
+        )
+        timeout = float(getattr(settings, "QWEN_OCR_TIMEOUT_SECONDS", 12.0) or 12.0)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+        return json.loads(raw) if raw else {}
+
+    def recognize(self, img_bgr: np.ndarray, preprocess: bool = True) -> Dict:
+        if img_bgr is None or not isinstance(img_bgr, np.ndarray) or img_bgr.size == 0:
+            return {
+                "ok": False,
+                "text": "",
+                "provider": self.provider,
+                "error": "invalid_image",
+            }
+        if not self.available():
+            return {
+                "ok": False,
+                "text": "",
+                "provider": self.provider,
+                "error": self.last_error or "qwen_ocr_not_configured",
+            }
+
+        start = time.time()
+        try:
+            src = img_bgr
+            if preprocess:
+                gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+                gray = cv2.GaussianBlur(gray, (3, 3), 0)
+                thr = cv2.adaptiveThreshold(
+                    gray,
+                    255,
+                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY,
+                    31,
+                    8,
+                )
+                src = cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR)
+
+            payload = self._request_qwen_ocr(src)
+            words_info = self._extract_words_info(payload)
+            parsed = self._build_lines(words_info)
+            text = str(parsed.get("text") or "").strip()
+            lines = parsed.get("lines") or []
+            if not text or not lines:
+                self.last_error = "qwen_ocr_empty_result"
+                return {
+                    "ok": False,
+                    "text": text,
+                    "lines": lines,
+                    "provider": self.provider,
+                    "error": self.last_error,
+                    "elapsed_ms": int((time.time() - start) * 1000),
+                }
+            self.last_error = ""
+            return {
+                "ok": True,
+                "text": text,
+                "lines": lines,
+                "provider": self.provider,
+                "error": "",
+                "elapsed_ms": int((time.time() - start) * 1000),
+            }
+        except urllib.error.HTTPError as e:
+            self.last_error = f"http_{getattr(e, 'code', 'error')}"
+        except urllib.error.URLError as e:
+            self.last_error = f"network_error:{e.reason}"
+        except Exception as e:
+            self.last_error = str(e)
+        return {
+            "ok": False,
+            "text": "",
+            "lines": [],
+            "provider": self.provider,
+            "error": self.last_error or "qwen_ocr_failed",
+            "elapsed_ms": int((time.time() - start) * 1000),
+        }

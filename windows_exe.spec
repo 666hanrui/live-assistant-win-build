@@ -30,10 +30,6 @@ datas += collect_data_files("altair")
 datas += collect_data_files("pydeck")
 datas += collect_data_files("pygments")
 datas += collect_data_files("tiktoken")
-try:
-    datas += collect_data_files("whisper")
-except Exception:
-    pass
 
 hiddenimports = [
     "dashboard",
@@ -44,7 +40,7 @@ hiddenimports = [
     "streamlit.runtime",
 ]
 
-for pkg in ("streamlit", "altair", "pydeck", "pygments", "tiktoken", "watchdog", "mss", "whisper", "rapidocr_onnxruntime", "onnxruntime"):
+for pkg in ("streamlit", "altair", "pydeck", "pygments", "tiktoken", "watchdog", "mss"):
     try:
         pkg_datas, pkg_bins, pkg_hidden = collect_all(pkg)
         datas += pkg_datas
@@ -62,14 +58,9 @@ for pkg in (
     "langchain_community",
     "langchain_openai",
     "chromadb",
-    "speech_recognition",
-    "dashscope",
     "DrissionPage",
     "openpyxl",
     "mss",
-    "whisper",
-    "rapidocr_onnxruntime",
-    "onnxruntime",
 ):
     try:
         hiddenimports.extend(collect_submodules(pkg))
