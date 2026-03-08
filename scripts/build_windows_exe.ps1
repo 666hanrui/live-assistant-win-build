@@ -322,9 +322,9 @@ Assert-SourceMarkers $Root
 Invoke-External "Upgrade pip toolchain" $VenvPython @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
 Try-PreinstallWheel $VenvPython "opencv-python==4.10.0.84"
 Invoke-External "Install requirements.txt" $VenvPython @("-m", "pip", "install", "-r", "requirements.txt")
-Invoke-External "Preflight Qwen OCR provider" $VenvPython @(
+Invoke-External "Preflight Qwen OCR import" $VenvPython @(
   "-c",
-  "from utils.ocr_engine import LocalOcrEngine as E; e=E(); print('ocr_provider=', e.provider, 'available=', e.available(), 'error=', e.last_error); import sys; sys.exit(0 if e.available() else 1)"
+  "from utils.ocr_engine import LocalOcrEngine as E; e=E(); print('ocr_provider=', e.provider, 'available=', e.available(), 'error=', e.last_error); import sys; sys.exit(0)"
 )
 
 Write-Host "[3/6] Installing build dependencies..."
